@@ -33,11 +33,29 @@ todas las conexiones.
 | Ruta | Descripción |
 |------|-------------|
 | `GET /` | Página del chat (`index.html` embebido). |
-| `GET /ws?nickname=<nombre>` | Upgrade a WebSocket. Cada frame de texto se reenvía como `<nickname>: <texto>`. Avisos: `<nickname> joined! 🎉` / `<nickname> left. 👋`. |
+| `GET /ws?nickname=<nombre>` | Upgrade a WebSocket. Entrada: cada frame es texto plano. Salida: cada frame es un sobre JSON (ver abajo). |
 
-Límites: mensajes de hasta 4 KiB y solo texto UTF-8 válido. Los frames binarios cierran la
-conexión con 1003 y el UTF-8 inválido con 1007. El nickname se recorta a 32 caracteres y, si
-viene vacío, se usa `Anonymous`.
+**Entrada (cliente → servidor):** texto plano UTF-8 de hasta 4096 bytes. Los mensajes en blanco
+se ignoran. Los frames binarios cierran la conexión con 1003 y el UTF-8 inválido con 1007.
+
+**Salida (servidor → clientes):** un sobre JSON por frame:
+
+```json
+{"type":"chat","from":"bob (2)","text":"hola","ts":1792684800123}
+```
+
+| `type`    | Cuándo | `text` |
+|-----------|--------|--------|
+| `welcome` | Solo al que se conecta, con su nickname final en `from`. | `""` |
+| `join`    | Alguien entró a la sala. | `""` |
+| `leave`   | Alguien salió de la sala. | `""` |
+| `chat`    | Mensaje de `from`, reenviado a todos. | el mensaje |
+
+`ts` es el momento del evento en Unix milisegundos.
+
+**Nicknames:** son únicos sin distinguir mayúsculas; si el nickname ya está en uso se agrega un
+sufijo ` (n)` (por ejemplo `bob (2)`). Se quitan los caracteres de control y los de dirección
+bidi, se recorta a 32 caracteres y, si queda vacío, se usa `Anonymous`.
 
 ## Arquitectura
 
@@ -46,6 +64,8 @@ cmd/chatroom/        main: router (gin), http.Server, señales, index.html embeb
 internal/chat/
   room.go            Room: hub que registra clientes y difunde mensajes
   client.go          Client: readPump / writePump por conexión
+  message.go         Mensaje JSON (type, from, text, ts) y su codificación
+  nickname.go        Normalización y unicidad de apodos
 ```
 
 Se usa el **patrón hub**:

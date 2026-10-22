@@ -5,12 +5,12 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 `verify-report.md` (rounds 1–2). Each group is a suggested future SDD change
 (`/sdd-new <name>`).
 
-## `structured-messages` (security + features foundation)
-- [ ] #10 JSON envelope `{type, from, text, ts}` so join/leave notices can't be spoofed by a
+## `structured-messages` (security + features foundation) — done, archived 2026-10-22
+- [x] #10 JSON envelope `{type, from, text, ts}` so join/leave notices can't be spoofed by a
       user typing "X joined! 🎉" or a nickname like "Admin".
-- [ ] Nickname charset rules: strip/reject control characters and bidi overrides (U+202E);
+- [x] Nickname charset rules: strip/reject control characters and bidi overrides (U+202E);
       decide whether to reject duplicate nicknames.
-- [ ] Drop empty / whitespace-only messages.
+- [x] Drop empty / whitespace-only messages.
 
 ## `rate-limiting` (DoS)
 - [ ] #11 Per-client token bucket in readPump.
@@ -23,7 +23,10 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] #15 Handle cancelled `prompt` (nickname "null").
 - [ ] #16 Check `readyState` before `send`; reconnect with backoff.
 - [ ] CSP header on `GET /` — requires moving the inline script / `onclick` to a hashed or
-      external script.
+      external script. Note: the page now also loads Google Fonts (needs `style-src`/`font-src`).
+- [ ] Inline images leak viewers' IPs: any user can send an https image URL and every other
+      browser fetches it (`IMAGE_URL` in `index.html`). Options: click-to-load, a host allowlist,
+      or a server-side proxy.
 
 ## `deps-cleanup`
 - [ ] #17 `go mod tidy` (gin and gorilla are marked `// indirect`).
@@ -46,6 +49,19 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] N6 Log 1003/1007 rejections with nickname.
 - [ ] N7 Assert CHAT-07 write deadline.
 
+## `nickname-polish` (deferred from `structured-messages` verify — low priority, friends-only chat)
+- [ ] M1 Invisible/format chars survive nickname cleanup (U+200B, U+FEFF, U+00AD, interior
+      NBSP/U+2028, fillers U+3164/U+2800) → look-alike `Bob​` or blank names. Same class as
+      homoglyphs; also blank-looking messages pass the blank filter (L2).
+- [ ] M2 `assignNickname` scans suffixes linearly inside `Run` (O(K²) with K same-name
+      clients); per-base next-suffix hint or attempt cap. Pairs with the max-clients cap.
+- [ ] L1 Join/leave notices concatenate the nickname inline; render it in its own element.
+- [ ] L4 Log close-frame reason with `%q` (peer-controlled text in logs).
+- [ ] L6 JSON escaping amplifies `<>&`/controls up to ~6× (consider `SetEscapeHTML(false)`).
+- [ ] Test polish: `nextChat` forbidden-join param is a no-op; forged-notice test without a
+      real `Bob`; `<-slow.registered` wait; saturation listener can be slow-dropped; keyed
+      `message{}` literals; rename `addRaw` → `handleFrame`.
+
 ## `chat-features` (after `structured-messages`)
 - [ ] Online user list.
 - [ ] Multiple rooms.
@@ -53,4 +69,6 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Typing indicator.
 
 ## Housekeeping
+- [ ] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
+      `127.0.0.1`; `index.html` already builds the URL from `location.host` (#13 partially done).
 - [ ] #20 Review `.claude.json` / `.claude/` for secrets before committing.

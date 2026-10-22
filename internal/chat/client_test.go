@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,31 +53,35 @@ func dialRaw(t *testing.T, srv *httptest.Server, nick string) *websocket.Conn {
 	return conn
 }
 
-// dial connects and waits for the client's own join notice, so it is known to
-// be registered with the room when dial returns.
-func dial(t *testing.T, srv *httptest.Server, nick string) *websocket.Conn {
+// dial connects and reads the welcome frame, so the client is known to be
+// registered with the room when dial returns. It returns the assigned nickname.
+func dial(t *testing.T, srv *httptest.Server, nick string) (*websocket.Conn, string) {
 	t.Helper()
 	conn := dialRaw(t, srv, nick)
-	readUntil(t, conn, nick+" joined! 🎉")
-	return conn
+	m := readMsg(t, conn)
+	if m.Type != typeWelcome {
+		t.Fatalf("first frame = %+v, want welcome", m)
+	}
+	return conn, m.From
 }
 
-// readText reads one message, failing the test on error or deadline.
-func readText(t *testing.T, conn *websocket.Conn) string {
+// readMsg reads and decodes one frame, failing the test on error or deadline.
+func readMsg(t *testing.T, conn *websocket.Conn) message {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(testDeadline))
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	return string(msg)
+	return decode(t, msg)
 }
 
-// readUntil skips messages until one equals want.
-func readUntil(t *testing.T, conn *websocket.Conn, want string) {
+// readUntil skips frames until one matches (typ, from, text); ts is ignored.
+func readUntil(t *testing.T, conn *websocket.Conn, typ, from, text string) {
 	t.Helper()
 	for {
-		if got := readText(t, conn); got == want {
+		m := readMsg(t, conn)
+		if m.Type == typ && m.From == from && m.Text == text {
 			return
 		}
 	}
@@ -116,24 +122,24 @@ func expectCloseCode(t *testing.T, conn *websocket.Conn, code int) {
 }
 
 // expectLeaveWithoutBroadcast reads from observer until nick leaves, failing
-// if any message from nick was broadcast first.
+// if any chat message from nick was broadcast first.
 func expectLeaveWithoutBroadcast(t *testing.T, observer *websocket.Conn, nick string) {
 	t.Helper()
 	for {
-		msg := readText(t, observer)
-		if strings.HasPrefix(msg, nick+": ") {
-			t.Fatalf("rejected message was broadcast: %q", msg)
+		m := readMsg(t, observer)
+		if m.Type == typeChat && m.From == nick {
+			t.Fatalf("rejected message was broadcast: %+v", m)
 		}
-		if msg == nick+" left. 👋" {
+		if m.Type == typeLeave && m.From == nick {
 			return
 		}
 	}
 }
 
 // startReader reads in the background (which also answers pings) and forwards
-// messages; the channel is closed when the connection errors.
-func startReader(conn *websocket.Conn) <-chan string {
-	ch := make(chan string, 64)
+// decoded frames; the channel is closed when the connection errors.
+func startReader(t *testing.T, conn *websocket.Conn) <-chan message {
+	ch := make(chan message, 64)
 	go func() {
 		defer close(ch)
 		for {
@@ -141,42 +147,47 @@ func startReader(conn *websocket.Conn) <-chan string {
 			if err != nil {
 				return
 			}
-			ch <- string(msg)
+			var m message
+			if err := json.Unmarshal(msg, &m); err != nil {
+				t.Errorf("invalid JSON frame %q: %v", msg, err)
+				return
+			}
+			ch <- m
 		}
 	}()
 	return ch
 }
 
-// recvUntil waits for want on ch, failing if ch closes or the deadline passes.
-func recvUntil(t *testing.T, ch <-chan string, want string) {
+// recvUntil waits for (typ, from, text) on ch, failing if ch closes or the deadline passes.
+func recvUntil(t *testing.T, ch <-chan message, typ, from, text string) {
 	t.Helper()
 	timeout := time.After(testDeadline)
 	for {
 		select {
-		case msg, ok := <-ch:
+		case m, ok := <-ch:
 			if !ok {
-				t.Fatalf("connection closed while waiting for %q", want)
+				t.Fatalf("connection closed while waiting for (%s, %q, %q)", typ, from, text)
 			}
-			if msg == want {
+			if m.Type == typ && m.From == from && m.Text == text {
 				return
 			}
 		case <-timeout:
-			t.Fatalf("timed out waiting for %q", want)
+			t.Fatalf("timed out waiting for (%s, %q, %q)", typ, from, text)
 		}
 	}
 }
 
-// CHAT-01: a message from one client reaches every client with the nickname prefix.
+// CHAT-01: a message from one client reaches every client as a chat envelope.
 func TestBroadcastReachesAllClients(t *testing.T) {
 	srv, _ := startServer(t, NewRoom(nil))
-	a := dial(t, srv, "A")
-	b := dial(t, srv, "B")
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
 
 	if err := a.WriteMessage(websocket.TextMessage, []byte("hola")); err != nil {
 		t.Fatal(err)
 	}
-	readUntil(t, a, "A: hola")
-	readUntil(t, b, "A: hola")
+	readUntil(t, a, typeChat, "A", "hola")
+	readUntil(t, b, typeChat, "A", "hola")
 }
 
 // SRV-01: origin validation.
@@ -219,8 +230,8 @@ func TestOversizedMessageClosesSender(t *testing.T) {
 	room := NewRoom(nil)
 	room.maxMessageSize = 16
 	srv, _ := startServer(t, room)
-	a := dial(t, srv, "A")
-	b := dial(t, srv, "B")
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
 
 	if err := a.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("x", 17))); err != nil {
 		t.Fatal(err)
@@ -231,19 +242,18 @@ func TestOversizedMessageClosesSender(t *testing.T) {
 	expectLeaveWithoutBroadcast(t, b, "A")
 }
 
-// CHAT-06: a frame of exactly maxMessageSize is accepted.
+// CHAT-06: a frame of exactly the default limit, made of characters that need
+// JSON escaping, is accepted and its decoded text equals the frame.
 func TestMessageAtSizeLimitIsBroadcast(t *testing.T) {
-	room := NewRoom(nil)
-	room.maxMessageSize = 16
-	srv, _ := startServer(t, room)
-	a := dial(t, srv, "A")
-	b := dial(t, srv, "B")
+	srv, _ := startServer(t, NewRoom(nil))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
 
-	payload := strings.Repeat("x", 16)
+	payload := strings.Repeat(`"`, defaultMaxMessageSize)
 	if err := a.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
 		t.Fatal(err)
 	}
-	readUntil(t, b, "A: "+payload)
+	readUntil(t, b, typeChat, "A", payload)
 }
 
 // shortPings configures keepalive timing for the ping tests.
@@ -258,11 +268,11 @@ func TestUnresponsiveClientIsDropped(t *testing.T) {
 	shortPings(room)
 	srv, _ := startServer(t, room)
 
-	observer := startReader(dialRaw(t, srv, "B")) // reads (and answers pings) from the start
-	recvUntil(t, observer, "B joined! 🎉")
+	observer := startReader(t, dialRaw(t, srv, "B")) // reads (and answers pings) from the start
+	recvUntil(t, observer, typeJoin, "B", "")
 	dialRaw(t, srv, "X") // never calls ReadMessage
 
-	recvUntil(t, observer, "X left. 👋")
+	recvUntil(t, observer, typeLeave, "X", "")
 }
 
 // CHAT-07: a client that keeps reading answers pings and stays connected.
@@ -272,10 +282,10 @@ func TestResponsiveClientSurvivesPingPeriods(t *testing.T) {
 	srv, _ := startServer(t, room)
 
 	a := dialRaw(t, srv, "A")
-	aMsgs := startReader(a)
-	bMsgs := startReader(dialRaw(t, srv, "B"))
-	recvUntil(t, aMsgs, "A joined! 🎉")
-	recvUntil(t, bMsgs, "B joined! 🎉")
+	aMsgs := startReader(t, a)
+	bMsgs := startReader(t, dialRaw(t, srv, "B"))
+	recvUntil(t, aMsgs, typeJoin, "A", "")
+	recvUntil(t, bMsgs, typeJoin, "B", "")
 
 	// Wait well past pongWait: without pong replies both would be dropped.
 	time.Sleep(2 * room.pongWait)
@@ -283,8 +293,8 @@ func TestResponsiveClientSurvivesPingPeriods(t *testing.T) {
 	if err := a.WriteMessage(websocket.TextMessage, []byte("still here")); err != nil {
 		t.Fatal(err)
 	}
-	recvUntil(t, bMsgs, "A: still here")
-	recvUntil(t, aMsgs, "A: still here")
+	recvUntil(t, bMsgs, typeChat, "A", "still here")
+	recvUntil(t, aMsgs, typeChat, "A", "still here")
 }
 
 // CHAT-07: any received frame (not only a pong) extends the read deadline.
@@ -295,8 +305,8 @@ func TestAnyFrameExtendsReadDeadline(t *testing.T) {
 	shortPings(room)
 	srv, _ := startServer(t, room)
 
-	bMsgs := startReader(dialRaw(t, srv, "B"))
-	recvUntil(t, bMsgs, "B joined! 🎉")
+	bMsgs := startReader(t, dialRaw(t, srv, "B"))
+	recvUntil(t, bMsgs, typeJoin, "B", "")
 	a := dialRaw(t, srv, "A")
 
 	const frames = 8
@@ -308,15 +318,15 @@ func TestAnyFrameExtendsReadDeadline(t *testing.T) {
 		time.Sleep(interval) // pacing only; the assertions are the receives below
 	}
 	for i := 0; i < frames; i++ {
-		recvUntil(t, bMsgs, "A: m")
+		recvUntil(t, bMsgs, typeChat, "A", "m")
 	}
 }
 
 // CHAT-09: binary frames close the sender with 1003 and are not broadcast.
 func TestBinaryFrameClosesSender(t *testing.T) {
 	srv, _ := startServer(t, NewRoom(nil))
-	a := dial(t, srv, "A")
-	b := dial(t, srv, "B")
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
 
 	if err := a.WriteMessage(websocket.BinaryMessage, []byte{1, 2, 3}); err != nil {
 		t.Fatal(err)
@@ -328,8 +338,8 @@ func TestBinaryFrameClosesSender(t *testing.T) {
 // CHAT-09: invalid UTF-8 text closes the sender with 1007 and is not broadcast.
 func TestInvalidUTF8ClosesSender(t *testing.T) {
 	srv, _ := startServer(t, NewRoom(nil))
-	a := dial(t, srv, "A")
-	b := dial(t, srv, "B")
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
 
 	if err := a.WriteMessage(websocket.TextMessage, []byte{'h', 0xff}); err != nil {
 		t.Fatal(err)
@@ -354,8 +364,8 @@ func TestNicknameNormalization(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, _ := startServer(t, NewRoom(nil))
 			conn := dialRaw(t, srv, tt.query)
-			if got, want := readText(t, conn), tt.want+" joined! 🎉"; got != want {
-				t.Fatalf("join notice = %q, want %q", got, want)
+			if m := readMsg(t, conn); m.Type != typeWelcome || m.From != tt.want {
+				t.Fatalf("first frame = %+v, want welcome from %q", m, tt.want)
 			}
 		})
 	}
@@ -364,8 +374,8 @@ func TestNicknameNormalization(t *testing.T) {
 // CHAT-05: when the hub drops a slow client, its connection is closed.
 // A real slow client cannot be produced deterministically (the kernel buffers
 // megabytes before a write blocks, and sendBufferSize is a const), so this
-// test registers a server-side Client with a 1-slot send buffer whose pumps are
-// not running yet. Its own join notice fills the buffer, a broadcast from
+// test registers a server-side Client with a 2-slot send buffer whose pumps are
+// not running yet. Its welcome and own join fill the buffer, a broadcast from
 // another client overflows it, and the hub drops it. Only then are the pumps
 // started: writePump must see the closed channel and close the connection.
 func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
@@ -379,7 +389,7 @@ func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 		if err != nil {
 			return
 		}
-		slow := &Client{conn: conn, send: make(chan []byte, 1), nickname: "slow"}
+		slow := &Client{conn: conn, send: make(chan []byte, 2), registered: make(chan struct{}), nickname: "slow"}
 		room.register <- slow
 		slowCh <- slow
 	})
@@ -404,11 +414,11 @@ func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 		t.Fatal("slow client never registered")
 	}
 
-	b := dial(t, srv, "B")
+	b, _ := dial(t, srv, "B")
 	if err := b.WriteMessage(websocket.TextMessage, []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
-	readUntil(t, b, "B: hi") // the broadcast overflowed slow's buffer; the pumps below may start before or after the drop, both must end closed
+	readUntil(t, b, typeChat, "B", "hi") // the broadcast overflowed slow's buffer; the pumps below may start before or after the drop, both must end closed
 
 	go slow.writePump(room)
 	go slow.readPump(room)
@@ -439,7 +449,7 @@ func countPumps() int {
 func TestShutdownClosesClients(t *testing.T) {
 	room := NewRoom(nil)
 	srv, cancel := startServer(t, room)
-	a := dial(t, srv, "A")
+	a, _ := dial(t, srv, "A")
 
 	cancel()
 	expectReadError(t, a)
@@ -474,7 +484,8 @@ func TestNoGoroutineLeakAfterDisconnect(t *testing.T) {
 	srv, _ := startServer(t, NewRoom(nil))
 
 	for i := 0; i < 20; i++ {
-		dial(t, srv, "c").Close()
+		conn, _ := dial(t, srv, "c")
+		conn.Close()
 	}
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -487,5 +498,160 @@ func TestNoGoroutineLeakAfterDisconnect(t *testing.T) {
 			t.Fatalf("%d client pump goroutines still running 3s after disconnect", n)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// nextChat reads until a chat frame arrives, failing on a join frame for forbidden.
+func nextChat(t *testing.T, conn *websocket.Conn, forbiddenJoin string) message {
+	t.Helper()
+	for {
+		m := readMsg(t, conn)
+		if m.Type == typeJoin && m.From == forbiddenJoin {
+			t.Fatalf("unexpected join envelope: %+v", m)
+		}
+		if m.Type == typeChat {
+			return m
+		}
+	}
+}
+
+func send(t *testing.T, conn *websocket.Conn, text string) {
+	t.Helper()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(text)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// CHAT-12: concurrent clients asking for the same nickname get distinct names.
+func TestConcurrentSameNickname(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	const n = 20
+
+	type result struct {
+		name string
+		err  error
+	}
+	results := make(chan result, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, _, err := dialOrigin(srv, "bob", srv.URL)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			t.Cleanup(func() { conn.Close() })
+			conn.SetReadDeadline(time.Now().Add(testDeadline))
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			var m message
+			if err := json.Unmarshal(raw, &m); err != nil || m.Type != typeWelcome {
+				results <- result{err: errors.New("bad welcome: " + string(raw))}
+				return
+			}
+			results <- result{name: m.From}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	seen := map[string]string{}
+	for r := range results {
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if c := len([]rune(r.name)); c > maxNicknameRunes {
+			t.Errorf("name %q has %d runes", r.name, c)
+		}
+		k := foldKey(r.name)
+		if prev, dup := seen[k]; dup {
+			t.Errorf("duplicate names %q and %q", prev, r.name)
+		}
+		seen[k] = r.name
+	}
+	if len(seen) != n {
+		t.Fatalf("got %d distinct names, want %d", len(seen), n)
+	}
+}
+
+// CHAT-12: collisions ignore case, and a freed name can be reused.
+func TestCaseInsensitiveCollision(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	a, na := dial(t, srv, "Bob")
+	b, nb := dial(t, srv, "bob")
+	c, nc := dial(t, srv, "BOB")
+	if na != "Bob" || nb != "bob (2)" || nc != "BOB (3)" {
+		t.Fatalf("names = %q, %q, %q", na, nb, nc)
+	}
+
+	a.Close()
+	readUntil(t, b, typeLeave, "Bob", "")
+	readUntil(t, c, typeLeave, "Bob", "")
+
+	_, nd := dial(t, srv, "bob")
+	if nd != "bob" {
+		t.Fatalf("reused name = %q, want bob", nd)
+	}
+}
+
+// CHAT-13: whitespace-only messages are dropped silently; others are untouched.
+func TestEmptyMessagesDropped(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	for _, s := range []string{"", "   ", "\n\t", "x"} {
+		send(t, a, s)
+	}
+	if m := nextChat(t, b, ""); m.From != "A" || m.Text != "x" {
+		t.Fatalf("first chat = %+v, want text x from A", m)
+	}
+	send(t, a, "y")
+	if m := nextChat(t, b, ""); m.Text != "y" {
+		t.Fatalf("second chat = %+v, want y", m)
+	}
+	send(t, a, "  hi  ")
+	if m := nextChat(t, b, ""); m.Text != "  hi  " {
+		t.Fatalf("chat text = %q, want surrounding whitespace preserved", m.Text)
+	}
+}
+
+// CHAT-10: text that imitates a system notice is just chat; JSON escaping round-trips.
+func TestForgedNoticeIsChat(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	texts := []string{"Bob joined! 🎉", "\nBob: hi", "say \"hi\" \\ <b>\t\n"}
+	for _, text := range texts {
+		send(t, a, text)
+	}
+	for _, text := range texts {
+		m := nextChat(t, b, "Bob")
+		if m.From != "A" || m.Text != text {
+			t.Fatalf("chat = %+v, want from A with text %q", m, text)
+		}
+	}
+}
+
+// CHAT-04/CHAT-09: control and bidi characters never reach the assigned nickname.
+func TestNicknameControlAndBidiStripped(t *testing.T) {
+	tests := []struct{ name, nick, want string }{
+		{"newline", "Bob\nAdmin", "BobAdmin"},
+		{"bidi and spaces", "‮  Bob  ‬", "Bob"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := startServer(t, NewRoom(nil))
+			_, got := dial(t, srv, url.QueryEscape(tt.nick))
+			if got != tt.want {
+				t.Fatalf("nickname = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
