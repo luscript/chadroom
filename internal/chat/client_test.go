@@ -53,8 +53,9 @@ func dialRaw(t *testing.T, srv *httptest.Server, nick string) *websocket.Conn {
 	return conn
 }
 
-// dial connects and reads the welcome frame, so the client is known to be
-// registered with the room when dial returns. It returns the assigned nickname.
+// dial connects and reads the welcome, users and history frames, so the client
+// is known to be registered with the room when dial returns and every later
+// frame is a 4-field envelope. It returns the assigned nickname.
 func dial(t *testing.T, srv *httptest.Server, nick string) (*websocket.Conn, string) {
 	t.Helper()
 	conn := dialRaw(t, srv, nick)
@@ -62,18 +63,26 @@ func dial(t *testing.T, srv *httptest.Server, nick string) (*websocket.Conn, str
 	if m.Type != typeWelcome {
 		t.Fatalf("first frame = %+v, want welcome", m)
 	}
+	decodeUsers(t, readRaw(t, conn))
+	decodeHistory(t, readRaw(t, conn))
 	return conn, m.From
 }
 
-// readMsg reads and decodes one frame, failing the test on error or deadline.
-func readMsg(t *testing.T, conn *websocket.Conn) message {
+// readRaw reads one frame, failing the test on error or deadline.
+func readRaw(t *testing.T, conn *websocket.Conn) []byte {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(testDeadline))
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	return decode(t, msg)
+	return msg
+}
+
+// readMsg reads and decodes one 4-field frame.
+func readMsg(t *testing.T, conn *websocket.Conn) message {
+	t.Helper()
+	return decode(t, readRaw(t, conn))
 }
 
 // readUntil skips frames until one matches (typ, from, text); ts is ignored.
@@ -374,10 +383,10 @@ func TestNicknameNormalization(t *testing.T) {
 // CHAT-05: when the hub drops a slow client, its connection is closed.
 // A real slow client cannot be produced deterministically (the kernel buffers
 // megabytes before a write blocks, and sendBufferSize is a const), so this
-// test registers a server-side Client with a 2-slot send buffer whose pumps are
-// not running yet. Its welcome and own join fill the buffer, a broadcast from
-// another client overflows it, and the hub drops it. Only then are the pumps
-// started: writePump must see the closed channel and close the connection.
+// test registers a server-side Client with a privateFrames+1 slot send buffer whose pumps are
+// not running yet. Its private frames and own join fill the buffer,
+// the join of another client overflows it, and the hub drops it. Only then are
+// the pumps started: writePump must see the closed channel and close the connection.
 func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 	room := NewRoom(nil)
 	gin.SetMode(gin.TestMode)
@@ -389,7 +398,7 @@ func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 		if err != nil {
 			return
 		}
-		slow := &Client{conn: conn, send: make(chan []byte, 2), registered: make(chan struct{}), nickname: "slow"}
+		slow := &Client{conn: conn, send: make(chan []byte, privateFrames+1), registered: make(chan struct{}), nickname: "slow"}
 		room.register <- slow
 		slowCh <- slow
 	})
@@ -418,11 +427,27 @@ func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 	if err := b.WriteMessage(websocket.TextMessage, []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
-	readUntil(t, b, typeChat, "B", "hi") // the broadcast overflowed slow's buffer; the pumps below may start before or after the drop, both must end closed
+	readUntil(t, b, typeChat, "B", "hi") // B's join already overflowed slow's buffer; the pumps below may start before or after the drop, both must end closed
 
 	go slow.writePump(room)
 	go slow.readPump(room)
 	expectReadError(t, peer)
+}
+
+// CHAT-17/18: a newcomer over a real socket gets welcome, users and the
+// history before anything else.
+func TestJoinReceivesUsersAndHistory(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	a, _ := dial(t, srv, "A")
+	send(t, a, "hola")
+	readUntil(t, a, typeChat, "A", "hola")
+
+	b := dialRaw(t, srv, "B")
+	if m := readMsg(t, b); m.Type != typeWelcome || m.From != "B" {
+		t.Fatalf("first frame = %+v, want welcome B", m)
+	}
+	expectUsers(t, decodeUsers(t, readRaw(t, b)), "A", "B")
+	expectHistory(t, decodeHistory(t, readRaw(t, b)), message{Type: typeChat, From: "A", Text: "hola"})
 }
 
 // countPumps counts goroutines currently running a Client read or write pump.
