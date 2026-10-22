@@ -5,7 +5,7 @@
 > completion notification's `usage` block; the orchestrator total is parsed post-hoc from
 > the local session transcript JSONL (`[unavailable]` on failure).
 
-**Status**: partial (through apply)
+**Status**: complete
 **Generated**: 2026-10-22
 
 ## Per-agent / per-phase
@@ -18,11 +18,13 @@
 | apply    | crombie-worker (batch 1)    | claude-sonnet-5-5 / high | 52,587 | 10       | 67s      | 3.1–3.6       |
 | apply    | crombie-worker (batch 1)    | claude-sonnet-5-5 / high | 60,217 | 17       | 120s     | 1.1–1.3, 2.1, 2.2, 4.1–4.4 |
 
+| verify   | crombie-reviewer / crombie-security / crombie-worker | claude-sonnet-5-5 / medium | [unavailable] | [unavailable] | [unavailable] | — (stopped by user) |
+
 ## Orchestrator
 
 | Scope         | Model / Tier          | Tokens (in / out) | Notes |
 |---------------|-----------------------|-------------------|-------|
-| whole feature | claude-opus-5-5 / —   | [unavailable]     | Captured at archive |
+| whole feature | claude-opus-5-5 / —   | [unavailable]     | Session transcript could not be identified unambiguously at archive; not estimated |
 
 ## Aggregate
 
