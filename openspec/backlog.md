@@ -17,14 +17,14 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Global max-clients cap (503 when exceeded); optionally per-IP cap.
 - [ ] Don't log `ErrReadLimit` per connection (attacker-controlled log volume).
 
-## `frontend-hardening` — in progress (`changes/frontend-hardening`)
+## `frontend-hardening` — done, archived 2026-10-22
 - [x] #13 Build WS URL from `location.host` and use `wss:` on HTTPS (today the page only works
       at exactly `http://localhost:8080`; `127.0.0.1` is rejected by the origin check).
 - [x] #15 Handle cancelled `prompt` (nickname "null") — `prompt()` replaced by the join form.
-- [ ] #16 Check `readyState` before `send`; reconnect with backoff.
-- [ ] CSP header on `GET /` — requires moving the inline script / `onclick` to a hashed or
+- [x] #16 Check `readyState` before `send`; reconnect with backoff.
+- [x] CSP header on `GET /` — requires moving the inline script / `onclick` to a hashed or
       external script. Note: the page now also loads Google Fonts (needs `style-src`/`font-src`).
-- [ ] Inline images leak viewers' IPs: any user can send an https image URL and every other
+- [x] Inline images leak viewers' IPs: any user can send an https image URL and every other
       browser fetches it (`IMAGE_URL` in `index.html`). Options: click-to-load, a host allowlist,
       or a server-side proxy.
 
@@ -85,6 +85,6 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Typing indicator.
 
 ## Housekeeping
-- [ ] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
+- [x] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
       `127.0.0.1`; `index.html` already builds the URL from `location.host` (#13 partially done).
 - [ ] #20 Review `.claude.json` / `.claude/` for secrets before committing.
