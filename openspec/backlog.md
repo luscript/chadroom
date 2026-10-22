@@ -17,16 +17,32 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Global max-clients cap (503 when exceeded); optionally per-IP cap.
 - [ ] Don't log `ErrReadLimit` per connection (attacker-controlled log volume).
 
-## `frontend-hardening`
-- [ ] #13 Build WS URL from `location.host` and use `wss:` on HTTPS (today the page only works
+## `frontend-hardening` — done, archived 2026-10-22
+- [x] #13 Build WS URL from `location.host` and use `wss:` on HTTPS (today the page only works
       at exactly `http://localhost:8080`; `127.0.0.1` is rejected by the origin check).
-- [ ] #15 Handle cancelled `prompt` (nickname "null").
-- [ ] #16 Check `readyState` before `send`; reconnect with backoff.
-- [ ] CSP header on `GET /` — requires moving the inline script / `onclick` to a hashed or
+- [x] #15 Handle cancelled `prompt` (nickname "null") — `prompt()` replaced by the join form.
+- [x] #16 Check `readyState` before `send`; reconnect with backoff.
+- [x] CSP header on `GET /` — requires moving the inline script / `onclick` to a hashed or
       external script. Note: the page now also loads Google Fonts (needs `style-src`/`font-src`).
-- [ ] Inline images leak viewers' IPs: any user can send an https image URL and every other
+- [x] Inline images leak viewers' IPs: any user can send an https image URL and every other
       browser fetches it (`IMAGE_URL` in `index.html`). Options: click-to-load, a host allowlist,
       or a server-side proxy.
+
+## `frontend-polish` (deferred from `frontend-hardening` verify — low priority)
+- [ ] Self-host Inter (woff2 embedded, `font-src 'self'`, drop Google preconnect): Google
+      Fonts sees every user's IP and the page loses its font offline / on an isolated LAN.
+- [ ] Reconnect never gives up on permanent failures (403 origin is reported as 1006);
+      consider an attempt cap or a "retry" button after N minutes.
+- [ ] Trusted Types: `require-trusted-types-for 'script'` in the CSP (no sinks today).
+- [ ] First join that fails shows "Conexión perdida… / Reconectado" without ever having been
+      connected; use a `wasOnline` flag for the wording.
+
+## `gif-picker` (after `frontend-hardening`)
+- [ ] GIF panel with search + trending, like the emoji panel.
+- [ ] Server endpoint (e.g. `GET /gifs?q=`) calling Giphy with `GIPHY_API_KEY` from the
+      environment (key never sent to the browser); panel hidden when the key is unset.
+- [ ] HTTP client with timeout, response trimmed to the fields the page needs; "Powered by
+      GIPHY" attribution. Images come only from the allowlisted Giphy hosts.
 
 ## `deps-cleanup`
 - [ ] #17 `go mod tidy` (gin and gorilla are marked `// indirect`).
@@ -69,6 +85,6 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Typing indicator.
 
 ## Housekeeping
-- [ ] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
+- [x] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
       `127.0.0.1`; `index.html` already builds the URL from `location.host` (#13 partially done).
 - [ ] #20 Review `.claude.json` / `.claude/` for secrets before committing.
