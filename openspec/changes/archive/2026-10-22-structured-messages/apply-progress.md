@@ -34,8 +34,7 @@ Orchestrator check: `gofmt -l .` empty, `go vet ./...` clean, `go test -race -co
 
 ## Pending
 
-- 4.7 automated part done (gofmt/vet/race tests); **manual two-tab browser check not done yet** —
-  left for verify / the developer.
+- 4.7 done: automated checks plus manual two-tab browser check by the developer (2026-10-22).
 
 ## Verify round 2 corrections — 2026-10-22
 

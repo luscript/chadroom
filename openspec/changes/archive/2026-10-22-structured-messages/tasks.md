@@ -49,7 +49,7 @@ in package `chat`, so the package's tests do not compile until it is migrated to
 - [x] 4.4 `internal/chat/client_test.go` — mechanical migration: `readMsg`/`readUntil` helpers; `dial` helper reads the `welcome` and returns the assigned name; string assertions → envelopes (CHAT-01/02/06/09); `expectLeaveWithoutBroadcast` checks `Type == chat && From == nick`; at-limit test uses a 4096-byte frame of `"` and checks decoded text (CHAT-06).
 - [x] 4.5 `internal/chat/client_test.go` — new integration tests: `TestConcurrentSameNickname` (20 dials of `bob`, distinct `foldKey`s, ≤ 32 runes); `TestCaseInsensitiveCollision` (`Bob`/`bob`/`BOB` → `Bob`/`bob (2)`/`BOB (3)`, release then `bob`); `TestEmptyMessagesDropped` (CHAT-13 both scenarios); `TestForgedNoticeIsChat` (CHAT-10 forged notice/sender + JSON-escaping scenario); nickname control/bidi stripping end-to-end via `welcome`.
 - [x] 4.6 `cmd/chatroom/main_test.go`: `TestRunGracefulShutdown` (and any test that reads frames) asserts the first frame is a `welcome` envelope.
-- [ ] 4.7 Run `gofmt -l .`, `go vet ./...` and `go test -race ./...`; all clean. Manual check of the page in two tabs: same nickname → ` (2)`, "vos" only on own bubbles, join/leave lines, times shown, unknown `type` ignored (CHAT-14).
+- [x] 4.7 Run `gofmt -l .`, `go vet ./...` and `go test -race ./...`; all clean. Manual check of the page in two tabs: same nickname → ` (2)`, "vos" only on own bubbles, join/leave lines, times shown, unknown `type` ignored (CHAT-14).
 
 ## Phase 5: Housekeeping
 

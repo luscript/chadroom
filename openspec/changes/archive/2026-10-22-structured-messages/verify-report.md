@@ -46,7 +46,7 @@ Concurrency invariants (registry ownership, single close, no send on own channel
 happens-before via `registered`, welcome first, no hang on `<-registered`, `taken` release on
 all paths) confirmed by both reviewers. Forgery of notices/senders, "own" marking and XSS: clean.
 
-## Round 2 — 2026-10-22 — Verdict: **PASS** (automated) · CHAT-14 manual check pending
+## Round 2 — 2026-10-22 — Verdict: **PASS**
 
 Scope decided with the user: friends-only chat → fix real UX bugs, defer adversarial hardening.
 Deferred to `openspec/backlog.md` § `nickname-polish`: M1, M2, L1, L2, L4, L6 and test polish.
@@ -60,7 +60,7 @@ L3 stays in `frontend-hardening`; L5 accepted.
 | MEDIUM shutdown-silent untested | `TestShutdownIsSilent` |
 | LOW stale-socket `onmessage` | Fixed |
 | LOW README tree | Fixed |
-| HIGH CHAT-14 untested | **Open** — manual two-tab check by the developer before archive |
+| HIGH CHAT-14 untested | **Resolved** — manual two-tab check done by the developer (2026-10-22): `(2)` suffix, "vos" only on own bubbles, join/leave lines and times OK |
 
 Execution: `gofmt -l .` empty, `go vet ./...` clean, `go test -race -count=20 ./...` PASS.
 Smoke test of the real binary: still NOT RUN (background server start denied); covered by the

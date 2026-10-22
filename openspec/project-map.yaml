@@ -1,6 +1,6 @@
 schema: project-map-v1
 generated: 2026-10-22T19:30:00Z
-generated_commit: efcdb26
+generated_commit: 0eed8b5
 
 modules:
   - name: chatroom-cmd
@@ -13,7 +13,7 @@ modules:
       - cmd/chatroom/main_test.go
   - name: chat
     path: internal/chat
-    description: "Chat hub. room.go = Room (clients registry + taken set of foldKey(nickname), both owned by Run(ctx); broadcast chan inbound{from,text}; Run assigns the final nickname on register, closes client.registered, delivers welcome then fans out join; drops chat from non-members; deliver/fanOut non-blocking with silent slow-client drop; remove() is the single removal path; done chan, checkOrigin allowlist, HandleWebSocket waits on registered before starting pumps). message.go = JSON envelope {type,from,text,ts} (chat/join/leave/welcome), encode marshals once per event. nickname.go = normalizeNickname (ToValidUTF8, strip Cc + Bidi_Control, trim, 32 runes, \"Anonymous\"), truncateRunes, foldKey (EqualFold-equivalent key), assignNickname (lowest free \" (n)\" suffix). client.go = Client (conn, send, registered, nickname) with readPump (4096-byte limit, deadlines, pong; closes on binary/invalid UTF-8; drops blank frames) and writePump (sole conn writer, pings)"
+    description: "Chat hub. room.go = Room (clients registry + taken set of foldKey(nickname), both owned by Run(ctx); broadcast chan inbound{from,text}; Run assigns the final nickname on register, closes client.registered, delivers welcome then fans out join; drops chat from non-members; leave(c) relays c's already-queued inbound before removing it (re-checks membership after the drain); deliver/fanOut non-blocking with silent slow-client drop; remove() is the single removal path; done chan, checkOrigin allowlist, HandleWebSocket waits on registered before starting pumps). message.go = JSON envelope {type,from,text,ts} (chat/join/leave/welcome), encode marshals once per event. nickname.go = normalizeNickname (ToValidUTF8, strip Cc + Bidi_Control, trim, 32 runes, \"Anonymous\"), truncateRunes, foldKey (EqualFold-equivalent key), assignNickname (lowest free \" (n)\" suffix). client.go = Client (conn, send, registered, nickname) with readPump (4096-byte limit, deadlines, pong; closes on binary/invalid UTF-8; drops blank frames) and writePump (sole conn writer, pings)"
     language: go
     entry_points:
       - internal/chat/room.go

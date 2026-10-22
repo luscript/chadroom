@@ -5,12 +5,12 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 `verify-report.md` (rounds 1–2). Each group is a suggested future SDD change
 (`/sdd-new <name>`).
 
-## `structured-messages` (security + features foundation)
-- [ ] #10 JSON envelope `{type, from, text, ts}` so join/leave notices can't be spoofed by a
+## `structured-messages` (security + features foundation) — done, archived 2026-10-22
+- [x] #10 JSON envelope `{type, from, text, ts}` so join/leave notices can't be spoofed by a
       user typing "X joined! 🎉" or a nickname like "Admin".
-- [ ] Nickname charset rules: strip/reject control characters and bidi overrides (U+202E);
+- [x] Nickname charset rules: strip/reject control characters and bidi overrides (U+202E);
       decide whether to reject duplicate nicknames.
-- [ ] Drop empty / whitespace-only messages.
+- [x] Drop empty / whitespace-only messages.
 
 ## `rate-limiting` (DoS)
 - [ ] #11 Per-client token bucket in readPump.
