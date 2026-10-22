@@ -52,6 +52,6 @@ the page must behave exactly as before under the new CSP.
 
 ## Phase 5: Docs and wrap-up
 
-- [ ] 5.1 `README.md`: drop the "usá `localhost`, no `127.0.0.1`" note; document the image allowlist (extend `imageHosts` + `IMAGE_HOSTS`, the test enforces sync), the CSP and automatic reconnection; list `/app.js` and `/app.css` in the API table.
-- [ ] 5.2 Refresh `openspec/project-map.yaml` (stale: `openspec` module missing; new assets in `cmd/chatroom`).
+- [x] 5.1 `README.md`: drop the "usá `localhost`, no `127.0.0.1`" note; document the image allowlist (extend `imageHosts` + `IMAGE_HOSTS`, the test enforces sync), the CSP and automatic reconnection; list `/app.js` and `/app.css` in the API table.
+- [x] 5.2 Refresh `openspec/project-map.yaml` (stale: `openspec` module missing; new assets in `cmd/chatroom`).
 - [ ] 5.3 Manual browser checklist M1–M11 from the design (Chrome + Firefox) — done by the user during verify; results recorded in `verify-report.md`.

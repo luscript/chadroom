@@ -1,11 +1,11 @@
 schema: project-map-v1
-generated: 2026-10-22T19:30:00Z
-generated_commit: 0eed8b5
+generated: 2026-10-22T18:40:00Z
+generated_commit: 0cdca6a
 
 modules:
   - name: chatroom-cmd
     path: cmd/chatroom
-    description: "Composition root. main wires signal.NotifyContext (SIGINT/SIGTERM) and ALLOWED_ORIGINS into serve(ctx, addr, origins) -> run(ctx, listener, origins), which starts Room.Run, an http.Server (ReadHeaderTimeout/IdleTimeout/MaxHeaderBytes) and graceful shutdown returning an exit code. newRouter (gin, no trusted proxies): GET / serves embedded index.html with nosniff + X-Frame-Options DENY, GET /ws. parseAllowedOrigins trims blanks and drops \"null\". Listens on :8080"
+    description: "Composition root. main wires signal.NotifyContext (SIGINT/SIGTERM) and ALLOWED_ORIGINS into serve(ctx, addr, origins) -> run(ctx, listener, origins), which starts Room.Run, an http.Server (ReadHeaderTimeout/IdleTimeout/MaxHeaderBytes) and graceful shutdown returning an exit code. newRouter (gin, no trusted proxies): GET / (servePage: nosniff, Cache-Control no-cache, Content-Security-Policy, X-Frame-Options DENY), GET /app.js and /app.css (serveAsset: exact content type, nosniff, no-cache), GET /ws. imageHosts (Giphy/Tenor/Imgur) is the single source for CSP img-src via buildCSP and is mirrored by IMAGE_HOSTS in app.js (TestImageHostsMirroredInJS). parseAllowedOrigins trims blanks and drops \"null\". Listens on :8080"
     language: go
     entry_points:
       - cmd/chatroom/main.go
@@ -24,11 +24,22 @@ modules:
       - internal/chat/room_test.go
       - internal/chat/client_test.go
   - name: web-client
-    path: cmd/chatroom/index.html
-    description: "Single-file browser client (Nocturne design, Spanish UI) embedded via go:embed and served at GET /; join form for nickname, connects to ws(s)://location.host/ws, enforces MAX_MESSAGE_BYTES=4096 client-side, emoji panel, GIF panel (https image URL sent as a message and rendered as <img>), emoji-only bubbles; parses server frames as JSON by type (unknown types/invalid JSON ignored), identity from welcome, own messages iff from === welcome name, times from ts; text rendered with textContent; loads Inter font from Google Fonts"
-    language: html/javascript
+    path: cmd/chatroom
+    description: "Browser client (Nocturne design, Spanish UI), all embedded via go:embed. index.html has no inline code (CSP, guarded by TestIndexHasNoInlineCode) and loads app.css + app.js. app.js: join form; connect() to ws(s)://location.host/ws with the typed nickname; online only on welcome; on unexpected close scheduleReconnect() with exponential backoff + equal jitter (1 s doubling, 30 s cap, reset on welcome), one lost/reconnected notice per outage, reconnectNow() on window online / tab visible, Salir cancels the timer; enforces MAX_MESSAGE_BYTES=4096; emoji panel; GIF panel (URL pasted); isAllowedImage (new URL, https, exact host in IMAGE_HOSTS, no port/credentials/fragment, image extension) decides inline <img> vs text; parses frames as JSON by type (unknown ignored), identity from welcome, own iff from === welcome name; textContent only; Inter from Google Fonts"
+    language: html/javascript/css
     entry_points:
       - cmd/chatroom/index.html
+      - cmd/chatroom/app.js
+      - cmd/chatroom/app.css
+    test_paths:
+      - cmd/chatroom/main_test.go
+  - name: openspec
+    path: openspec
+    description: "Spec-Driven Development artifacts: specs/{chat,server}/spec.md (current requirements CHAT-xx, SRV-xx), changes/<name>/ (active change: proposal, specs deltas, design, tasks), changes/archive/ (completed changes), backlog.md (future changes grouped by name), config.yaml (SDD rules)"
+    language: markdown
+    entry_points:
+      - openspec/backlog.md
+      - openspec/config.yaml
     test_paths: []
 
 dependencies:
@@ -68,5 +79,10 @@ api_surface:
   - name: Chat page
     type: REST
     path: GET /
-    description: "Serves the embedded index.html with X-Content-Type-Options nosniff and X-Frame-Options DENY"
+    description: "Serves the embedded index.html with nosniff, Cache-Control no-cache, X-Frame-Options DENY and a strict Content-Security-Policy (no unsafe-inline; img-src 'self' + allowlisted image hosts; connect-src 'self')"
+    auth: null
+  - name: Page assets
+    type: REST
+    path: GET /app.js, GET /app.css
+    description: "Embedded script and stylesheet (text/javascript, text/css; charset=utf-8) with nosniff and no-cache"
     auth: null

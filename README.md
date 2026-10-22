@@ -13,11 +13,14 @@ sala: cada mensaje se reenvía a todos, y la sala avisa cuando alguien entra o s
 go run ./cmd/chatroom
 ```
 
-Abrí <http://localhost:8080>, elegí un nickname y empezá a chatear (abrí varias pestañas para
-probar). La página está embebida en el binario, así que funciona desde cualquier directorio.
+Abrí <http://localhost:8080> (o `127.0.0.1`, o la IP de tu máquina en la red local), elegí un
+nickname y empezá a chatear (abrí varias pestañas para probar). La página se conecta al
+WebSocket del mismo host desde el que la abriste, y está embebida en el binario, así que
+funciona desde cualquier directorio.
 
-> Usá `localhost`, no `127.0.0.1`: la página se conecta a `ws://localhost:8080` y el chequeo
-> de origen rechaza combinaciones distintas (ver `openspec/backlog.md`, punto #13).
+Si se corta la conexión (reinicio del servidor, Wi-Fi, notebook suspendida), la página se
+reconecta sola: reintenta con esperas crecientes de hasta 30 s y vuelve a pedir el mismo
+nickname. Los mensajes enviados por otros durante el corte no se recuperan.
 
 ### Configuración
 
@@ -32,7 +35,8 @@ todas las conexiones.
 
 | Ruta | Descripción |
 |------|-------------|
-| `GET /` | Página del chat (`index.html` embebido). |
+| `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. |
+| `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). |
 | `GET /ws?nickname=<nombre>` | Upgrade a WebSocket. Entrada: cada frame es texto plano. Salida: cada frame es un sobre JSON (ver abajo). |
 
 **Entrada (cliente → servidor):** texto plano UTF-8 de hasta 4096 bytes. Los mensajes en blanco
@@ -57,10 +61,21 @@ se ignoran. Los frames binarios cierran la conexión con 1003 y el UTF-8 inváli
 sufijo ` (n)` (por ejemplo `bob (2)`). Se quitan los caracteres de control y los de dirección
 bidi, se recorta a 32 caracteres y, si queda vacío, se usa `Anonymous`.
 
+**Imágenes y GIFs:** un mensaje que es solo una URL `https` de imagen (`.gif`, `.webp`, `.png`,
+`.jpg`) se muestra inline únicamente si el host está en la lista permitida (Giphy, Tenor e
+Imgur); cualquier otra URL se muestra como texto. Así nadie puede hacer que los navegadores de
+los demás pidan una imagen a un servidor propio y vean sus IPs. Para sumar un host, agregalo en
+`imageHosts` (`cmd/chatroom/main.go`, que arma el `img-src` de la CSP) y en `IMAGE_HOSTS`
+(`app.js`); un test falla si las dos listas no coinciden.
+
+**CSP:** la página no tiene código inline; la política solo permite scripts y estilos del propio
+origen, Google Fonts y las imágenes de la lista permitida.
+
 ## Arquitectura
 
 ```
-cmd/chatroom/        main: router (gin), http.Server, señales, index.html embebido
+cmd/chatroom/        main: router (gin), http.Server, señales, CSP y lista de hosts de imágenes
+  index.html         página (embebida), con app.js y app.css
 internal/chat/
   room.go            Room: hub que registra clientes y difunde mensajes
   client.go          Client: readPump / writePump por conexión
