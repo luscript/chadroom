@@ -97,7 +97,10 @@ p { margin: 0; }
 .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot); box-shadow: 0 0 8px var(--dot); }
 .status[data-state="connecting"] { --dot: var(--color-neutral-500); }
 .status[data-state="online"] { --dot: var(--color-accent); }
-.status[data-state="offline"] { --dot: var(--color-neutral-600); }
+.status[data-state="reconnecting"] { --dot: var(--color-accent-600); }
+.status[data-state="reconnecting"] .dot { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .status .dot { animation: none; } }
 .rule { height: 1px; flex: none; background: linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent); }
 
 /* — messages — */

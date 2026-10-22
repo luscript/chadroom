@@ -8,15 +8,36 @@
     { name: 'Corazones y símbolos', icon: '❤️', list: '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💔 💕 💖 💯 ✨ ⭐ 🔥 💥 ⚡ 🎉 🎊 ✅ ❌ ❓ ❗ 💡 💬 🔔' },
     { name: 'Cosas', icon: '🍕', list: '🍕 🍔 🍟 🌮 🍣 🍩 🍪 🍫 ☕ 🍺 🍷 🎂 ⚽ 🏀 🎮 🎧 🎸 🚀 🌈 🌙 ☀️ 🌧️ 🐶 🐱 🦊 🐼 🐸 🦄' },
   ];
-  const STATUS_LABEL = { connecting: 'Conectando…', online: 'En línea', offline: 'Desconectado' };
-  // Only https images are rendered inline; anything else stays as plain text.
-  const IMAGE_URL = /^https:\/\/[^\s"'<>]+\.(gif|webp|png|jpe?g)(\?[^\s"'<>]*)?$/i;
+  const STATUS_LABEL = { connecting: 'Conectando…', online: 'En línea', reconnecting: 'Reconectando…' };
+  // Mirrors imageHosts in cmd/chatroom/main.go (CSP img-src). Keep both in sync.
+  const IMAGE_HOSTS = new Set([
+    'media.giphy.com', 'media0.giphy.com', 'media1.giphy.com', 'media2.giphy.com',
+    'media3.giphy.com', 'media4.giphy.com', 'i.giphy.com',
+    'media.tenor.com', 'i.imgur.com',
+  ]);
+  const IMAGE_PATH = /\.(gif|webp|png|jpe?g)$/i;
+  const RETRY_BASE_MS = 1000;
+  const RETRY_MAX_MS = 30000;
   const EMOJI_ONLY = /^(\p{Extended_Pictographic}|️|‍|\s){1,12}$/u;
 
   let ws = null;
   let myName = ''; // identity assigned by the server in the welcome frame
   let status = 'connecting';
   let lastAuthor = null;
+  let requestedNick = ''; // what the user typed; re-sent on every reconnect
+  let retryTimer = null; // pending reconnect timeout id, or null
+  let attempt = 0; // consecutive failed attempts since the last welcome
+  let outage = false; // a "connection lost" notice is on screen
+
+  // True only when the whole message is one https image URL on an allowlisted host.
+  function isAllowedImage(text) {
+    if (/\s/.test(text)) return false;
+    let url;
+    try { url = new URL(text); } catch { return false; }
+    return url.protocol === 'https:' && IMAGE_HOSTS.has(url.hostname) &&
+      url.port === '' && url.username === '' && url.password === '' &&
+      url.hash === '' && IMAGE_PATH.test(url.pathname);
+  }
 
   // — join —
   const nickInput = $('nick');
@@ -28,6 +49,11 @@
   });
 
   function join(nick) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    requestedNick = nick;
+    attempt = 0;
+    outage = false;
     myName = '';
     lastAuthor = null;
     $('messages').replaceChildren();
@@ -37,23 +63,50 @@
     $('chat-view').hidden = false;
     setStatus('connecting');
     $('draft').focus();
+    connect();
+  }
 
+  // No onopen handler: the page is online only once the welcome frame arrives.
+  function connect() {
+    retryTimer = null;
     const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    const socket = new WebSocket(scheme + location.host + '/ws?nickname=' + encodeURIComponent(nick));
+    const socket = new WebSocket(scheme + location.host + '/ws?nickname=' + encodeURIComponent(requestedNick));
     ws = socket;
-    socket.onopen = () => setStatus('online');
     socket.onmessage = (e) => {
       if (ws !== socket) return; // late frame from a socket the user already left
       addRaw(e.data);
     };
     socket.onclose = () => {
       if (ws !== socket) return; // the user left on purpose
-      setStatus('offline');
-      addSystem('Desconectado. No se pudo mantener la conexión con el servidor.');
+      scheduleReconnect();
     };
   }
 
+  // Exponential backoff with equal jitter: 0.5-1 s, 1-2 s, 2-4 s ... 15-30 s.
+  function scheduleReconnect() {
+    ws = null;
+    setStatus('reconnecting');
+    if (!outage) {
+      outage = true;
+      addSystem('Conexión perdida, reconectando…');
+    }
+    const d = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt);
+    attempt++;
+    retryTimer = setTimeout(connect, d / 2 + Math.random() * d / 2);
+  }
+
+  // Only cuts a pending wait short; never opens a second socket.
+  function reconnectNow() {
+    if (retryTimer === null) return;
+    clearTimeout(retryTimer);
+    connect();
+  }
+  window.addEventListener('online', reconnectNow);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) reconnectNow(); });
+
   $('leave-btn').addEventListener('click', () => {
+    clearTimeout(retryTimer);
+    retryTimer = null;
     if (ws) { const s = ws; ws = null; s.close(); }
     closePanels();
     $('draft').value = '';
@@ -80,6 +133,12 @@
         myName = msg.from;
         $('me').textContent = myName;
         $('me').title = myName;
+        attempt = 0;
+        setStatus('online');
+        if (outage) {
+          outage = false;
+          addSystem('Reconectado');
+        }
         break;
       case 'chat':
         if (typeof msg.text === 'string') addChat(msg.from, msg.text, msg.ts);
@@ -143,7 +202,7 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    if (IMAGE_URL.test(text)) {
+    if (isAllowedImage(text)) {
       bubble.classList.add('media');
       const img = document.createElement('img');
       img.src = text;
@@ -259,11 +318,11 @@
   selectCat(0);
 
   const gifUrl = $('gif-url');
-  gifUrl.addEventListener('input', () => { $('gif-send').disabled = !IMAGE_URL.test(gifUrl.value.trim()); });
+  gifUrl.addEventListener('input', () => { $('gif-send').disabled = !isAllowedImage(gifUrl.value.trim()); });
   gifUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('gif-send').click(); } });
   $('gif-send').addEventListener('click', () => {
     const url = gifUrl.value.trim();
-    if (IMAGE_URL.test(url) && sendText(url)) {
+    if (isAllowedImage(url) && sendText(url)) {
       gifUrl.value = '';
       $('gif-send').disabled = true;
       closePanels();

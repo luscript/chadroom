@@ -35,19 +35,19 @@ the page must behave exactly as before under the new CSP.
 
 ## Phase 3: Implementation — page behavior (`cmd/chatroom/app.js`, `app.css`)
 
-- [ ] 3.1 Allowlist (CHAT-15): replace `IMAGE_URL` with `IMAGE_HOSTS` (Set, design list, comment pointing to `imageHosts` in `main.go`), `IMAGE_PATH` and `isAllowedImage(text)` exactly as in the design; use it in `addChat` and in the GIF panel (`input` enable check and `gif-send` click guard).
-- [ ] 3.2 GIF panel hint and placeholder in `index.html` mention the allowed hosts (e.g. "Pegá la URL de un GIF de Giphy, Tenor o Imgur.").
-- [ ] 3.3 Reconnect state (CHAT-16): add `RETRY_BASE_MS`, `RETRY_MAX_MS`, `requestedNick`, `retryTimer`, `attempt`, `outage`; extract `connect()` from `join()` (keep the `ws !== socket` guard, no `onopen` handler); `join()` resets state, sets `connecting` and calls `connect()`.
-- [ ] 3.4 `scheduleReconnect()` on unexpected `close` (`ws = null`, `reconnecting`, one "Conexión perdida, reconectando…" notice per outage, equal-jitter delay `d/2 + rand·d/2`, `d = min(30 s, 1 s·2^attempt)`); `welcome` sets `online`, resets `attempt`, and adds "Reconectado" if `outage`.
-- [ ] 3.5 `reconnectNow()` on `window` `online` and `document` `visibilitychange` (visible): only short-circuits a pending timer, never opens a second socket, does not reset `attempt`. "Salir" clears `retryTimer` before closing the socket.
-- [ ] 3.6 Status pill: `STATUS_LABEL` gets `reconnecting: 'Reconectando…'` and loses `offline`; in `app.css` replace the `offline` rule with the `reconnecting` rule + `pulse` animation + `prefers-reduced-motion` override from the design.
+- [x] 3.1 Allowlist (CHAT-15): replace `IMAGE_URL` with `IMAGE_HOSTS` (Set, design list, comment pointing to `imageHosts` in `main.go`), `IMAGE_PATH` and `isAllowedImage(text)` exactly as in the design; use it in `addChat` and in the GIF panel (`input` enable check and `gif-send` click guard).
+- [x] 3.2 GIF panel hint and placeholder in `index.html` mention the allowed hosts (e.g. "Pegá la URL de un GIF de Giphy, Tenor o Imgur.").
+- [x] 3.3 Reconnect state (CHAT-16): add `RETRY_BASE_MS`, `RETRY_MAX_MS`, `requestedNick`, `retryTimer`, `attempt`, `outage`; extract `connect()` from `join()` (keep the `ws !== socket` guard, no `onopen` handler); `join()` resets state, sets `connecting` and calls `connect()`.
+- [x] 3.4 `scheduleReconnect()` on unexpected `close` (`ws = null`, `reconnecting`, one "Conexión perdida, reconectando…" notice per outage, equal-jitter delay `d/2 + rand·d/2`, `d = min(30 s, 1 s·2^attempt)`); `welcome` sets `online`, resets `attempt`, and adds "Reconectado" if `outage`.
+- [x] 3.5 `reconnectNow()` on `window` `online` and `document` `visibilitychange` (visible): only short-circuits a pending timer, never opens a second socket, does not reset `attempt`. "Salir" clears `retryTimer` before closing the socket.
+- [x] 3.6 Status pill: `STATUS_LABEL` gets `reconnecting: 'Reconectando…'` and loses `offline`; in `app.css` replace the `offline` rule with the `reconnecting` rule + `pulse` animation + `prefers-reduced-motion` override from the design.
 
 ## Phase 4: Testing (`cmd/chatroom/main_test.go`, `go test -race ./...`)
 
 - [x] 4.1 `TestStaticAssets` (table `/`, `/app.js`, `/app.css`): 200, exact `Content-Type`, `nosniff`, `Cache-Control: no-cache`, body equals the embedded var. Also `GET /index.html` → 404.
 - [x] 4.2 Extend `TestIndexSecurityHeaders`: CSP equals the literal policy string from the design (written out in the test) and contains neither `unsafe-inline` nor `unsafe-eval`.
 - [x] 4.3 `TestIndexHasNoInlineCode` on `indexHTML`: no `<style`, no `style=`, every `<script` tag has `src=`, no `on[a-z]+=` attributes; references `src="/app.js"` and `href="/app.css"`.
-- [ ] 4.4 `TestImageHostsMirroredInJS`: extract the `IMAGE_HOSTS` Set from `appJS` and compare (sorted) with `imageHosts`; fails on drift in either direction.
+- [x] 4.4 `TestImageHostsMirroredInJS`: extract the `IMAGE_HOSTS` Set from `appJS` and compare (sorted) with `imageHosts`; fails on drift in either direction.
 - [x] 4.5 Run `go vet ./...`, `gofmt -l .` and `go test -race ./...` after each batch.
 
 ## Phase 5: Docs and wrap-up

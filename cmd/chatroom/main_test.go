@@ -262,3 +262,21 @@ func TestParseAllowedOrigins(t *testing.T) {
 		})
 	}
 }
+
+// The JS allowlist must list exactly the hosts the CSP allows in img-src.
+func TestImageHostsMirroredInJS(t *testing.T) {
+	block := regexp.MustCompile(`(?s)const IMAGE_HOSTS = new Set\(\[(.*?)\]\)`).FindSubmatch(appJS)
+	if block == nil {
+		t.Fatal("IMAGE_HOSTS not found in app.js")
+	}
+	var got []string
+	for _, m := range regexp.MustCompile(`'([^']+)'`).FindAllSubmatch(block[1], -1) {
+		got = append(got, string(m[1]))
+	}
+	want := slices.Clone(imageHosts)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("IMAGE_HOSTS = %v, want %v (imageHosts)", got, want)
+	}
+}
