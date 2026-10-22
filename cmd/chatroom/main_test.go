@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -98,13 +99,33 @@ func TestRunGracefulShutdown(t *testing.T) {
 	}
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, _, err := conn.ReadMessage(); err != nil {
-		t.Fatalf("read join notice: %v", err)
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read welcome: %v", err)
+	}
+	var first struct {
+		Type string `json:"type"`
+		From string `json:"from"`
+		Text string `json:"text"`
+		TS   int64  `json:"ts"`
+	}
+	if err := json.Unmarshal(data, &first); err != nil {
+		t.Fatalf("decode first frame %q: %v", data, err)
+	}
+	if first.Type != "welcome" {
+		t.Fatalf("first frame type = %q, want welcome", first.Type)
 	}
 
 	cancel()
-	if _, _, err := conn.ReadMessage(); err == nil {
-		t.Fatal("expected client read error after shutdown")
+	// Drain frames already queued (e.g. join) until the connection errors.
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				t.Fatal("expected client read error after shutdown, got timeout")
+			}
+			break
+		}
 	}
 	select {
 	case code := <-codeCh:

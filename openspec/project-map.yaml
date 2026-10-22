@@ -1,6 +1,6 @@
 schema: project-map-v1
-generated: 2026-10-22T17:35:00Z
-generated_commit: ba91d89
+generated: 2026-10-22T19:30:00Z
+generated_commit: efcdb26
 
 modules:
   - name: chatroom-cmd
@@ -13,17 +13,19 @@ modules:
       - cmd/chatroom/main_test.go
   - name: chat
     path: internal/chat
-    description: "Chat hub. room.go = Room (map[*Client] registry owned by Run(ctx), non-blocking fanOut that drops slow clients, done chan, checkOrigin allowlist, HandleWebSocket, normalizeNickname max 32 runes / \"Anonymous\" fallback); client.go = Client (conn, send chan, nickname) with readPump (4096-byte read limit, deadlines, pong; closes on binary or invalid UTF-8 frames) and writePump (sole conn writer, pings)"
+    description: "Chat hub. room.go = Room (clients registry + taken set of foldKey(nickname), both owned by Run(ctx); broadcast chan inbound{from,text}; Run assigns the final nickname on register, closes client.registered, delivers welcome then fans out join; drops chat from non-members; deliver/fanOut non-blocking with silent slow-client drop; remove() is the single removal path; done chan, checkOrigin allowlist, HandleWebSocket waits on registered before starting pumps). message.go = JSON envelope {type,from,text,ts} (chat/join/leave/welcome), encode marshals once per event. nickname.go = normalizeNickname (ToValidUTF8, strip Cc + Bidi_Control, trim, 32 runes, \"Anonymous\"), truncateRunes, foldKey (EqualFold-equivalent key), assignNickname (lowest free \" (n)\" suffix). client.go = Client (conn, send, registered, nickname) with readPump (4096-byte limit, deadlines, pong; closes on binary/invalid UTF-8; drops blank frames) and writePump (sole conn writer, pings)"
     language: go
     entry_points:
       - internal/chat/room.go
       - internal/chat/client.go
+      - internal/chat/message.go
+      - internal/chat/nickname.go
     test_paths:
       - internal/chat/room_test.go
       - internal/chat/client_test.go
   - name: web-client
     path: cmd/chatroom/index.html
-    description: "Single-file browser client (Nocturne design, Spanish UI) embedded via go:embed and served at GET /; join form for nickname, connects to ws(s)://location.host/ws, enforces MAX_MESSAGE_BYTES=4096 client-side, emoji panel, GIF panel (https image URL sent as a message and rendered as <img>), emoji-only bubbles; text rendered with textContent; loads Inter font from Google Fonts"
+    description: "Single-file browser client (Nocturne design, Spanish UI) embedded via go:embed and served at GET /; join form for nickname, connects to ws(s)://location.host/ws, enforces MAX_MESSAGE_BYTES=4096 client-side, emoji panel, GIF panel (https image URL sent as a message and rendered as <img>), emoji-only bubbles; parses server frames as JSON by type (unknown types/invalid JSON ignored), identity from welcome, own messages iff from === welcome name, times from ts; text rendered with textContent; loads Inter font from Google Fonts"
     language: html/javascript
     entry_points:
       - cmd/chatroom/index.html
@@ -61,7 +63,7 @@ api_surface:
   - name: WebSocket chat endpoint
     type: REST
     path: GET /ws?nickname=<string>
-    description: "Upgrades to WebSocket; nickname is normalized (trimmed, <=32 runes, \"Anonymous\" if empty); each text frame (<=4096 bytes, valid UTF-8) is broadcast to all clients as \"<nickname>: <text>\"; join/leave notices (\"<nick> joined! 🎉\" / \"<nick> left. 👋\") are plain text"
+    description: "Upgrades to WebSocket. Inbound: plain UTF-8 text frames <=4096 bytes (blank ones ignored). Outbound: JSON {\"type\",\"from\",\"text\",\"ts\"} with type chat|join|leave|welcome (text \"\" for non-chat, ts Unix ms); welcome is the first frame and carries the assigned nickname. Nicknames normalized (control/bidi stripped, trimmed, <=32 runes, \"Anonymous\") and unique case-insensitively via \" (n)\" suffix"
     auth: null (Origin check - same-origin or ALLOWED_ORIGINS; null rejected)
   - name: Chat page
     type: REST

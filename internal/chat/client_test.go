@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
+	"sync"
 	"strings"
 	"testing"
 	"time"
@@ -497,5 +498,160 @@ func TestNoGoroutineLeakAfterDisconnect(t *testing.T) {
 			t.Fatalf("%d client pump goroutines still running 3s after disconnect", n)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// nextChat reads until a chat frame arrives, failing on a join frame for forbidden.
+func nextChat(t *testing.T, conn *websocket.Conn, forbiddenJoin string) message {
+	t.Helper()
+	for {
+		m := readMsg(t, conn)
+		if m.Type == typeJoin && m.From == forbiddenJoin {
+			t.Fatalf("unexpected join envelope: %+v", m)
+		}
+		if m.Type == typeChat {
+			return m
+		}
+	}
+}
+
+func send(t *testing.T, conn *websocket.Conn, text string) {
+	t.Helper()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(text)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// CHAT-12: concurrent clients asking for the same nickname get distinct names.
+func TestConcurrentSameNickname(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	const n = 20
+
+	type result struct {
+		name string
+		err  error
+	}
+	results := make(chan result, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, _, err := dialOrigin(srv, "bob", srv.URL)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			t.Cleanup(func() { conn.Close() })
+			conn.SetReadDeadline(time.Now().Add(testDeadline))
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			var m message
+			if err := json.Unmarshal(raw, &m); err != nil || m.Type != typeWelcome {
+				results <- result{err: errors.New("bad welcome: " + string(raw))}
+				return
+			}
+			results <- result{name: m.From}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	seen := map[string]string{}
+	for r := range results {
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if c := len([]rune(r.name)); c > maxNicknameRunes {
+			t.Errorf("name %q has %d runes", r.name, c)
+		}
+		k := foldKey(r.name)
+		if prev, dup := seen[k]; dup {
+			t.Errorf("duplicate names %q and %q", prev, r.name)
+		}
+		seen[k] = r.name
+	}
+	if len(seen) != n {
+		t.Fatalf("got %d distinct names, want %d", len(seen), n)
+	}
+}
+
+// CHAT-12: collisions ignore case, and a freed name can be reused.
+func TestCaseInsensitiveCollision(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	a, na := dial(t, srv, "Bob")
+	b, nb := dial(t, srv, "bob")
+	c, nc := dial(t, srv, "BOB")
+	if na != "Bob" || nb != "bob (2)" || nc != "BOB (3)" {
+		t.Fatalf("names = %q, %q, %q", na, nb, nc)
+	}
+
+	a.Close()
+	readUntil(t, b, typeLeave, "Bob", "")
+	readUntil(t, c, typeLeave, "Bob", "")
+
+	_, nd := dial(t, srv, "bob")
+	if nd != "bob" {
+		t.Fatalf("reused name = %q, want bob", nd)
+	}
+}
+
+// CHAT-13: whitespace-only messages are dropped silently; others are untouched.
+func TestEmptyMessagesDropped(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	for _, s := range []string{"", "   ", "\n\t", "x"} {
+		send(t, a, s)
+	}
+	if m := nextChat(t, b, ""); m.From != "A" || m.Text != "x" {
+		t.Fatalf("first chat = %+v, want text x from A", m)
+	}
+	send(t, a, "y")
+	if m := nextChat(t, b, ""); m.Text != "y" {
+		t.Fatalf("second chat = %+v, want y", m)
+	}
+	send(t, a, "  hi  ")
+	if m := nextChat(t, b, ""); m.Text != "  hi  " {
+		t.Fatalf("chat text = %q, want surrounding whitespace preserved", m.Text)
+	}
+}
+
+// CHAT-10: text that imitates a system notice is just chat; JSON escaping round-trips.
+func TestForgedNoticeIsChat(t *testing.T) {
+	srv, _ := startServer(t, NewRoom(nil))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	texts := []string{"Bob joined! 🎉", "\nBob: hi", "say \"hi\" \\ <b>\t\n"}
+	for _, text := range texts {
+		send(t, a, text)
+	}
+	for _, text := range texts {
+		m := nextChat(t, b, "Bob")
+		if m.From != "A" || m.Text != text {
+			t.Fatalf("chat = %+v, want from A with text %q", m, text)
+		}
+	}
+}
+
+// CHAT-04/CHAT-09: control and bidi characters never reach the assigned nickname.
+func TestNicknameControlAndBidiStripped(t *testing.T) {
+	tests := []struct{ name, nick, want string }{
+		{"newline", "Bob\nAdmin", "BobAdmin"},
+		{"bidi and spaces", "‮  Bob  ‬", "Bob"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := startServer(t, NewRoom(nil))
+			_, got := dial(t, srv, url.QueryEscape(tt.nick))
+			if got != tt.want {
+				t.Fatalf("nickname = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

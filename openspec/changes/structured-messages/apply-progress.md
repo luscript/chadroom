@@ -22,4 +22,17 @@ Deviations from design (accepted):
 - Page: `#me` header tag shows the requested name until `welcome` arrives; non-finite `ts`
   falls back to the local clock; frames without a string `from` are ignored.
 
-## Batch 2 — pending (4.5, 4.6)
+## Batch 2 — 2026-10-22
+
+| Worker | Tasks | Status | Verification |
+|--------|-------|--------|--------------|
+| W3 | 4.5 | SUCCESS | `go test -race -count=3 ./internal/chat/...` clean; no production bugs found |
+| W4 | 4.6 | SUCCESS | `go test -race -count=3 ./cmd/...` clean |
+| orchestrator | 5.1 | done | project map re-stamped at efcdb26 (chat module, web client, `/ws` api_surface) |
+
+Orchestrator check: `gofmt -l .` empty, `go vet ./...` clean, `go test -race -count=2 ./...` ok.
+
+## Pending
+
+- 4.7 automated part done (gofmt/vet/race tests); **manual two-tab browser check not done yet** —
+  left for verify / the developer.
