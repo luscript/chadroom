@@ -23,7 +23,10 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] #15 Handle cancelled `prompt` (nickname "null").
 - [ ] #16 Check `readyState` before `send`; reconnect with backoff.
 - [ ] CSP header on `GET /` — requires moving the inline script / `onclick` to a hashed or
-      external script.
+      external script. Note: the page now also loads Google Fonts (needs `style-src`/`font-src`).
+- [ ] Inline images leak viewers' IPs: any user can send an https image URL and every other
+      browser fetches it (`IMAGE_URL` in `index.html`). Options: click-to-load, a host allowlist,
+      or a server-side proxy.
 
 ## `deps-cleanup`
 - [ ] #17 `go mod tidy` (gin and gorilla are marked `// indirect`).
@@ -53,4 +56,6 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Typing indicator.
 
 ## Housekeeping
+- [ ] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
+      `127.0.0.1`; `index.html` already builds the URL from `location.host` (#13 partially done).
 - [ ] #20 Review `.claude.json` / `.claude/` for secrets before committing.
