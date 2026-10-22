@@ -93,6 +93,12 @@ p { margin: 0; }
 .chat-header .subtitle { font-size: 12px; }
 .chat-header .actions { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
 .chat-header .tag { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.online { position: relative; }
+.tool-users { white-space: nowrap; font-size: 12px; padding: 0 10px; height: 32px; }
+.users-title { font-size: 12px; }
+.users-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.users-list li { display: flex; align-items: center; gap: var(--space-3); font-size: 14px; overflow-wrap: anywhere; }
+.users-list .tag { font-size: 10px; padding: 0 6px; }
 .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--color-neutral-400); white-space: nowrap; }
 .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot); box-shadow: 0 0 8px var(--dot); }
 .status[data-state="connecting"] { --dot: var(--color-neutral-500); }
@@ -147,6 +153,7 @@ p { margin: 0; }
   box-shadow: var(--shadow-lg); z-index: 5; display: flex; flex-direction: column; gap: var(--space-3);
 }
 .popover.gif { width: min(380px, 100%); }
+.popover.users { top: calc(100% + 8px); bottom: auto; left: auto; right: 0; width: min(260px, 85vw); max-height: 50vh; overflow-y: auto; }
 .cats { display: flex; gap: var(--space-2); }
 .cats button {
   width: 34px; height: 30px; font-size: 17px; cursor: pointer; border: 0; border-radius: var(--radius-sm);
@@ -164,4 +171,5 @@ p { margin: 0; }
 @media (max-width: 560px) {
   h1 { font-size: 32px; }
   .chat-header .status-label { display: none; }
+  .chat-header .tag { max-width: 96px; }
 }

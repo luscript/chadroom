@@ -45,6 +45,15 @@
         <span id="status" class="status" data-state="connecting" role="status">
           <span class="dot"></span><span class="status-label" id="status-label">Conectando…</span>
         </span>
+        <div class="online">
+          <button id="users-btn" type="button" class="btn btn-ghost tool tool-users" aria-expanded="false" aria-controls="users-panel">
+            <span id="users-count">0</span> en línea
+          </button>
+          <div id="users-panel" class="popover users" hidden>
+            <div class="users-title text-muted">En línea</div>
+            <ul id="users-list" class="users-list" aria-label="Personas en línea"></ul>
+          </div>
+        </div>
         <span id="me" class="tag tag-accent"></span>
         <button id="leave-btn" type="button" class="btn btn-ghost">Salir</button>
       </div>

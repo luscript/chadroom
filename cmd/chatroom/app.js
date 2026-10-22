@@ -28,6 +28,7 @@
   let retryTimer = null; // pending reconnect timeout id, or null
   let attempt = 0; // consecutive failed attempts since the last welcome
   let outage = false; // a "connection lost" notice is on screen
+  let users = new Set(); // nicknames in the room; the server's users frame is authoritative
 
   // True only when the whole message is one https image URL on an allowlisted host.
   function isAllowedImage(text) {
@@ -56,6 +57,8 @@
     outage = false;
     myName = '';
     lastAuthor = null;
+    users = new Set();
+    renderUsers();
     $('messages').replaceChildren();
     $('me').textContent = nick;
     $('me').title = nick;
@@ -133,7 +136,20 @@
   function addRaw(data) {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
-    if (!msg || typeof msg.from !== 'string') return;
+    if (!msg) return;
+    // users and history carry no from, so they are handled before that guard.
+    if (msg.type === 'users') {
+      if (Array.isArray(msg.users)) {
+        users = new Set(msg.users.filter((n) => typeof n === 'string'));
+        renderUsers();
+      }
+      return;
+    }
+    if (msg.type === 'history') {
+      if (Array.isArray(msg.messages)) renderHistory(msg.messages);
+      return;
+    }
+    if (typeof msg.from !== 'string') return;
     switch (msg.type) {
       case 'welcome':
         myName = msg.from;
@@ -141,22 +157,62 @@
         $('me').title = myName;
         attempt = 0;
         setStatus('online');
-        if (outage) {
-          outage = false;
-          addSystem('Reconectado');
-        }
         break;
       case 'chat':
         if (typeof msg.text === 'string') addChat(msg.from, msg.text, msg.ts);
         break;
       case 'join':
+        users.add(msg.from);
+        renderUsers();
         addSystem(msg.from + ' se unió 🎉');
         break;
       case 'leave':
+        users.delete(msg.from);
+        renderUsers();
         addSystem(msg.from + ' salió 👋');
         break;
       // Unknown types are ignored so newer servers don't break this page.
     }
+  }
+
+  // The history frame replaces the whole transcript, so a reconnect never duplicates
+  // messages. "Reconectado" goes after it, or the replacement would wipe it.
+  function renderHistory(messages) {
+    const list = $('messages');
+    list.setAttribute('aria-busy', 'true');
+    try {
+      list.replaceChildren();
+      lastAuthor = null;
+      for (const m of messages) {
+        if (m && m.type === 'chat' && typeof m.from === 'string' && typeof m.text === 'string') {
+          addChat(m.from, m.text, m.ts);
+        }
+      }
+    } finally {
+      list.removeAttribute('aria-busy');
+    }
+    if (outage) {
+      outage = false;
+      addSystem('Reconectado');
+    }
+  }
+
+  function renderUsers() {
+    const names = [...users].sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' }));
+    $('users-count').textContent = String(users.size);
+    $('users-list').replaceChildren(...names.map((name) => {
+      const li = document.createElement('li');
+      const label = document.createElement('span');
+      label.textContent = name;
+      li.append(label);
+      if (name === myName) {
+        const tag = document.createElement('span');
+        tag.className = 'tag tag-accent';
+        tag.textContent = 'vos';
+        li.append(tag);
+      }
+      return li;
+    }));
   }
 
   function addSystem(text) {
@@ -272,6 +328,7 @@
   const panels = {
     emoji: { panel: $('emoji-panel'), btn: $('emoji-btn') },
     gif: { panel: $('gif-panel'), btn: $('gif-btn') },
+    users: { panel: $('users-panel'), btn: $('users-btn') },
   };
 
   function togglePanel(key) {
@@ -292,6 +349,7 @@
 
   panels.emoji.btn.addEventListener('click', () => togglePanel('emoji'));
   panels.gif.btn.addEventListener('click', () => togglePanel('gif'));
+  panels.users.btn.addEventListener('click', () => togglePanel('users'));
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanels(); });
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.popover, .tool')) closePanels();

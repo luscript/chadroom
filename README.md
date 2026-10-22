@@ -57,6 +57,24 @@ se ignoran. Los frames binarios cierran la conexión con 1003 y el UTF-8 inváli
 
 `ts` es el momento del evento en Unix milisegundos.
 
+Además hay dos frames privados que solo recibe quien se conecta y que no llevan `from` ni `text`:
+
+```json
+{"type":"users","users":["Alice","bob"],"ts":1792684800123}
+{"type":"history","messages":[{"type":"chat","from":"bob","text":"hola","ts":1792684790000}],"ts":1792684800123}
+```
+
+- `users`: los nicknames conectados (incluido el propio), ordenados sin distinguir mayúsculas.
+- `history`: los últimos 50 mensajes `chat`, del más viejo al más nuevo (`[]` si no hay). Vive solo
+  en memoria: se pierde al reiniciar el servidor.
+
+**Secuencia al conectarse:** `welcome` → `users` → `history` → `join` (este último lo reciben todos,
+incluido el que entra). Si falla la entrega de alguno de los tres privados, el cliente se descarta
+sin anunciar `join` ni `leave`.
+
+**Clientes lentos:** si la sala descarta a un cliente por no leer a tiempo, ahora los demás reciben
+su `leave`. Al apagar el servidor no se envía ningún `leave`.
+
 **Nicknames:** son únicos sin distinguir mayúsculas; si el nickname ya está en uso se agrega un
 sufijo ` (n)` (por ejemplo `bob (2)`). Se quitan los caracteres de control y los de dirección
 bidi, se recorta a 32 caracteres y, si queda vacío, se usa `Anonymous`.
