@@ -1,11 +1,11 @@
 schema: project-map-v1
-generated: 2026-10-22T16:55:00Z
-generated_commit: d7072e4
+generated: 2026-10-22T17:35:00Z
+generated_commit: ba91d89
 
 modules:
   - name: chatroom-cmd
     path: cmd/chatroom
-    description: Composition root; reads ALLOWED_ORIGINS, creates the Room, runs Room.Run(ctx), newRouter (GET / embedded index.html, GET /ws), http.Server on :8080 with graceful shutdown on SIGINT/SIGTERM
+    description: "Composition root. main wires signal.NotifyContext (SIGINT/SIGTERM) and ALLOWED_ORIGINS into serve(ctx, addr, origins) -> run(ctx, listener, origins), which starts Room.Run, an http.Server (ReadHeaderTimeout/IdleTimeout/MaxHeaderBytes) and graceful shutdown returning an exit code. newRouter (gin, no trusted proxies): GET / serves embedded index.html with nosniff + X-Frame-Options DENY, GET /ws. parseAllowedOrigins trims blanks and drops \"null\". Listens on :8080"
     language: go
     entry_points:
       - cmd/chatroom/main.go
@@ -13,7 +13,7 @@ modules:
       - cmd/chatroom/main_test.go
   - name: chat
     path: internal/chat
-    description: Chat hub. room.go = Room (map[*Client] registry owned by Run(ctx), fanOut, done chan, checkOrigin allowlist, HandleWebSocket); client.go = Client (conn, send chan, nickname) with readPump/writePump (read limit, deadlines, ping/pong)
+    description: "Chat hub. room.go = Room (map[*Client] registry owned by Run(ctx), non-blocking fanOut that drops slow clients, done chan, checkOrigin allowlist, HandleWebSocket, normalizeNickname max 32 runes / \"Anonymous\" fallback); client.go = Client (conn, send chan, nickname) with readPump (4096-byte read limit, deadlines, pong; closes on binary or invalid UTF-8 frames) and writePump (sole conn writer, pings)"
     language: go
     entry_points:
       - internal/chat/room.go
@@ -23,7 +23,7 @@ modules:
       - internal/chat/client_test.go
   - name: web-client
     path: cmd/chatroom/index.html
-    description: Static browser client embedded via go:embed and served at GET /; prompts nickname, connects to ws://localhost:8080/ws, renders messages with textContent
+    description: "Single-file browser client (Nocturne design, Spanish UI) embedded via go:embed and served at GET /; join form for nickname, connects to ws(s)://location.host/ws, enforces MAX_MESSAGE_BYTES=4096 client-side, emoji panel, GIF panel (https image URL sent as a message and rendered as <img>), emoji-only bubbles; text rendered with textContent; loads Inter font from Google Fonts"
     language: html/javascript
     entry_points:
       - cmd/chatroom/index.html
@@ -33,10 +33,10 @@ dependencies:
   production:
     - name: github.com/gin-gonic/gin
       version: v1.12.0
-      purpose: HTTP router (GET / and GET /ws). Marked "// indirect" in go.mod though imported directly — needs go mod tidy
+      purpose: "HTTP router (GET / and GET /ws). Marked \"// indirect\" in go.mod though imported directly — needs go mod tidy (go.mod requires go 1.27.3; all deps in one require block)"
     - name: github.com/gorilla/websocket
       version: v1.5.3
-      purpose: WebSocket upgrade and connection I/O. Also marked "// indirect" incorrectly
+      purpose: "WebSocket upgrade and connection I/O. Also marked \"// indirect\" incorrectly"
   development: []
 
 testing:
@@ -48,23 +48,23 @@ testing:
     threshold: null
 
 conventions:
-  commit_style: none established (single "Initial commit")
-  branch_naming: none established (main only)
+  commit_style: "Conventional Commits, type(scope): subject (e.g. fix(chat):, feat(ui):, docs:); first commit was \"Initial commit\""
+  branch_naming: "type/slug (fix/channel-handling, feat/structured-messages); main is default"
   code_style: gofmt; no golangci-lint config
   documentation: short Go doc comments above types/functions
   examples:
-    - "Constructor pattern: func NewRoom() *Room returns a fully initialized struct with made channels"
+    - "Constructor pattern: func NewRoom(allowedOrigins []string) *Room returns a fully initialized struct with made channels"
     - "Goroutine pumps per connection: go client.writePump(cr); go client.readPump(cr) — readPump owns unregister, writePump owns all conn writes; only Room.Run closes send"
-    - "Error handling: log.Println(\"Read error:\", err) then return (no wrapping, no custom error types)"
+    - "Error handling: c.logError(\"Read\", err) (logs only abnormal closes) then return; no wrapping, no custom error types"
 
 api_surface:
   - name: WebSocket chat endpoint
     type: REST
     path: GET /ws?nickname=<string>
-    description: Upgrades to WebSocket; each text frame received is broadcast to all clients as "<nickname>: <text>"; join/leave notices broadcast as plain text
+    description: "Upgrades to WebSocket; nickname is normalized (trimmed, <=32 runes, \"Anonymous\" if empty); each text frame (<=4096 bytes, valid UTF-8) is broadcast to all clients as \"<nickname>: <text>\"; join/leave notices (\"<nick> joined! 🎉\" / \"<nick> left. 👋\") are plain text"
     auth: null (Origin check - same-origin or ALLOWED_ORIGINS; null rejected)
   - name: Chat page
     type: REST
     path: GET /
-    description: Serves the embedded index.html
+    description: "Serves the embedded index.html with X-Content-Type-Options nosniff and X-Frame-Options DENY"
     auth: null
