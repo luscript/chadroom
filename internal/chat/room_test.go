@@ -3,7 +3,6 @@ package chat
 import (
 	"context"
 	"encoding/json"
-	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,7 +16,7 @@ const testDeadline = 2 * time.Second
 
 func startRoom(t *testing.T) (*Room, context.CancelFunc) {
 	t.Helper()
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	ctx, cancel := context.WithCancel(context.Background())
 	go cr.Run(ctx)
 	t.Cleanup(cancel)
@@ -365,7 +364,7 @@ func TestSlowClientDroppedOthersReceive(t *testing.T) {
 }
 
 func TestSaturationNoDeadlock(t *testing.T) {
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	listener := newTestClient("l", sendBufferSize)
 	// Fill the broadcast queue before Run starts so it is full when traffic begins.
 	for i := 0; i < cap(cr.broadcast); i++ {
@@ -535,7 +534,7 @@ func TestBroadcastFromNonMemberDropped(t *testing.T) {
 func TestChatBeforeLeaveOnDisconnect(t *testing.T) {
 	// Drive the hub's handlers directly (no Run goroutine) so the "broadcast
 	// queued, then unregister" interleaving is deterministic.
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	a := newTestClient("a", 8)
 	b := newTestClient("b", 8)
 	for _, c := range []*Client{a, b} {
@@ -553,7 +552,7 @@ func TestChatBeforeLeaveOnDisconnect(t *testing.T) {
 // The drain before a leave can itself slow-drop the leaving client; it must
 // not be removed (and its send closed) a second time, nor announced twice.
 func TestLeaveAfterDrainDroppedClient(t *testing.T) {
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	a := newTestClient("a", 0) // any delivery to a overflows
 	b := newTestClient("b", 8)
 	for _, c := range []*Client{a, b} {
@@ -750,7 +749,7 @@ func TestHistoryKeepsLast50(t *testing.T) {
 // CHAT-02/05: a slow client dropped by a fan-out is announced after the
 // triggering event, and the leaves it causes are announced too.
 func TestSlowDropCascadeAnnounced(t *testing.T) {
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	o := newTestClient("o", 16)
 	x := newTestClient("x", 0) // dropped by the chat
 	y := newTestClient("y", 1) // takes the chat, dropped by x's leave
@@ -793,40 +792,11 @@ func TestNewcomerDroppedDuringJoinIsSilent(t *testing.T) {
 	expectUsers(t, users, "n", "obs") // the dropped newcomer appears once, as the new "n"
 }
 
-func TestCheckOrigin(t *testing.T) {
-	tests := []struct {
-		name    string
-		origin  string
-		allowed []string
-		want    bool
-	}{
-		{"no origin", "", nil, true},
-		{"same host", "http://example.com", nil, true},
-		{"same host case-insensitive", "http://EXAMPLE.com", nil, true},
-		{"other host", "http://evil.com", nil, false},
-		{"null", "null", nil, false},
-		{"null allowlisted", "null", []string{"null"}, false},
-		{"allowlisted exact", "https://app.other.com", []string{"https://app.other.com"}, true},
-		{"allowlist is exact match", "http://app.other.com", []string{"https://app.other.com"}, false},
-		{"malformed", "http://[::1", nil, false},
-		{"no host", "foo", nil, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cr := NewRoom(tt.allowed)
-			r := httptest.NewRequest("GET", "http://example.com/ws", nil)
-			if tt.origin != "" {
-				r.Header.Set("Origin", tt.origin)
-			}
-			if got := cr.checkOrigin(r); got != tt.want {
-				t.Fatalf("checkOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestNewRoomDefaults(t *testing.T) {
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
+	if cr.id != "general" {
+		t.Errorf("id = %q, want general", cr.id)
+	}
 	if cr.maxMessageSize != 4096 {
 		t.Errorf("maxMessageSize = %d, want 4096", cr.maxMessageSize)
 	}
@@ -934,7 +904,7 @@ func TestAssignNickname(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cr := NewRoom(nil)
+			cr := NewRoom("general")
 			for _, n := range tt.taken {
 				cr.taken[foldKey(n)] = struct{}{}
 			}

@@ -2,14 +2,10 @@ package chat
 
 import (
 	"context"
-	"log"
-	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
 
@@ -26,16 +22,15 @@ const (
 // Only Run touches clients and closes client.send, so membership in the map
 // means "send is still open" and a channel can never be closed twice.
 type Room struct {
-	clients        map[*Client]struct{}
-	taken          map[string]struct{} // foldKey(nickname) of every registered client
-	history        []message           // last historySize chat messages, oldest first
-	dropped        []*Client           // slow clients removed by a fan-out, not yet announced
-	broadcast      chan inbound
-	register       chan *Client
-	unregister     chan *Client
-	done           chan struct{} // closed by Run when it exits
-	allowedOrigins map[string]struct{}
-	upgrader       websocket.Upgrader
+	id         string // immutable; used for lookup and logs, never sent on the wire
+	clients    map[*Client]struct{}
+	taken      map[string]struct{} // foldKey(nickname) of every registered client
+	history    []message           // last historySize chat messages, oldest first
+	dropped    []*Client           // slow clients removed by a fan-out, not yet announced
+	broadcast  chan inbound
+	register   chan *Client
+	unregister chan *Client
+	done       chan struct{} // closed by Run when it exits
 
 	// Unexported so tests can shorten them right after NewRoom.
 	writeWait      time.Duration
@@ -44,10 +39,10 @@ type Room struct {
 	maxMessageSize int64
 }
 
-// NewRoom initializes the chatroom. allowedOrigins lists extra origins
-// (e.g. "https://example.com") accepted besides same-host requests.
-func NewRoom(allowedOrigins []string) *Room {
-	cr := &Room{
+// NewRoom initializes the chatroom identified by id.
+func NewRoom(id string) *Room {
+	return &Room{
+		id:             id,
 		clients:        make(map[*Client]struct{}),
 		taken:          make(map[string]struct{}),
 		history:        make([]message, 0, historySize),
@@ -55,21 +50,11 @@ func NewRoom(allowedOrigins []string) *Room {
 		register:       make(chan *Client),
 		unregister:     make(chan *Client),
 		done:           make(chan struct{}),
-		allowedOrigins: make(map[string]struct{}, len(allowedOrigins)),
 		writeWait:      defaultWriteWait,
 		pongWait:       defaultPongWait,
 		pingPeriod:     defaultPingPeriod,
 		maxMessageSize: defaultMaxMessageSize,
 	}
-	for _, o := range allowedOrigins {
-		cr.allowedOrigins[o] = struct{}{}
-	}
-	cr.upgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-		CheckOrigin:     cr.checkOrigin,
-	}
-	return cr
 }
 
 // Run handles client registration and broadcasting until ctx is cancelled.
@@ -224,37 +209,9 @@ func (cr *Room) publish(msg []byte) {
 	cr.dropped = cr.dropped[:0]
 }
 
-// checkOrigin accepts same-host origins, requests without Origin (non-browser
-// clients) and explicitly allowed origins. "null" is always rejected.
-func (cr *Room) checkOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	if origin == "null" {
-		return false
-	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	if strings.EqualFold(u.Host, r.Host) {
-		return true
-	}
-	_, ok := cr.allowedOrigins[origin]
-	return ok
-}
-
-// HandleWebSocket upgrades HTTP to WebSocket
-func (cr *Room) HandleWebSocket(c *gin.Context) {
-	conn, err := cr.upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		log.Println("Upgrade error:", err)
-		return
-	}
-
-	nickname := normalizeNickname(c.Query("nickname"))
-
+// serveConn registers a client for conn and starts its pumps. The caller has
+// already upgraded the connection and validated the room.
+func (cr *Room) serveConn(conn *websocket.Conn, nickname string) {
 	client := &Client{conn: conn, send: make(chan []byte, sendBufferSize), registered: make(chan struct{}), nickname: nickname}
 	select {
 	case cr.register <- client:

@@ -84,6 +84,7 @@ p { margin: 0; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--color-accent); }
 .brand span { font: 500 13px var(--font-heading); letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-text); }
 .field { display: flex; flex-direction: column; gap: var(--space-2); }
+.join-error { font-size: 13px; color: var(--color-accent-300); }
 .field label { font-size: 12px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-neutral-500); }
 
 /* — chat header — */
@@ -108,6 +109,24 @@ p { margin: 0; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .status .dot { animation: none; } }
 .rule { height: 1px; flex: none; background: linear-gradient(to right, transparent, var(--color-divider) 48px, var(--color-divider) calc(100% - 48px), transparent); }
+
+/* — rooms — */
+.rooms { display: flex; align-items: center; gap: var(--space-4); padding: 0 var(--gutter) var(--space-3); flex: none; }
+.room-tabs { display: flex; gap: var(--space-2); flex: 1; min-width: 0; overflow-x: auto; }
+.room-tab {
+  flex: none; display: inline-flex; align-items: center; gap: var(--space-3); cursor: pointer;
+  font: 500 13px/1.2 var(--font-heading); padding: var(--space-2) var(--space-4);
+  border: 0; border-radius: var(--radius-md); background: transparent; color: var(--color-neutral-600);
+  white-space: nowrap;
+}
+.room-tab:hover { background: var(--color-accent-900); }
+.room-tab.joined { color: var(--color-text); }
+.room-tab[aria-selected="true"] { background: var(--color-accent-900); box-shadow: 0 0 0 1px var(--color-accent-700); color: var(--color-accent-100); }
+.room-unread {
+  font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: var(--radius-sm);
+  background: var(--color-accent); color: var(--color-bg);
+}
+.room-leave { flex: none; white-space: nowrap; font-size: 12px; }
 
 /* — messages — */
 .scroller { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-8) var(--gutter); }
@@ -172,4 +191,5 @@ p { margin: 0; }
   h1 { font-size: 32px; }
   .chat-header .status-label { display: none; }
   .chat-header .tag { max-width: 96px; }
+  .rooms { gap: var(--space-3); }
 }
