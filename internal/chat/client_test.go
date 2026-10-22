@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
-	"sync"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -365,8 +365,8 @@ func TestNicknameNormalization(t *testing.T) {
 			srv, _ := startServer(t, NewRoom(nil))
 			conn := dialRaw(t, srv, tt.query)
 			if m := readMsg(t, conn); m.Type != typeWelcome || m.From != tt.want {
-					t.Fatalf("first frame = %+v, want welcome from %q", m, tt.want)
-				}
+				t.Fatalf("first frame = %+v, want welcome from %q", m, tt.want)
+			}
 		})
 	}
 }

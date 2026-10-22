@@ -103,7 +103,7 @@ func run(ctx context.Context, ln net.Listener, allowedOrigins string) int {
 	case <-ctx.Done():
 	}
 
-	cancel() // stop the room on the server-error path too.
+	cancel()   // stop the room on the server-error path too.
 	<-roomDone // room closes WebSocket connections; Shutdown does not.
 	shCtx, shCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shCancel()
