@@ -64,6 +64,8 @@ cmd/chatroom/        main: router (gin), http.Server, señales, index.html embeb
 internal/chat/
   room.go            Room: hub que registra clientes y difunde mensajes
   client.go          Client: readPump / writePump por conexión
+  message.go         Mensaje JSON (type, from, text, ts) y su codificación
+  nickname.go        Normalización y unicidad de apodos
 ```
 
 Se usa el **patrón hub**:

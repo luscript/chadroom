@@ -54,3 +54,12 @@ in package `chat`, so the package's tests do not compile until it is migrated to
 ## Phase 5: Housekeeping
 
 - [x] 5.1 `openspec/project-map.yaml`: describe new files `message.go`/`nickname.go`, the JSON wire protocol in api_surface, and re-stamp the header.
+
+## Phase 6: Verify round 1 corrections (see verify-report.md)
+
+- [x] 6.1 `room.go`: `leave(c)` drains already-queued `broadcast` items (via shared `relay`) before removing `c`, re-checking membership after the drain (the drain's fan-out can slow-drop `c`).
+- [x] 6.2 `room_test.go`: `TestChatBeforeLeaveOnDisconnect` (deterministic, drives `leave` directly) and `TestLeaveAfterDrainDroppedClient` (no double close, silent drop). Both fail without the fix.
+- [x] 6.3 `room_test.go`: `TestShutdownIsSilent` (CHAT-02).
+- [x] 6.4 `index.html`: `onmessage` ignores frames from a socket the user already left.
+- [x] 6.5 `README.md`: architecture tree lists `message.go` and `nickname.go`.
+

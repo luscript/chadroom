@@ -389,6 +389,76 @@ func TestBroadcastFromNonMemberDropped(t *testing.T) {
 	expect(t, ok, typeChat, "ok", "sync") // "ghost" would have come first
 }
 
+// A chat queued right before unregister must be relayed before the leave,
+// whichever of the two channels Run's select happens to pick first.
+func TestChatBeforeLeaveOnDisconnect(t *testing.T) {
+	// Drive the hub's handlers directly (no Run goroutine) so the "broadcast
+	// queued, then unregister" interleaving is deterministic.
+	cr := NewRoom(nil)
+	a := newTestClient("a", 8)
+	b := newTestClient("b", 8)
+	for _, c := range []*Client{a, b} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.broadcast <- inbound{from: a, text: "bye"}
+	cr.leave(a)
+
+	expect(t, b, typeChat, "a", "bye")
+	expect(t, b, typeLeave, "a", "")
+}
+
+// The drain before a leave can itself slow-drop the leaving client; it must
+// not be removed (and its send closed) a second time.
+func TestLeaveAfterDrainDroppedClient(t *testing.T) {
+	cr := NewRoom(nil)
+	a := newTestClient("a", 0) // any delivery to a overflows
+	b := newTestClient("b", 8)
+	for _, c := range []*Client{a, b} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.broadcast <- inbound{from: a, text: "bye"}
+	cr.leave(a) // panics with "close of closed channel" if a is removed twice
+
+	expect(t, b, typeChat, "a", "bye")
+	select {
+	case raw := <-b.send:
+		t.Fatalf("slow drop must be silent, got %s", raw)
+	default:
+	}
+}
+
+// CHAT-02: shutdown closes every send channel without leave notices.
+func TestShutdownIsSilent(t *testing.T) {
+	cr, cancel := startRoom(t)
+	a := newTestClient("a", 8)
+	b := newTestClient("b", 8)
+	register(t, cr, a)
+	register(t, cr, b)
+	cancel()
+	for _, c := range []*Client{a, b} {
+		for {
+			select {
+			case raw, ok := <-c.send:
+				if !ok {
+					goto closed
+				}
+				if m := decode(t, raw); m.Type == typeLeave {
+					t.Fatalf("unexpected leave frame on shutdown: %+v", m)
+				}
+				continue
+			case <-time.After(testDeadline):
+				t.Fatal("timeout waiting for send to close")
+			}
+		closed:
+			break
+		}
+	}
+}
+
 // CHAT-10: ts is unix milliseconds taken once per event.
 func TestTimestampWindowAndSharedAcrossRecipients(t *testing.T) {
 	cr, _ := startRoom(t)

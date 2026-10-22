@@ -36,3 +36,13 @@ Orchestrator check: `gofmt -l .` empty, `go vet ./...` clean, `go test -race -co
 
 - 4.7 automated part done (gofmt/vet/race tests); **manual two-tab browser check not done yet** —
   left for verify / the developer.
+
+## Verify round 2 corrections — 2026-10-22
+
+| Executor | Tasks | Status |
+|----------|-------|--------|
+| crombie-worker | 6.1–6.5 | PARTIAL — added `relay`/`drainBroadcast` helpers but did not wire them into `Run`; its regression test passed without the fix (Run idle → broadcast always taken first) |
+| orchestrator | 6.1, 6.2 completion | Extracted `leave(c)` and wired `relay`; rewrote the regression test to drive `leave` directly (fails without fix); found and fixed a double close (drain can slow-drop `c`) with `TestLeaveAfterDrainDroppedClient` (fails without fix) |
+
+Checks: `gofmt -l .` empty (real binary), `go vet ./...` clean, `go test -race -count=20 ./...` ok.
+

@@ -87,24 +87,53 @@ func (cr *Room) Run(ctx context.Context) {
 				cr.fanOut(join)
 			}
 		case c := <-cr.unregister:
-			if _, ok := cr.clients[c]; !ok {
-				continue // already dropped (slow client) or unregistered
-			}
-			cr.remove(c)
-			if leave := encode(message{typeLeave, c.nickname, "", time.Now().UnixMilli()}); leave != nil {
-				cr.fanOut(leave)
-			}
+			cr.leave(c)
 		case in := <-cr.broadcast:
-			if _, ok := cr.clients[in.from]; !ok {
-				continue // sender was removed; its name may belong to someone else now
-			}
-			if chat := encode(message{typeChat, in.from.nickname, in.text, time.Now().UnixMilli()}); chat != nil {
-				cr.fanOut(chat)
-			}
+			cr.relay(in)
 		case <-ctx.Done():
 			for c := range cr.clients {
 				cr.remove(c)
 			}
+			return
+		}
+	}
+}
+
+// leave removes c and announces it. Messages c queued before disconnecting
+// are relayed first: select picks ready cases at random, so without the drain
+// a client's last message could be dropped (no longer a member) or arrive
+// after its leave notice.
+func (cr *Room) leave(c *Client) {
+	if _, ok := cr.clients[c]; !ok {
+		return // already dropped (slow client) or unregistered
+	}
+	cr.drainBroadcast()
+	if _, ok := cr.clients[c]; !ok {
+		return // the drain's fan-out dropped c as a slow client (silent, CHAT-02)
+	}
+	cr.remove(c)
+	if leave := encode(message{typeLeave, c.nickname, "", time.Now().UnixMilli()}); leave != nil {
+		cr.fanOut(leave)
+	}
+}
+
+// relay fans a chat message out, discarding it if its sender is no longer a member.
+func (cr *Room) relay(in inbound) {
+	if _, ok := cr.clients[in.from]; !ok {
+		return // sender was removed; its name may belong to someone else now
+	}
+	if chat := encode(message{typeChat, in.from.nickname, in.text, time.Now().UnixMilli()}); chat != nil {
+		cr.fanOut(chat)
+	}
+}
+
+// drainBroadcast relays everything already queued on cr.broadcast without blocking.
+func (cr *Room) drainBroadcast() {
+	for {
+		select {
+		case in := <-cr.broadcast:
+			cr.relay(in)
+		default:
 			return
 		}
 	}

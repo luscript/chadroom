@@ -290,7 +290,10 @@
     const socket = new WebSocket(scheme + location.host + '/ws?nickname=' + encodeURIComponent(nick));
     ws = socket;
     socket.onopen = () => setStatus('online');
-    socket.onmessage = (e) => addRaw(e.data);
+    socket.onmessage = (e) => {
+      if (ws !== socket) return; // late frame from a socket the user already left
+      addRaw(e.data);
+    };
     socket.onclose = () => {
       if (ws !== socket) return; // the user left on purpose
       setStatus('offline');

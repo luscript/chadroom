@@ -49,6 +49,19 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] N6 Log 1003/1007 rejections with nickname.
 - [ ] N7 Assert CHAT-07 write deadline.
 
+## `nickname-polish` (deferred from `structured-messages` verify — low priority, friends-only chat)
+- [ ] M1 Invisible/format chars survive nickname cleanup (U+200B, U+FEFF, U+00AD, interior
+      NBSP/U+2028, fillers U+3164/U+2800) → look-alike `Bob​` or blank names. Same class as
+      homoglyphs; also blank-looking messages pass the blank filter (L2).
+- [ ] M2 `assignNickname` scans suffixes linearly inside `Run` (O(K²) with K same-name
+      clients); per-base next-suffix hint or attempt cap. Pairs with the max-clients cap.
+- [ ] L1 Join/leave notices concatenate the nickname inline; render it in its own element.
+- [ ] L4 Log close-frame reason with `%q` (peer-controlled text in logs).
+- [ ] L6 JSON escaping amplifies `<>&`/controls up to ~6× (consider `SetEscapeHTML(false)`).
+- [ ] Test polish: `nextChat` forbidden-join param is a no-op; forged-notice test without a
+      real `Bob`; `<-slow.registered` wait; saturation listener can be slow-dropped; keyed
+      `message{}` literals; rename `addRaw` → `handleFrame`.
+
 ## `chat-features` (after `structured-messages`)
 - [ ] Online user list.
 - [ ] Multiple rooms.
