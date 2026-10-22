@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -27,7 +26,8 @@ const (
 // means "send is still open" and a channel can never be closed twice.
 type Room struct {
 	clients        map[*Client]struct{}
-	broadcast      chan []byte
+	taken          map[string]struct{} // foldKey(nickname) of every registered client
+	broadcast      chan inbound
 	register       chan *Client
 	unregister     chan *Client
 	done           chan struct{} // closed by Run when it exits
@@ -46,7 +46,8 @@ type Room struct {
 func NewRoom(allowedOrigins []string) *Room {
 	cr := &Room{
 		clients:        make(map[*Client]struct{}),
-		broadcast:      make(chan []byte, sendBufferSize),
+		taken:          make(map[string]struct{}),
+		broadcast:      make(chan inbound, sendBufferSize),
 		register:       make(chan *Client),
 		unregister:     make(chan *Client),
 		done:           make(chan struct{}),
@@ -69,43 +70,70 @@ func NewRoom(allowedOrigins []string) *Room {
 
 // Run handles client registration and broadcasting until ctx is cancelled.
 // It never sends on its own register/unregister/broadcast channels (it would
-// deadlock itself); notices go straight through fanOut.
+// deadlock itself); events go straight through deliver/fanOut.
 func (cr *Room) Run(ctx context.Context) {
 	defer close(cr.done)
 	for {
 		select {
-		case client := <-cr.register:
-			cr.clients[client] = struct{}{}
-			cr.fanOut([]byte(client.nickname + " joined! 🎉"))
-		case client := <-cr.unregister:
-			if _, ok := cr.clients[client]; !ok {
+		case c := <-cr.register:
+			name := cr.assignNickname(c.nickname)
+			c.nickname = name
+			cr.clients[c] = struct{}{}
+			cr.taken[foldKey(name)] = struct{}{}
+			close(c.registered) // publishes the final nickname to the pumps
+			ts := time.Now().UnixMilli()
+			welcome, join := encode(message{typeWelcome, name, "", ts}), encode(message{typeJoin, name, "", ts})
+			if welcome != nil && join != nil && cr.deliver(c, welcome) {
+				cr.fanOut(join)
+			}
+		case c := <-cr.unregister:
+			if _, ok := cr.clients[c]; !ok {
 				continue // already dropped (slow client) or unregistered
 			}
-			delete(cr.clients, client)
-			close(client.send)
-			cr.fanOut([]byte(client.nickname + " left. 👋"))
-		case message := <-cr.broadcast:
-			cr.fanOut(message)
+			cr.remove(c)
+			if leave := encode(message{typeLeave, c.nickname, "", time.Now().UnixMilli()}); leave != nil {
+				cr.fanOut(leave)
+			}
+		case in := <-cr.broadcast:
+			if _, ok := cr.clients[in.from]; !ok {
+				continue // sender was removed; its name may belong to someone else now
+			}
+			if chat := encode(message{typeChat, in.from.nickname, in.text, time.Now().UnixMilli()}); chat != nil {
+				cr.fanOut(chat)
+			}
 		case <-ctx.Done():
-			for client := range cr.clients {
-				delete(cr.clients, client)
-				close(client.send)
+			for c := range cr.clients {
+				cr.remove(c)
 			}
 			return
 		}
 	}
 }
 
-// fanOut delivers msg to every client without blocking; clients whose buffer
-// is full are dropped silently.
+// remove drops c from the registry, releases its nickname and closes send.
+// Run-only; membership guarantees send is still open.
+func (cr *Room) remove(c *Client) {
+	delete(cr.clients, c)
+	delete(cr.taken, foldKey(c.nickname))
+	close(c.send)
+}
+
+// deliver queues msg for c without blocking; a client whose buffer is full is
+// dropped silently.
+func (cr *Room) deliver(c *Client, msg []byte) bool {
+	select {
+	case c.send <- msg:
+		return true
+	default:
+		cr.remove(c)
+		return false
+	}
+}
+
+// fanOut delivers msg to every client without blocking.
 func (cr *Room) fanOut(msg []byte) {
-	for client := range cr.clients {
-		select {
-		case client.send <- msg:
-		default:
-			delete(cr.clients, client)
-			close(client.send)
-		}
+	for c := range cr.clients {
+		cr.deliver(c, msg)
 	}
 }
 
@@ -140,7 +168,7 @@ func (cr *Room) HandleWebSocket(c *gin.Context) {
 
 	nickname := normalizeNickname(c.Query("nickname"))
 
-	client := &Client{conn: conn, send: make(chan []byte, sendBufferSize), nickname: nickname}
+	client := &Client{conn: conn, send: make(chan []byte, sendBufferSize), registered: make(chan struct{}), nickname: nickname}
 	select {
 	case cr.register <- client:
 	case <-cr.done:
@@ -148,19 +176,8 @@ func (cr *Room) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
+	<-client.registered // Run closes it in the same case that accepted register
+
 	go client.writePump(cr)
 	go client.readPump(cr)
-}
-
-// normalizeNickname makes an untrusted nickname safe to embed in text frames:
-// valid UTF-8, trimmed, at most maxNicknameRunes runes, "Anonymous" if empty.
-func normalizeNickname(s string) string {
-	s = strings.TrimSpace(strings.ToValidUTF8(s, "\uFFFD"))
-	if utf8.RuneCountInString(s) > maxNicknameRunes {
-		s = strings.TrimSpace(string([]rune(s)[:maxNicknameRunes]))
-	}
-	if s == "" {
-		return "Anonymous"
-	}
-	return s
 }

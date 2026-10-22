@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -13,9 +14,10 @@ import (
 // Client is one connected websocket peer. send is closed only by Room.Run;
 // conn is nil in the hub unit tests, which never start the pumps.
 type Client struct {
-	conn     *websocket.Conn
-	send     chan []byte
-	nickname string
+	conn       *websocket.Conn
+	send       chan []byte
+	registered chan struct{} // closed by Run once nickname is final
+	nickname   string        // requested until registered is closed, final after
 }
 
 // logError logs abnormal connection errors with the nickname, skipping the
@@ -93,8 +95,11 @@ func (c *Client) readPump(cr *Room) {
 			c.closeWith(cr, websocket.CloseInvalidFramePayloadData)
 			return
 		}
+		if strings.TrimSpace(string(message)) == "" {
+			continue // CHAT-13: blank frames are ignored, connection stays open
+		}
 		select {
-		case cr.broadcast <- []byte(c.nickname + ": " + string(message)):
+		case cr.broadcast <- inbound{from: c, text: string(message)}:
 		case <-cr.done:
 			return
 		}

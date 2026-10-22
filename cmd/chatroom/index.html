@@ -262,7 +262,7 @@
   const EMOJI_ONLY = /^(\p{Extended_Pictographic}|️|‍|\s){1,12}$/u;
 
   let ws = null;
-  let nickname = '';
+  let myName = ''; // identity assigned by the server in the welcome frame
   let status = 'connecting';
   let lastAuthor = null;
 
@@ -276,7 +276,7 @@
   });
 
   function join(nick) {
-    nickname = nick;
+    myName = '';
     lastAuthor = null;
     $('messages').replaceChildren();
     $('me').textContent = nick;
@@ -315,10 +315,28 @@
   }
 
   // — messages —
-  // The server sends "nickname: text" for chat and free text for system events.
+  // The server sends JSON frames {type, from, text, ts}; ts is Unix milliseconds.
   function addRaw(data) {
-    const m = /^([^:\n]{1,32}):\s([\s\S]*)$/.exec(data);
-    if (m) addChat(m[1], m[2]); else addSystem(data);
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+    if (!msg || typeof msg.from !== 'string') return;
+    switch (msg.type) {
+      case 'welcome':
+        myName = msg.from;
+        $('me').textContent = myName;
+        $('me').title = myName;
+        break;
+      case 'chat':
+        if (typeof msg.text === 'string') addChat(msg.from, msg.text, msg.ts);
+        break;
+      case 'join':
+        addSystem(msg.from + ' se unió 🎉');
+        break;
+      case 'leave':
+        addSystem(msg.from + ' salió 👋');
+        break;
+      // Unknown types are ignored so newer servers don't break this page.
+    }
   }
 
   function addSystem(text) {
@@ -329,8 +347,8 @@
     append(li);
   }
 
-  function addChat(author, text) {
-    const own = author === nickname;
+  function addChat(author, text, ts) {
+    const own = author === myName;
     const showHead = author !== lastAuthor;
     lastAuthor = author;
 
@@ -346,7 +364,7 @@
       const avatar = document.createElement('div');
       avatar.className = 'avatar';
       avatar.setAttribute('aria-hidden', 'true');
-      avatar.textContent = Array.from(author)[0].toUpperCase();
+      avatar.textContent = (Array.from(author)[0] || '?').toUpperCase();
       slot.append(avatar);
 
       const head = document.createElement('div');
@@ -363,7 +381,7 @@
       }
       const time = document.createElement('time');
       time.className = 'text-muted';
-      time.textContent = new Date().toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
+      time.textContent = (Number.isFinite(ts) ? new Date(ts) : new Date()).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
       head.append(time);
       body.append(head);
     }
