@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,9 @@ func startRoom(t *testing.T) (*Room, context.CancelFunc) {
 	t.Cleanup(cancel)
 	return cr, cancel
 }
+
+// privateFrames is how many frames a joining client gets first: welcome, users, history.
+const privateFrames = 3
 
 func newTestClient(nick string, buf int) *Client {
 	return &Client{send: make(chan []byte, buf), registered: make(chan struct{}), nickname: nick}
@@ -83,19 +87,95 @@ func decode(t *testing.T, b []byte) message {
 	return m
 }
 
-// next waits for the next frame on c and decodes it.
-func next(t *testing.T, c *Client) message {
+// decodeUsers parses a users frame, requiring exactly type/users/ts and an
+// array (never null).
+func decodeUsers(t *testing.T, b []byte) usersFrame {
+	t.Helper()
+	fields := frameFields(t, b, "users")
+	if !isJSONArray(fields["users"]) {
+		t.Fatalf("users frame %q: users is not an array", b)
+	}
+	var f usersFrame
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("frame %q: %v", b, err)
+	}
+	if f.Type != typeUsers {
+		t.Fatalf("frame %q: type %q, want users", b, f.Type)
+	}
+	return f
+}
+
+// decodeHistory parses a history frame, requiring exactly type/messages/ts, an
+// array (never null) and only chat entries with the four envelope fields.
+func decodeHistory(t *testing.T, b []byte) historyFrame {
+	t.Helper()
+	fields := frameFields(t, b, "messages")
+	if !isJSONArray(fields["messages"]) {
+		t.Fatalf("history frame %q: messages is not an array", b)
+	}
+	var raw struct {
+		Type     string            `json:"type"`
+		Messages []json.RawMessage `json:"messages"`
+		TS       int64             `json:"ts"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("frame %q: %v", b, err)
+	}
+	if raw.Type != typeHistory {
+		t.Fatalf("frame %q: type %q, want history", b, raw.Type)
+	}
+	f := historyFrame{Type: raw.Type, Messages: make([]message, 0, len(raw.Messages)), TS: raw.TS}
+	for _, entry := range raw.Messages {
+		m := decode(t, entry)
+		if m.Type != typeChat {
+			t.Fatalf("history entry %q is not a chat", entry)
+		}
+		f.Messages = append(f.Messages, m)
+	}
+	return f
+}
+
+// frameFields requires b to be a JSON object with exactly type, key and ts.
+func frameFields(t *testing.T, b []byte, key string) map[string]json.RawMessage {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("invalid JSON %q: %v", b, err)
+	}
+	for _, k := range []string{"type", key, "ts"} {
+		if _, ok := fields[k]; !ok {
+			t.Fatalf("frame %q misses field %q", b, k)
+		}
+	}
+	if len(fields) != 3 {
+		t.Fatalf("frame %q has %d fields, want 3", b, len(fields))
+	}
+	return fields
+}
+
+func isJSONArray(raw json.RawMessage) bool {
+	return len(raw) > 0 && raw[0] == '['
+}
+
+// nextRaw waits for the next frame on c and returns it undecoded.
+func nextRaw(t *testing.T, c *Client) []byte {
 	t.Helper()
 	select {
 	case m, ok := <-c.send:
 		if !ok {
 			t.Fatal("send closed, wanted a message")
 		}
-		return decode(t, m)
+		return m
 	case <-time.After(testDeadline):
 		t.Fatal("timeout waiting for a message")
 	}
-	return message{}
+	return nil
+}
+
+// next waits for the next frame on c and decodes it.
+func next(t *testing.T, c *Client) message {
+	t.Helper()
+	return decode(t, nextRaw(t, c))
 }
 
 // expect waits for the next message on c and compares it to want, ignoring ts.
@@ -104,6 +184,54 @@ func expect(t *testing.T, c *Client, typ, from, text string) {
 	got := next(t, c)
 	if got.Type != typ || got.From != from || got.Text != text {
 		t.Fatalf("got (%s, %q, %q), want (%s, %q, %q)", got.Type, got.From, got.Text, typ, from, text)
+	}
+}
+
+// expectWelcome consumes the private join frames of c (welcome, users, history)
+// in order, checks the welcome and that all three share one ts, and returns
+// users and history for further assertions.
+func expectWelcome(t *testing.T, c *Client, name string) (usersFrame, historyFrame) {
+	t.Helper()
+	w := next(t, c)
+	if w.Type != typeWelcome || w.From != name || w.Text != "" {
+		t.Fatalf("got (%s, %q, %q), want (welcome, %q, \"\")", w.Type, w.From, w.Text, name)
+	}
+	users := decodeUsers(t, nextRaw(t, c))
+	hist := decodeHistory(t, nextRaw(t, c))
+	if users.TS != w.TS || hist.TS != w.TS {
+		t.Fatalf("private frames differ in ts: welcome %d, users %d, history %d", w.TS, users.TS, hist.TS)
+	}
+	return users, hist
+}
+
+// expectUsers compares the nicknames of a users frame, in order.
+func expectUsers(t *testing.T, got usersFrame, want ...string) {
+	t.Helper()
+	if !slices.Equal(got.Users, want) {
+		t.Fatalf("users = %q, want %q", got.Users, want)
+	}
+}
+
+// expectHistory compares type, from and text of every entry, ignoring ts.
+func expectHistory(t *testing.T, got historyFrame, want ...message) {
+	t.Helper()
+	if len(got.Messages) != len(want) {
+		t.Fatalf("history has %d messages, want %d: %+v", len(got.Messages), len(want), got.Messages)
+	}
+	for i, m := range got.Messages {
+		if m.Type != want[i].Type || m.From != want[i].From || m.Text != want[i].Text {
+			t.Fatalf("history[%d] = %+v, want %+v", i, m, want[i])
+		}
+	}
+}
+
+// expectEmpty fails if a frame is already queued on c.
+func expectEmpty(t *testing.T, c *Client) {
+	t.Helper()
+	select {
+	case raw := <-c.send:
+		t.Fatalf("unexpected frame %s", raw)
+	default:
 	}
 }
 
@@ -124,7 +252,7 @@ func expectClosed(t *testing.T, c *Client) {
 }
 
 // syncRoom waits until Run has processed everything queued so far: it
-// broadcasts a marker from c and consumes c's welcome, join and the marker.
+// broadcasts a marker from c and consumes c's welcome frames, join and the marker.
 // c must be freshly registered and the only frames pending on it.
 func syncRoom(t *testing.T, cr *Room, c *Client) {
 	t.Helper()
@@ -134,7 +262,7 @@ func syncRoom(t *testing.T, cr *Room, c *Client) {
 		t.Fatal("timeout waiting for registration")
 	}
 	broadcast(t, cr, c, "sync-marker")
-	expect(t, c, typeWelcome, c.nickname, "")
+	expectWelcome(t, c, c.nickname)
 	expect(t, c, typeJoin, c.nickname, "")
 	expect(t, c, typeChat, c.nickname, "sync-marker")
 }
@@ -143,7 +271,7 @@ func TestJoinNoticeDelivered(t *testing.T) {
 	cr, _ := startRoom(t)
 	a := newTestClient("alice", 8)
 	register(t, cr, a)
-	expect(t, a, typeWelcome, "alice", "")
+	expectWelcome(t, a, "alice")
 	expect(t, a, typeJoin, "alice", "")
 }
 
@@ -152,11 +280,11 @@ func TestSameNicknameIndependent(t *testing.T) {
 	a1 := newTestClient("bob", 8)
 	a2 := newTestClient("bob", 8)
 	register(t, cr, a1)
-	expect(t, a1, typeWelcome, "bob", "")
+	expectWelcome(t, a1, "bob")
 	expect(t, a1, typeJoin, "bob", "")
 	register(t, cr, a2)
 	expect(t, a1, typeJoin, "bob (2)", "")
-	expect(t, a2, typeWelcome, "bob (2)", "")
+	expectWelcome(t, a2, "bob (2)")
 	expect(t, a2, typeJoin, "bob (2)", "")
 
 	broadcast(t, cr, a1, "hi")
@@ -177,10 +305,10 @@ func TestUnregisterClosesOnceAndNoticeOnce(t *testing.T) {
 	b := newTestClient("b", 8)
 	register(t, cr, a)
 	register(t, cr, b)
-	expect(t, a, typeWelcome, "a", "")
+	expectWelcome(t, a, "a")
 	expect(t, a, typeJoin, "a", "")
 	expect(t, a, typeJoin, "b", "")
-	expect(t, b, typeWelcome, "b", "")
+	expectWelcome(t, b, "b")
 	expect(t, b, typeJoin, "b", "")
 
 	unregister(t, cr, a)
@@ -192,18 +320,20 @@ func TestUnregisterClosesOnceAndNoticeOnce(t *testing.T) {
 	expect(t, b, typeChat, "b", "sync") // no second leave notice queued before this
 }
 
-// A buffer of 3 holds exactly welcome + join for "slow" and the join of "ok",
-// so the next broadcast message is what overflows it and triggers the drop.
+// A buffer of privateFrames+2 holds exactly the private frames + own join for "slow" and
+// the join of "ok", so the next broadcast message is what overflows it and
+// triggers the drop.
 func TestUnregisterAfterSlowDropIsNoop(t *testing.T) {
 	cr, _ := startRoom(t)
-	slow := newTestClient("slow", 3)
+	slow := newTestClient("slow", privateFrames+2)
 	ok := newTestClient("ok", 16)
 	register(t, cr, slow)
 	register(t, cr, ok)
-	expect(t, ok, typeWelcome, "ok", "")
+	expectWelcome(t, ok, "ok")
 	expect(t, ok, typeJoin, "ok", "") // both join notices have been fanned out by now
 	broadcast(t, cr, ok, "m1")        // slow buffer full -> dropped
 	expect(t, ok, typeChat, "ok", "m1")
+	expect(t, ok, typeLeave, "slow", "") // announced right after the frame that dropped it
 	expectClosed(t, slow)
 
 	unregister(t, cr, slow) // must not panic or emit notice
@@ -215,16 +345,17 @@ func TestUnregisterAfterSlowDropIsNoop(t *testing.T) {
 // slow client still gets everything queued before it was dropped.
 func TestSlowClientDroppedOthersReceive(t *testing.T) {
 	cr, _ := startRoom(t)
-	slow := newTestClient("slow", 3)
+	slow := newTestClient("slow", privateFrames+2)
 	fast := newTestClient("fast", 64)
 	register(t, cr, slow)
 	register(t, cr, fast)
-	expect(t, fast, typeWelcome, "fast", "")
+	expectWelcome(t, fast, "fast")
 	expect(t, fast, typeJoin, "fast", "")
 
 	broadcast(t, cr, fast, "x")
 	expect(t, fast, typeChat, "fast", "x")
-	expect(t, slow, typeWelcome, "slow", "")
+	expect(t, fast, typeLeave, "slow", "")
+	expectWelcome(t, slow, "slow")
 	expect(t, slow, typeJoin, "slow", "")
 	expect(t, slow, typeJoin, "fast", "")
 	expectClosed(t, slow)
@@ -303,7 +434,7 @@ func TestSaturationNoDeadlock(t *testing.T) {
 	// The hub must still be alive afterwards.
 	last := newTestClient("last", 8)
 	register(t, cr, last)
-	expect(t, last, typeWelcome, "last", "")
+	expectWelcome(t, last, "last")
 	expect(t, last, typeJoin, "last", "")
 }
 
@@ -333,12 +464,12 @@ func TestWelcomeFirst(t *testing.T) {
 	register(t, cr, b)
 	register(t, cr, c)
 
-	expect(t, c, typeWelcome, "bob (2)", "")
+	expectWelcome(t, c, "bob (2)")
 	expect(t, c, typeJoin, "bob (2)", "")
-	expect(t, b, typeWelcome, "Bob", "")
+	expectWelcome(t, b, "Bob")
 	expect(t, b, typeJoin, "Bob", "")
 	expect(t, b, typeJoin, "bob (2)", "") // others get only the join
-	expect(t, a, typeWelcome, "a", "")
+	expectWelcome(t, a, "a")
 	expect(t, a, typeJoin, "a", "")
 	expect(t, a, typeJoin, "Bob", "")
 	expect(t, a, typeJoin, "bob (2)", "")
@@ -357,36 +488,46 @@ func TestNameReleasedOnRemove(t *testing.T) {
 
 		again := newTestClient("BOB", 8)
 		register(t, cr, again)
-		expect(t, again, typeWelcome, "BOB", "")
+		expectWelcome(t, again, "BOB")
 	})
 	t.Run("slow drop", func(t *testing.T) {
 		cr, _ := startRoom(t)
-		bob := newTestClient("bob", 2) // welcome + own join; obs's join overflows it
+		bob := newTestClient("bob", privateFrames+1) // private frames + own join; obs's join overflows it
 		obs := newTestClient("obs", 16)
 		register(t, cr, bob)
 		register(t, cr, obs)
-		syncRoom(t, cr, obs) // obs's join has been fanned out, so bob was dropped
+		expectWelcome(t, obs, "obs")
+		expect(t, obs, typeJoin, "obs", "")
+		expect(t, obs, typeLeave, "bob", "") // bob was dropped by obs's join
 		expectClosed(t, bob)
 
 		again := newTestClient("bob", 8)
 		register(t, cr, again)
-		expect(t, again, typeWelcome, "bob", "")
+		users, _ := expectWelcome(t, again, "bob")
+		expectUsers(t, users, "bob", "obs") // the dropped bob is gone from the snapshot
 	})
 }
 
 // CHAT-10: a message from a client that is no longer in the room is discarded.
 func TestBroadcastFromNonMemberDropped(t *testing.T) {
 	cr, _ := startRoom(t)
-	slow := newTestClient("slow", 2)
+	slow := newTestClient("slow", privateFrames+1)
 	ok := newTestClient("ok", 16)
 	register(t, cr, slow)
 	register(t, cr, ok)
-	syncRoom(t, cr, ok) // ok's join has been fanned out, so slow was dropped
+	expectWelcome(t, ok, "ok")
+	expect(t, ok, typeJoin, "ok", "")
+	expect(t, ok, typeLeave, "slow", "") // slow was dropped by ok's join
 	expectClosed(t, slow)
 
 	broadcast(t, cr, slow, "ghost")
 	broadcast(t, cr, ok, "sync")
 	expect(t, ok, typeChat, "ok", "sync") // "ghost" would have come first
+
+	late := newTestClient("late", 8)
+	register(t, cr, late)
+	_, hist := expectWelcome(t, late, "late")
+	expectHistory(t, hist, message{Type: typeChat, From: "ok", Text: "sync"}) // never "ghost"
 }
 
 // A chat queued right before unregister must be relayed before the leave,
@@ -410,7 +551,7 @@ func TestChatBeforeLeaveOnDisconnect(t *testing.T) {
 }
 
 // The drain before a leave can itself slow-drop the leaving client; it must
-// not be removed (and its send closed) a second time.
+// not be removed (and its send closed) a second time, nor announced twice.
 func TestLeaveAfterDrainDroppedClient(t *testing.T) {
 	cr := NewRoom(nil)
 	a := newTestClient("a", 0) // any delivery to a overflows
@@ -424,11 +565,8 @@ func TestLeaveAfterDrainDroppedClient(t *testing.T) {
 	cr.leave(a) // panics with "close of closed channel" if a is removed twice
 
 	expect(t, b, typeChat, "a", "bye")
-	select {
-	case raw := <-b.send:
-		t.Fatalf("slow drop must be silent, got %s", raw)
-	default:
-	}
+	expect(t, b, typeLeave, "a", "") // announced once, by the drain's publish
+	expectEmpty(t, b)
 }
 
 // CHAT-02: shutdown closes every send channel without leave notices.
@@ -446,8 +584,14 @@ func TestShutdownIsSilent(t *testing.T) {
 				if !ok {
 					goto closed
 				}
-				if m := decode(t, raw); m.Type == typeLeave {
-					t.Fatalf("unexpected leave frame on shutdown: %+v", m)
+				var peek struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal(raw, &peek); err != nil {
+					t.Fatalf("invalid JSON %q: %v", raw, err)
+				}
+				if peek.Type == typeLeave {
+					t.Fatalf("unexpected leave frame on shutdown: %s", raw)
 				}
 				continue
 			case <-time.After(testDeadline):
@@ -467,10 +611,10 @@ func TestTimestampWindowAndSharedAcrossRecipients(t *testing.T) {
 	before := time.Now().UnixMilli()
 	register(t, cr, a)
 	register(t, cr, b)
-	next(t, a) // welcome a
+	expectWelcome(t, a, "a")
 	next(t, a) // join a
 	joinA := next(t, a)
-	next(t, b) // welcome b
+	expectWelcome(t, b, "b")
 	joinB := next(t, b)
 	if joinA.Type != typeJoin || joinB.Type != typeJoin || joinA.TS != joinB.TS {
 		t.Fatalf("join ts differ across recipients: %+v vs %+v", joinA, joinB)
@@ -487,6 +631,166 @@ func TestTimestampWindowAndSharedAcrossRecipients(t *testing.T) {
 			t.Fatalf("ts %d outside [%d, %d]", m.TS, before, after)
 		}
 	}
+}
+
+// CHAT-11/17/18: a newcomer gets welcome, users and history (one shared ts)
+// before its own join; existing members get only the join.
+func TestJoinSequence(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := newTestClient("a", 16)
+	register(t, cr, a)
+	expectWelcome(t, a, "a")
+	expect(t, a, typeJoin, "a", "")
+	broadcast(t, cr, a, "m1")
+	broadcast(t, cr, a, "m2")
+	m1 := next(t, a)
+	m2 := next(t, a)
+	if m1.Text != "m1" || m2.Text != "m2" {
+		t.Fatalf("a got %q, %q, want m1, m2", m1.Text, m2.Text)
+	}
+
+	b := newTestClient("b", 16)
+	register(t, cr, b)
+	users, hist := expectWelcome(t, b, "b")
+	expectUsers(t, users, "a", "b")
+	expectHistory(t, hist,
+		message{Type: typeChat, From: "a", Text: "m1"},
+		message{Type: typeChat, From: "a", Text: "m2"})
+	if hist.Messages[0].TS != m1.TS || hist.Messages[1].TS != m2.TS {
+		t.Fatalf("replayed ts = %d, %d, want original %d, %d", hist.Messages[0].TS, hist.Messages[1].TS, m1.TS, m2.TS)
+	}
+	join := next(t, b)
+	if join.Type != typeJoin || join.From != "b" || join.TS != users.TS {
+		t.Fatalf("own join = %+v, want join b with ts %d", join, users.TS)
+	}
+
+	expect(t, a, typeJoin, "b", "") // a gets no private frames
+	broadcast(t, cr, a, "sync")
+	expect(t, a, typeChat, "a", "sync")
+}
+
+// CHAT-17: the snapshot is ordered case-insensitively.
+func TestUsersSortedCaseInsensitive(t *testing.T) {
+	cr, _ := startRoom(t)
+	var last *Client
+	for _, n := range []string{"bob", "Alice", "carol"} {
+		last = newTestClient(n, 16)
+		register(t, cr, last)
+	}
+	users, _ := expectWelcome(t, last, "carol")
+	expectUsers(t, users, "Alice", "bob", "carol")
+}
+
+// CHAT-17/18: users and history have exactly type, array and ts; empty arrays
+// are [] and not null.
+func TestJoinFramesExactShape(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := newTestClient("a", 8)
+	register(t, cr, a)
+	next(t, a) // welcome
+	for _, want := range []string{`{"type":"users","users":["a"],"ts":`, `{"type":"history","messages":[],"ts":`} {
+		raw := string(nextRaw(t, a))
+		if !strings.HasPrefix(raw, want) || !strings.HasSuffix(raw, "}") {
+			t.Fatalf("frame %s does not match %s...}", raw, want)
+		}
+	}
+}
+
+// CHAT-18: join, leave and welcome frames never enter the history.
+func TestHistoryOnlyChat(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := newTestClient("a", 32)
+	b := newTestClient("b", 32)
+	register(t, cr, a)
+	register(t, cr, b)
+	broadcast(t, cr, a, "one")
+	broadcast(t, cr, b, "two")
+	expectWelcome(t, a, "a")
+	for { // wait until both chats have been relayed
+		if m := next(t, a); m.Type == typeChat && m.Text == "two" {
+			break
+		}
+	}
+	unregister(t, cr, b)
+	expectClosed(t, b)
+
+	d := newTestClient("d", 8)
+	register(t, cr, d)
+	_, hist := expectWelcome(t, d, "d")
+	expectHistory(t, hist,
+		message{Type: typeChat, From: "a", Text: "one"},
+		message{Type: typeChat, From: "b", Text: "two"})
+}
+
+// CHAT-18: only the last historySize chats are replayed, oldest first.
+func TestHistoryKeepsLast50(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := newTestClient("a", 64)
+	register(t, cr, a)
+	expectWelcome(t, a, "a")
+	expect(t, a, typeJoin, "a", "")
+	const total = historySize + 1
+	for i := 0; i < total; i++ {
+		broadcast(t, cr, a, strconv.Itoa(i))
+	}
+	for i := 0; i < total; i++ { // all relayed before b registers
+		expect(t, a, typeChat, "a", strconv.Itoa(i))
+	}
+
+	b := newTestClient("b", 8)
+	register(t, cr, b)
+	_, hist := expectWelcome(t, b, "b")
+	want := make([]message, 0, historySize)
+	for i := 1; i < total; i++ {
+		want = append(want, message{Type: typeChat, From: "a", Text: strconv.Itoa(i)})
+	}
+	expectHistory(t, hist, want...)
+}
+
+// CHAT-02/05: a slow client dropped by a fan-out is announced after the
+// triggering event, and the leaves it causes are announced too.
+func TestSlowDropCascadeAnnounced(t *testing.T) {
+	cr := NewRoom(nil)
+	o := newTestClient("o", 16)
+	x := newTestClient("x", 0) // dropped by the chat
+	y := newTestClient("y", 1) // takes the chat, dropped by x's leave
+	for _, c := range []*Client{o, x, y} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.relay(inbound{from: o, text: "hi"})
+
+	expect(t, o, typeChat, "o", "hi")
+	expect(t, o, typeLeave, "x", "")
+	expect(t, o, typeLeave, "y", "")
+	expectEmpty(t, o)
+	expectClosed(t, x)
+	expectClosed(t, y)
+	if len(cr.clients) != 1 || len(cr.dropped) != 0 {
+		t.Fatalf("clients = %d, pending drops = %d, want 1 and 0", len(cr.clients), len(cr.dropped))
+	}
+}
+
+// A newcomer dropped before its join was fanned out is never announced, and
+// its name is free again.
+func TestNewcomerDroppedDuringJoinIsSilent(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs := newTestClient("obs", 16)
+	register(t, cr, obs)
+	expectWelcome(t, obs, "obs")
+	expect(t, obs, typeJoin, "obs", "")
+
+	n := newTestClient("n", privateFrames-1) // welcome and users fit, history overflows
+	register(t, cr, n)
+	broadcast(t, cr, obs, "sync")           // processed after n's admit; n is not read before that
+	expect(t, obs, typeChat, "obs", "sync") // no join or leave for n before it
+	expectClosed(t, n)
+
+	again := newTestClient("n", 8)
+	register(t, cr, again)
+	users, _ := expectWelcome(t, again, "n")
+	expectUsers(t, users, "n", "obs") // the dropped newcomer appears once, as the new "n"
 }
 
 func TestCheckOrigin(t *testing.T) {

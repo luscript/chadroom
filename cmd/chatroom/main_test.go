@@ -174,6 +174,18 @@ func TestIndexHasNoInlineCode(t *testing.T) {
 	}
 }
 
+func TestIndexHasOnlineList(t *testing.T) {
+	html := string(indexHTML)
+	for _, want := range []string{
+		`id="users-btn"`, `id="users-count"`, `id="users-panel"`, `id="users-list"`,
+		`aria-controls="users-panel"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %s", want)
+		}
+	}
+}
+
 func TestRunGracefulShutdown(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

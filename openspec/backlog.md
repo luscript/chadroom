@@ -79,10 +79,25 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       `message{}` literals; rename `addRaw` → `handleFrame`.
 
 ## `chat-features` (after `structured-messages`)
-- [ ] Online user list.
-- [ ] Multiple rooms.
-- [ ] Last-N message history on join.
+- [x] Online user list — done in `online-users-and-history` (2026-10-22).
+- [ ] Multiple rooms — next change.
+- [x] Last-N message history on join — done in `online-users-and-history` (2026-10-22).
 - [ ] Typing indicator.
+
+## `presence-history-polish` (deferred from `online-users-and-history` verify — low priority)
+- [ ] Own "X se unió" notice lands after "Reconectado" on reconnect; consider skipping the
+      notice for `from === myName` (also changes first join — decide UX).
+- [ ] Hide the "N en línea" button until the first `users` frame (shows "0" while connecting,
+      stale count during an outage).
+- [ ] Reset reconnect `attempt` only after the socket stayed up ~10 s (flapping server →
+      fast loop, each replaying history). Pairs with `rate-limiting`.
+- [ ] Cache the encoded history frame (invalidate in `remember`); cap it by bytes (~256 KB)
+      as well as count. Pairs with `rate-limiting`.
+- [ ] `renderUsers`: build a DocumentFragment instead of spreading into `replaceChildren`.
+- [ ] Test polish: `TestHistoryKeepsLast50` with `2*historySize+3` messages + cap assertion;
+      `drainTypes` helper instead of `goto` in `TestShutdownIsSilent`; `expectEmpty` at the
+      end of `TestChatBeforeLeaveOnDisconnect`.
+- [ ] Manual screen-reader check of the bulk history insert (`aria-busy`).
 
 ## Housekeeping
 - [x] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
