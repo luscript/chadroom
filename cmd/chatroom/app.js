@@ -95,10 +95,16 @@
     retryTimer = setTimeout(connect, d / 2 + Math.random() * d / 2);
   }
 
-  // Only cuts a pending wait short; never opens a second socket.
+  // Cuts a pending wait short, or replaces a retry socket stuck connecting (the browser
+  // can take a minute to give up on it). Never leaves two sockets open.
   function reconnectNow() {
-    if (retryTimer === null) return;
-    clearTimeout(retryTimer);
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+    } else if (status === 'reconnecting' && ws && ws.readyState === WebSocket.CONNECTING) {
+      const s = ws; ws = null; s.close(); // ws = null makes its onclose a no-op
+    } else {
+      return;
+    }
     connect();
   }
   window.addEventListener('online', reconnectNow);
@@ -239,10 +245,11 @@
 
   function updateSendState() {
     $('send-btn').disabled = !draft.value.trim() || status !== 'online';
+    $('gif-send').disabled = !isAllowedImage($('gif-url').value.trim()) || status !== 'online';
   }
 
   function sendText(text) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (status !== 'online' || !ws || ws.readyState !== WebSocket.OPEN) return false;
     if (new TextEncoder().encode(text).length > MAX_MESSAGE_BYTES) {
       addSystem('El mensaje es demasiado largo.');
       return false;
@@ -318,13 +325,13 @@
   selectCat(0);
 
   const gifUrl = $('gif-url');
-  gifUrl.addEventListener('input', () => { $('gif-send').disabled = !isAllowedImage(gifUrl.value.trim()); });
+  gifUrl.addEventListener('input', updateSendState);
   gifUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('gif-send').click(); } });
   $('gif-send').addEventListener('click', () => {
     const url = gifUrl.value.trim();
     if (isAllowedImage(url) && sendText(url)) {
       gifUrl.value = '';
-      $('gif-send').disabled = true;
+      updateSendState();
       closePanels();
     }
   });

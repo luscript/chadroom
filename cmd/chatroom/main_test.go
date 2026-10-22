@@ -79,6 +79,9 @@ func TestIndexSecurityHeaders(t *testing.T) {
 	if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
 		t.Errorf("X-Frame-Options = %q", got)
 	}
+	if got := resp.Header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q", got)
+	}
 	const wantCSP = "default-src 'none'; script-src 'self'; " +
 		"style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; " +
 		"img-src 'self' https://media.giphy.com https://media0.giphy.com https://media1.giphy.com " +
@@ -136,13 +139,15 @@ func TestStaticAssets(t *testing.T) {
 		})
 	}
 
-	resp, err := http.Get(ts.URL + "/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GET /index.html status = %d, want 404", resp.StatusCode)
+	for _, path := range []string{"/index.html", "/static/"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want 404", path, resp.StatusCode)
+		}
 	}
 }
 

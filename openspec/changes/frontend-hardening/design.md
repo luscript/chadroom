@@ -368,3 +368,14 @@ still prevents rendering foreign images).
 
 - [x] CHAT-16 states "online after `welcome`" and that `offline` is no longer a page state
       (resolved in the specs phase; `gif-picker` backlog group already added with the proposal).
+
+## Verify round 1 adjustments
+
+- `reconnectNow()` also replaces a retry socket stuck in `CONNECTING` (only while
+  `reconnecting`): it detaches it (`ws = null`, so its `onclose` is ignored), closes it and
+  calls `connect()`. Covers Wi-Fi coming back while the browser still waits on a dead connect.
+- `sendText` requires `status === 'online'`; `updateSendState` also drives the GIF panel's
+  send button (disabled while not `online`), so nothing is sent between socket `open` and
+  `welcome`.
+- `servePage` sends `Referrer-Policy: no-referrer` (the page origin, e.g. a LAN IP, is no
+  longer sent to Google Fonts).

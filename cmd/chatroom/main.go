@@ -70,6 +70,7 @@ func servePage(c *gin.Context) {
 	setStaticHeaders(c)
 	c.Header("Content-Security-Policy", contentSecurityPolicy)
 	c.Header("X-Frame-Options", "DENY")
+	c.Header("Referrer-Policy", "no-referrer")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 }
 

@@ -50,7 +50,7 @@ No other path MUST expose embedded files (no directory listing).
 The HTTP server MUST set `ReadHeaderTimeout`, `IdleTimeout` and `MaxHeaderBytes` and MUST
 NOT trust proxy forwarding headers by default. Every response for the page and its assets
 MUST send `X-Content-Type-Options: nosniff`. `GET /` MUST also send
-`X-Frame-Options: DENY` and a `Content-Security-Policy` that:
+`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and a `Content-Security-Policy` that:
 
 - MUST NOT contain `'unsafe-inline'` or `'unsafe-eval'` in any directive;
 - MUST allow scripts only from the page's own origin (`script-src 'self'`);
@@ -66,7 +66,8 @@ The page MUST work under that policy with no CSP violations reported by the brow
 
 - GIVEN the server is running
 - WHEN a client requests `GET /`
-- THEN the response includes `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`
+- THEN the response includes `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and
+  `Referrer-Policy: no-referrer`
 - AND it includes a `Content-Security-Policy` meeting every rule above
 
 #### Scenario: Security headers on assets

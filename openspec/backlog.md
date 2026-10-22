@@ -28,6 +28,15 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       browser fetches it (`IMAGE_URL` in `index.html`). Options: click-to-load, a host allowlist,
       or a server-side proxy.
 
+## `frontend-polish` (deferred from `frontend-hardening` verify — low priority)
+- [ ] Self-host Inter (woff2 embedded, `font-src 'self'`, drop Google preconnect): Google
+      Fonts sees every user's IP and the page loses its font offline / on an isolated LAN.
+- [ ] Reconnect never gives up on permanent failures (403 origin is reported as 1006);
+      consider an attempt cap or a "retry" button after N minutes.
+- [ ] Trusted Types: `require-trusted-types-for 'script'` in the CSP (no sinks today).
+- [ ] First join that fails shows "Conexión perdida… / Reconectado" without ever having been
+      connected; use a `wasOnline` flag for the wording.
+
 ## `gif-picker` (after `frontend-hardening`)
 - [ ] GIF panel with search + trending, like the emoji panel.
 - [ ] Server endpoint (e.g. `GET /gifs?q=`) calling Giphy with `GIPHY_API_KEY` from the

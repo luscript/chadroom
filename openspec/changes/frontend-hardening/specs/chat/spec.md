@@ -58,9 +58,10 @@ the user originally typed. Retry delays MUST grow exponentially with random jitt
 exceed 30 seconds, and MUST go back to the initial delay after a `welcome` is received. The
 page MUST keep retrying for as long as the user stays in the chat view; it has no terminal
 `offline` state. It MAY retry sooner when the browser reports the network is back or the tab
-becomes visible, but MUST NOT open more than one socket at a time. The page MUST show at most
+becomes visible (cutting a pending wait short or replacing a retry socket still connecting),
+but MUST NOT have more than one socket open at a time. The page MUST show at most
 one system notice when the connection is lost and one when it is re-established, per outage.
-While not `online` the send button MUST stay disabled. After the user clicks "Salir" the page
+While not `online` the send button and the GIF panel's send button MUST stay disabled. After the user clicks "Salir" the page
 MUST NOT reconnect, and any pending retry MUST be cancelled. Messages already on screen MUST
 be kept across reconnects.
 
