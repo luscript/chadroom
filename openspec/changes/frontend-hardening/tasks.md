@@ -23,15 +23,15 @@ the page must behave exactly as before under the new CSP.
 
 ## Phase 1: Infrastructure — split inline code into embedded assets
 
-- [ ] 1.1 Create `cmd/chatroom/app.css` with the exact content of the inline `<style>` element; in `index.html` replace the element with `<link rel="stylesheet" href="/app.css">` placed after the Google Fonts `<link>`.
-- [ ] 1.2 Create `cmd/chatroom/app.js` with the exact content of the inline `<script>` (same IIFE); in `index.html` replace it with `<script src="/app.js"></script>` at the same position (end of `<body>`).
-- [ ] 1.3 Replace the two `style=""` attributes in `index.html` with classes per design: `subtitle` ("Sala general", `.chat-header .subtitle { font-size: 12px; }`) and `gif-hint` (`.gif-hint { font-size: 13px; line-height: 1.45; }`), rules added to `app.css`.
+- [x] 1.1 Create `cmd/chatroom/app.css` with the exact content of the inline `<style>` element; in `index.html` replace the element with `<link rel="stylesheet" href="/app.css">` placed after the Google Fonts `<link>`.
+- [x] 1.2 Create `cmd/chatroom/app.js` with the exact content of the inline `<script>` (same IIFE); in `index.html` replace it with `<script src="/app.js"></script>` at the same position (end of `<body>`).
+- [x] 1.3 Replace the two `style=""` attributes in `index.html` with classes per design: `subtitle` ("Sala general", `.chat-header .subtitle { font-size: 12px; }`) and `gif-hint` (`.gif-hint { font-size: 13px; line-height: 1.45; }`), rules added to `app.css`.
 
 ## Phase 2: Implementation — server (`cmd/chatroom/main.go`)
 
-- [ ] 2.1 Embed `app.js` / `app.css` as `appJS` / `appCSS` `[]byte` next to `indexHTML`; add `setStaticHeaders` (nosniff + `Cache-Control: no-cache`), `serveAsset(contentType, body)` and routes `GET /app.js` (`text/javascript; charset=utf-8`) and `GET /app.css` (`text/css; charset=utf-8`).
-- [ ] 2.2 Add `imageHosts` (design list, with the comment pointing to `IMAGE_HOSTS` and the mirror test), `buildCSP(hosts)` and package-level `contentSecurityPolicy`; output must equal the design's exact policy (directive order as in design).
-- [ ] 2.3 Extract the `GET /` handler into `servePage`: static headers + `Content-Security-Policy` + `X-Frame-Options: DENY` + `index.html`.
+- [x] 2.1 Embed `app.js` / `app.css` as `appJS` / `appCSS` `[]byte` next to `indexHTML`; add `setStaticHeaders` (nosniff + `Cache-Control: no-cache`), `serveAsset(contentType, body)` and routes `GET /app.js` (`text/javascript; charset=utf-8`) and `GET /app.css` (`text/css; charset=utf-8`).
+- [x] 2.2 Add `imageHosts` (design list, with the comment pointing to `IMAGE_HOSTS` and the mirror test), `buildCSP(hosts)` and package-level `contentSecurityPolicy`; output must equal the design's exact policy (directive order as in design).
+- [x] 2.3 Extract the `GET /` handler into `servePage`: static headers + `Content-Security-Policy` + `X-Frame-Options: DENY` + `index.html`.
 
 ## Phase 3: Implementation — page behavior (`cmd/chatroom/app.js`, `app.css`)
 
@@ -44,11 +44,11 @@ the page must behave exactly as before under the new CSP.
 
 ## Phase 4: Testing (`cmd/chatroom/main_test.go`, `go test -race ./...`)
 
-- [ ] 4.1 `TestStaticAssets` (table `/`, `/app.js`, `/app.css`): 200, exact `Content-Type`, `nosniff`, `Cache-Control: no-cache`, body equals the embedded var. Also `GET /index.html` → 404.
-- [ ] 4.2 Extend `TestIndexSecurityHeaders`: CSP equals the literal policy string from the design (written out in the test) and contains neither `unsafe-inline` nor `unsafe-eval`.
-- [ ] 4.3 `TestIndexHasNoInlineCode` on `indexHTML`: no `<style`, no `style=`, every `<script` tag has `src=`, no `on[a-z]+=` attributes; references `src="/app.js"` and `href="/app.css"`.
+- [x] 4.1 `TestStaticAssets` (table `/`, `/app.js`, `/app.css`): 200, exact `Content-Type`, `nosniff`, `Cache-Control: no-cache`, body equals the embedded var. Also `GET /index.html` → 404.
+- [x] 4.2 Extend `TestIndexSecurityHeaders`: CSP equals the literal policy string from the design (written out in the test) and contains neither `unsafe-inline` nor `unsafe-eval`.
+- [x] 4.3 `TestIndexHasNoInlineCode` on `indexHTML`: no `<style`, no `style=`, every `<script` tag has `src=`, no `on[a-z]+=` attributes; references `src="/app.js"` and `href="/app.css"`.
 - [ ] 4.4 `TestImageHostsMirroredInJS`: extract the `IMAGE_HOSTS` Set from `appJS` and compare (sorted) with `imageHosts`; fails on drift in either direction.
-- [ ] 4.5 Run `go vet ./...`, `gofmt -l .` and `go test -race ./...` after each batch.
+- [x] 4.5 Run `go vet ./...`, `gofmt -l .` and `go test -race ./...` after each batch.
 
 ## Phase 5: Docs and wrap-up
 

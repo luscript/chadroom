@@ -23,17 +23,73 @@ const addr = ":8080"
 //go:embed index.html
 var indexHTML []byte
 
-// newRouter registers the HTML page and the WebSocket endpoint.
+//go:embed app.js
+var appJS []byte
+
+//go:embed app.css
+var appCSS []byte
+
+// imageHosts may be shown inline in the chat (CSP img-src).
+// Mirrored by IMAGE_HOSTS in app.js; TestImageHostsMirroredInJS keeps them in sync.
+var imageHosts = []string{
+	"media.giphy.com", "media0.giphy.com", "media1.giphy.com", "media2.giphy.com",
+	"media3.giphy.com", "media4.giphy.com", "i.giphy.com",
+	"media.tenor.com", "i.imgur.com",
+}
+
+var contentSecurityPolicy = buildCSP(imageHosts)
+
+// buildCSP renders the page's Content-Security-Policy: everything is same-origin
+// except Google Fonts and the image hosts.
+func buildCSP(hosts []string) string {
+	img := []string{"img-src", "'self'"}
+	for _, h := range hosts {
+		img = append(img, "https://"+h)
+	}
+	return strings.Join([]string{
+		"default-src 'none'",
+		"script-src 'self'",
+		"style-src 'self' https://fonts.googleapis.com",
+		"font-src https://fonts.gstatic.com",
+		strings.Join(img, " "),
+		"connect-src 'self'",
+		"base-uri 'none'",
+		"form-action 'none'",
+		"frame-ancestors 'none'",
+	}, "; ")
+}
+
+// setStaticHeaders applies the headers every embedded response shares.
+func setStaticHeaders(c *gin.Context) {
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "no-cache")
+}
+
+// servePage serves the chat page with its CSP and framing protection.
+func servePage(c *gin.Context) {
+	setStaticHeaders(c)
+	c.Header("Content-Security-Policy", contentSecurityPolicy)
+	c.Header("X-Frame-Options", "DENY")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+}
+
+// serveAsset serves an embedded static file with the given content type.
+func serveAsset(contentType string, body []byte) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		setStaticHeaders(c)
+		c.Data(http.StatusOK, contentType, body)
+	}
+}
+
+// newRouter registers the HTML page, its static assets and the WebSocket endpoint.
 func newRouter(room *chat.Room) *gin.Engine {
 	r := gin.Default()
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("set trusted proxies: %v", err)
 	}
-	r.GET("/", func(c *gin.Context) {
-		c.Header("X-Content-Type-Options", "nosniff")
-		c.Header("X-Frame-Options", "DENY")
-		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
-	})
+	r.GET("/", servePage)
+	r.GET("/app.js", serveAsset("text/javascript; charset=utf-8", appJS))
+	r.GET("/app.css", serveAsset("text/css; charset=utf-8", appCSS))
 	r.GET("/ws", room.HandleWebSocket)
 	return r
 }
