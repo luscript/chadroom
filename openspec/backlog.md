@@ -17,16 +17,23 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Global max-clients cap (503 when exceeded); optionally per-IP cap.
 - [ ] Don't log `ErrReadLimit` per connection (attacker-controlled log volume).
 
-## `frontend-hardening`
-- [ ] #13 Build WS URL from `location.host` and use `wss:` on HTTPS (today the page only works
+## `frontend-hardening` — in progress (`changes/frontend-hardening`)
+- [x] #13 Build WS URL from `location.host` and use `wss:` on HTTPS (today the page only works
       at exactly `http://localhost:8080`; `127.0.0.1` is rejected by the origin check).
-- [ ] #15 Handle cancelled `prompt` (nickname "null").
+- [x] #15 Handle cancelled `prompt` (nickname "null") — `prompt()` replaced by the join form.
 - [ ] #16 Check `readyState` before `send`; reconnect with backoff.
 - [ ] CSP header on `GET /` — requires moving the inline script / `onclick` to a hashed or
       external script. Note: the page now also loads Google Fonts (needs `style-src`/`font-src`).
 - [ ] Inline images leak viewers' IPs: any user can send an https image URL and every other
       browser fetches it (`IMAGE_URL` in `index.html`). Options: click-to-load, a host allowlist,
       or a server-side proxy.
+
+## `gif-picker` (after `frontend-hardening`)
+- [ ] GIF panel with search + trending, like the emoji panel.
+- [ ] Server endpoint (e.g. `GET /gifs?q=`) calling Giphy with `GIPHY_API_KEY` from the
+      environment (key never sent to the browser); panel hidden when the key is unset.
+- [ ] HTTP client with timeout, response trimmed to the fields the page needs; "Powered by
+      GIPHY" attribution. Images come only from the allowlisted Giphy hosts.
 
 ## `deps-cleanup`
 - [ ] #17 `go mod tidy` (gin and gorilla are marked `// indirect`).
