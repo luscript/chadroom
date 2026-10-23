@@ -135,6 +135,8 @@ MUST send `X-Content-Type-Options: nosniff`. `GET /` MUST also send
   (CHAT-15), over `https:`;
 - MUST allow network connections only to the page's own origin (`connect-src 'self'`);
 - MUST forbid framing (`frame-ancestors 'none'`) and `<base>` changes (`base-uri 'none'`);
+- MUST allow embedded frames only from `https://www.youtube-nocookie.com` (`frame-src`), for the
+  shared player (CHAT-31), and MUST NOT allow any YouTube host in `script-src`;
 - MUST fall back to denying anything not explicitly allowed (`default-src 'none'`).
 
 The page MUST work under that policy with no CSP violations reported by the browser.
@@ -165,7 +167,7 @@ The page MUST work under that policy with no CSP violations reported by the brow
 - GIVEN the page is opened in a current Chrome or Firefox with the developer console open
 - AND the server runs with `GIPHY_API_KEY` set
 - WHEN the user joins, sends messages, opens the emoji and GIF panels, searches for a GIF,
-  sends one and leaves
+  sends one, opens `musica`, presses "Escuchar", puts a YouTube link, pauses, seeks and leaves
 - THEN everything renders styled and works
 - AND the console reports no Content-Security-Policy violations
 
@@ -185,6 +187,9 @@ MUST NOT change at runtime.
 Room selection MUST happen before the upgrade. The origin policy (SRV-01) MUST apply equally
 to every room. When both checks fail, the server MUST respond with 404 or 403 and MUST NOT
 upgrade.
+
+The room `musica` MUST have a shared player (CHAT-30); the rooms `general` and `juegos` MUST
+NOT.
 
 #### Scenario: Join a named room
 

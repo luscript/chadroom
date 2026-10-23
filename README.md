@@ -83,7 +83,8 @@ Cada frame se interpreta así:
 | `{"type":"dm","to":"bob","text":"hola"}` | Mensaje privado a `bob` (ver abajo). |
 | `{"type":"typing"}` | "Escribiendo…" para toda la sala (ver abajo). |
 | `{"type":"typing","to":"bob"}` | "Escribiendo…" solo para `bob` (ver abajo). |
-| Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido (`typing` ya no cuenta), `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
+| `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
+| Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido (`typing` y `music` ya no cuentan), `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
 
 Los campos extra se ignoran; `from` nunca se toma del cliente. Un texto en blanco se descarta sin
 respuesta, también en un `dm`.
@@ -103,6 +104,7 @@ respuesta, también en un `dm`.
 | `dm`      | Mensaje privado de `from` para `to`: solo lo reciben ambos (ver Mensajes privados). | el mensaje |
 | `dm_error`| Un `dm` no se pudo entregar; solo lo recibe el remitente (ver Mensajes privados). | no lleva `text`; trae `to` y `reason` |
 | `typing`  | `from` está escribiendo: lo reciben todos menos `from`, o solo `to` si fue privado (ver Escribiendo…). | no lleva `text`; `to` solo en el privado |
+| `music`   | Estado del reproductor compartido de `musica`: lo reciben todos, incluido quien lo cambió (ver Música compartida). | no lleva `from` ni `text`; trae `video`, `playing`, `pos` y `by` |
 
 `ts` es el momento del evento en Unix milisegundos.
 
@@ -142,6 +144,33 @@ No se guarda, no entra al `history` ni se escribe en los logs.
 {"type":"typing","from":"Alice","ts":1792684800123}
 {"type":"typing","from":"Alice","to":"Bob","ts":1792684800123}
 ```
+
+**Música compartida:** solo la sala `musica` tiene un reproductor de YouTube compartido; en las
+demás salas un frame `music` se descarta sin respuesta. El servidor guarda qué video suena, si
+está en reproducción, la posición y quién hizo el último cambio (`by`). Nunca toca YouTube: solo
+retransmite el estado y cada página sigue su propio reproductor.
+
+| `action` | Campos | Efecto |
+|----------|--------|--------|
+| `load`   | `video`: id de 11 caracteres `[A-Za-z0-9_-]` (solo el id, nunca una URL) | Carga ese video desde 0 y lo pone a sonar. |
+| `play`   | no lleva | Reanuda desde la posición actual (necesita un video cargado). |
+| `pause`  | no lleva | Pausa en la posición actual (necesita un video cargado). |
+| `seek`   | `pos`: entero en milisegundos, de 0 a 86 400 000 | Salta a esa posición sin cambiar si suena o no (necesita un video cargado). |
+
+Cualquier otro control (`action` faltante o desconocida, campos con tipo incorrecto, `pos`
+fraccionario, negativo o fuera de rango, `video` inválido, o `play`/`pause`/`seek` sin video
+cargado) se descarta sin respuesta y la conexión sigue abierta. Se aceptan hasta 4 controles por
+segundo por conexión; el resto se descarta. Cada control aceptado se difunde a toda la sala,
+incluido quien lo envió, con exactamente estos campos (`pos` ya es la posición en ese instante):
+
+```json
+{"type":"music","video":"dQw4w9WgXcQ","playing":true,"pos":12345,"by":"Alice","ts":1792684800123}
+```
+
+Quien entra con un video cargado recibe ese frame justo después de `history` (`welcome` → `users`
+→ `history` → `music` → `join`); sin video cargado no recibe ninguno. No entra al `history`. Si
+se va el último cliente de la sala, el reproductor queda en pausa en la posición actual. El
+estado vive solo en memoria: se pierde al reiniciar el servidor.
 
 **Privacidad:** los mensajes privados no se guardan: no entran al `history`, el servidor no los
 reenvía ni los reintenta y no escribe su texto ni su destinatario en los logs. Quien se conecta
@@ -185,7 +214,15 @@ bidi, se recorta a 32 caracteres y, si queda vacío, se usa `Anonymous`.
 > (`app.js`); un test falla si las dos listas no coinciden.
 
 **CSP:** la página no tiene código inline; la política solo permite scripts y estilos del propio
-origen y las imágenes de la lista permitida.
+origen, las imágenes de la lista permitida y, como único frame, `https://www.youtube-nocookie.com`
+(`frame-src`) para el reproductor de `musica`. No se carga ningún script de YouTube.
+
+> [!NOTE]
+> **Reproductor de `musica`:** la página arma el iframe de `youtube-nocookie.com` recién cuando
+> apretás **Escuchar**; antes no se hace ningún pedido a YouTube. Después de ese clic, YouTube
+> ve tu IP y el origen de la página (sin ruta ni query). "Poner", pausar y saltar funcionan sin
+> Escuchar porque solo viajan por el WebSocket. La sala con reproductor es `musicRoom`
+> (`main.go`) y `MUSIC_ROOM` (`app.js`); un test falla si difieren.
 
 <p align="center"><img src="docs/readme/divider.svg" alt=""></p>
 
@@ -198,7 +235,8 @@ internal/chat/
   server.go          Server: elige la sala (`room`), hace el upgrade y aplica la política de orígenes
   room.go            Room: hub que registra clientes y difunde mensajes (uno por sala)
   client.go          Client: readPump / writePump por conexión
-  message.go         Mensajes JSON (type, from, text, ts), `dm`/`dm_error`/`typing` y la clasificación de la entrada
+  message.go         Mensajes JSON (type, from, text, ts), `dm`/`dm_error`/`typing`/`music` y la clasificación de la entrada
+  music.go           Reproductor compartido de `musica`: estado, posición y validación de los controles
   nickname.go        Normalización y unicidad de apodos
 ```
 

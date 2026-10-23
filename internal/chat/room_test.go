@@ -19,7 +19,17 @@ const testDeadline = 2 * time.Second
 
 func startRoom(t *testing.T) (*Room, context.CancelFunc) {
 	t.Helper()
-	cr := NewRoom("general")
+	return runRoom(t, NewRoom("general"))
+}
+
+// startMusicRoom runs a room with a shared player (CHAT-30).
+func startMusicRoom(t *testing.T) (*Room, context.CancelFunc) {
+	t.Helper()
+	return runRoom(t, NewMusicRoom("musica"))
+}
+
+func runRoom(t *testing.T, cr *Room) (*Room, context.CancelFunc) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	go cr.Run(ctx)
 	t.Cleanup(cancel)
@@ -815,6 +825,20 @@ func TestNewRoomDefaults(t *testing.T) {
 	if cap(cr.broadcast) != sendBufferSize {
 		t.Errorf("broadcast cap = %d, want %d", cap(cr.broadcast), sendBufferSize)
 	}
+	if cr.player != nil {
+		t.Errorf("player = %+v, want nil (no shared player)", cr.player)
+	}
+}
+
+// CHAT-30: NewMusicRoom is NewRoom plus an empty player.
+func TestNewMusicRoom(t *testing.T) {
+	cr := NewMusicRoom("musica")
+	if cr.id != "musica" || cr.maxMessageSize != 4096 || cap(cr.broadcast) != sendBufferSize {
+		t.Errorf("NewMusicRoom differs from NewRoom defaults: %+v", cr)
+	}
+	if cr.player == nil || *cr.player != (player{}) {
+		t.Errorf("player = %+v, want an empty player", cr.player)
+	}
 }
 
 func TestNormalizeNickname(t *testing.T) {
@@ -1585,4 +1609,362 @@ func TestReusedNicknameNoStaleAvatar(t *testing.T) {
 	expectWelcome(t, bob2, "bob") // users frame passes decodeUsers: no avatars key
 	expect(t, bob2, typeJoin, "bob", "")
 	expect(t, obs, typeJoin, "bob", "")
+}
+
+// decodeMusic parses a music frame with exactly type, video, playing, pos, by and ts.
+func decodeMusic(t *testing.T, b []byte) musicFrame {
+	t.Helper()
+	fields := exactFields(t, b, "type", "video", "playing", "pos", "by", "ts")
+	var f musicFrame
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("decode music %q: %v", b, err)
+	}
+	if f.Type != typeMusic {
+		t.Fatalf("type = %q, want music", f.Type)
+	}
+	for _, k := range []string{"pos", "ts"} { // integers, not 1.5 or 1e3
+		if _, err := strconv.ParseInt(string(fields[k]), 10, 64); err != nil {
+			t.Fatalf("%s = %s, want an integer", k, fields[k])
+		}
+	}
+	return f
+}
+
+// expectMusic waits for the next frame on c, requires a music frame with this video,
+// playing and by, and returns it so callers can check pos.
+func expectMusic(t *testing.T, c *Client, video string, playing bool, by string) musicFrame {
+	t.Helper()
+	f := decodeMusic(t, nextRaw(t, c))
+	if f.Video != video || f.Playing != playing || f.By != by {
+		t.Fatalf("music = %+v, want video %q playing %v by %q", f, video, playing, by)
+	}
+	return f
+}
+
+// musicCtl queues a validated music control as if it had been read from from's connection.
+func musicCtl(t *testing.T, cr *Room, from *Client, cmd musicCmd) {
+	t.Helper()
+	select {
+	case cr.broadcast <- inbound{from: from, kind: inboundMusic, music: cmd}:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout queueing music control")
+	}
+}
+
+var (
+	loadCmd  = musicCmd{action: musicLoad, video: "dQw4w9WgXcQ"}
+	playCmd  = musicCmd{action: musicPlay}
+	pauseCmd = musicCmd{action: musicPause}
+)
+
+func seekCmd(pos int64) musicCmd { return musicCmd{action: musicSeek, pos: pos} }
+
+// CHAT-30: the player's state machine, with fixed clock readings.
+func TestPlayerApply(t *testing.T) {
+	t0 := time.Unix(5000, 0)
+	at := func(ms int64) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	p := &player{}
+
+	for _, c := range []musicCmd{playCmd, pauseCmd, seekCmd(5)} {
+		if p.apply(c, "A", t0) {
+			t.Fatalf("%s with no video was accepted", c.action)
+		}
+		if *p != (player{}) {
+			t.Fatalf("%s with no video changed the state: %+v", c.action, *p)
+		}
+	}
+
+	steps := []struct {
+		name    string
+		cmd     musicCmd
+		by      string
+		now     int64 // ms after t0
+		playing bool
+		pos     int64 // position right after, at now
+	}{
+		{"load starts at 0", loadCmd, "A", 1000, true, 0},
+		{"pause anchors the position", pauseCmd, "B", 4000, false, 3000},
+		{"seek keeps paused", seekCmd(60000), "C", 9000, false, 60000},
+		{"play resumes from the seek", playCmd, "A", 10000, true, 60000},
+		{"seek keeps playing", seekCmd(120000), "B", 12000, true, 120000},
+		{"play while playing re-anchors", playCmd, "C", 15000, true, 123000},
+		{"load again resets", musicCmd{action: musicLoad, video: "aaaaaaaaaaa"}, "A", 20000, true, 0},
+	}
+	for _, s := range steps {
+		if !p.apply(s.cmd, s.by, at(s.now)) {
+			t.Fatalf("%s: rejected", s.name)
+		}
+		if p.playing != s.playing || p.by != s.by || p.position(at(s.now)) != s.pos {
+			t.Fatalf("%s: playing %v by %q pos %d, want %v by %q pos %d",
+				s.name, p.playing, p.by, p.position(at(s.now)), s.playing, s.by, s.pos)
+		}
+	}
+	if p.video != "aaaaaaaaaaa" {
+		t.Fatalf("video = %q, want the last load", p.video)
+	}
+	if got := p.position(at(25000)); got != 5000 {
+		t.Fatalf("position while playing = %d, want 5000", got)
+	}
+
+	p.halt(at(30000)) // freezes at 10000 ms into the video, by unchanged
+	if p.playing || p.by != "A" || p.pos != 10000 {
+		t.Fatalf("halt: %+v, want paused at 10000 by A", *p)
+	}
+	if p.position(at(99999)) != 10000 {
+		t.Fatal("position moved while paused")
+	}
+	p.halt(at(99999)) // halting a paused player changes nothing
+	if p.pos != 10000 {
+		t.Fatalf("second halt moved pos to %d", p.pos)
+	}
+
+	f := p.frame(at(40000))
+	if f != (musicFrame{typeMusic, "aaaaaaaaaaa", false, 10000, "A", at(40000).UnixMilli()}) {
+		t.Fatalf("frame = %+v", f)
+	}
+}
+
+// CHAT-30: load is broadcast to everyone, the sender included, with exactly the documented fields.
+func TestMusicLoadBroadcast(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+
+	start := time.Now()
+	musicCtl(t, cr, a, loadCmd)
+	for _, c := range []*Client{a, b} {
+		f := expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+		if elapsed := time.Since(start).Milliseconds(); f.Pos < 0 || f.Pos > elapsed {
+			t.Fatalf("pos = %d, want within 0..%d", f.Pos, elapsed)
+		}
+		if f.TS < start.UnixMilli() || f.TS > time.Now().UnixMilli() {
+			t.Fatalf("ts = %d outside the test window", f.TS)
+		}
+	}
+	expectEmpty(t, a)
+	expectEmpty(t, b)
+}
+
+// CHAT-30: pause, seek and play keep the position; by follows the sender.
+func TestMusicPauseSeekPlay(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+	both := []*Client{a, b}
+	start := time.Now()
+
+	musicCtl(t, cr, a, loadCmd)
+	for _, c := range both {
+		expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+	}
+	musicCtl(t, cr, b, pauseCmd)
+	var pausedAt int64
+	for _, c := range both {
+		pausedAt = expectMusic(t, c, "dQw4w9WgXcQ", false, "B").Pos
+	}
+	musicCtl(t, cr, a, seekCmd(60000))
+	for _, c := range both {
+		if f := expectMusic(t, c, "dQw4w9WgXcQ", false, "A"); f.Pos != 60000 {
+			t.Fatalf("seek pos = %d, want exactly 60000 while paused", f.Pos)
+		}
+	}
+	musicCtl(t, cr, b, playCmd)
+	for _, c := range both {
+		f := expectMusic(t, c, "dQw4w9WgXcQ", true, "B")
+		if f.Pos < 60000 || f.Pos > 60000+time.Since(start).Milliseconds() {
+			t.Fatalf("play pos = %d, want 60000 plus a little", f.Pos)
+		}
+	}
+	musicCtl(t, cr, a, seekCmd(5000)) // seeking while playing keeps playing
+	for _, c := range both {
+		f := expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+		if f.Pos < 5000 || f.Pos > 5000+time.Since(start).Milliseconds() {
+			t.Fatalf("seek pos = %d, want 5000 plus a little", f.Pos)
+		}
+	}
+	musicCtl(t, cr, a, playCmd) // play while playing is accepted and broadcast
+	for _, c := range both {
+		expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+	}
+	if pausedAt < 0 || pausedAt > time.Since(start).Milliseconds() {
+		t.Fatalf("pause pos = %d out of range", pausedAt)
+	}
+}
+
+// CHAT-30: play, pause and seek with no video loaded are discarded without any reply.
+func TestMusicNeedsVideo(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+
+	for _, c := range []musicCmd{playCmd, pauseCmd, seekCmd(5)} {
+		musicCtl(t, cr, a, c)
+	}
+	broadcast(t, cr, a, "after") // Run handled the controls first, so a reply would precede it
+	for _, c := range []*Client{a, b} {
+		expect(t, c, typeChat, "A", "after")
+		expectEmpty(t, c)
+	}
+}
+
+// CHAT-30: a newcomer gets the current state right after history, before its join; none while nothing is loaded.
+func TestMusicNewcomerSnapshot(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a := newTestClient("A", 64)
+	joinAll(t, cr, a)
+
+	empty := newTestClient("E", 64)
+	register(t, cr, empty)
+	expectWelcome(t, empty, "E")
+	expect(t, empty, typeJoin, "E", "") // no music frame: nothing is loaded
+	expect(t, a, typeJoin, "E", "")
+
+	before := time.Now()
+	musicCtl(t, cr, a, loadCmd)
+	expectMusic(t, a, "dQw4w9WgXcQ", true, "A")
+	expectMusic(t, empty, "dQw4w9WgXcQ", true, "A")
+	loaded := time.Now()
+	time.Sleep(20 * time.Millisecond)
+
+	joining := time.Now()
+	c := newTestClient("C", 64)
+	register(t, cr, c)
+	expectWelcome(t, c, "C")
+	f := expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+	if min, max := joining.Sub(loaded).Milliseconds(), time.Since(before).Milliseconds(); f.Pos < min || f.Pos > max {
+		t.Fatalf("snapshot pos = %d, want within %d..%d", f.Pos, min, max)
+	}
+	expect(t, c, typeJoin, "C", "")
+	expectEmpty(t, c)
+	// The snapshot is private: nobody else gets a second music frame.
+	expect(t, a, typeJoin, "C", "")
+	expectEmpty(t, a)
+}
+
+// CHAT-30: when the last client leaves, the player pauses at the current position.
+func TestMusicEmptyRoomPauses(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a := newTestClient("A", 64)
+	joinAll(t, cr, a)
+	musicCtl(t, cr, a, loadCmd)
+	expectMusic(t, a, "dQw4w9WgXcQ", true, "A")
+	time.Sleep(50 * time.Millisecond)
+	unregister(t, cr, a)
+	expectClosed(t, a)
+	time.Sleep(100 * time.Millisecond)
+
+	b := newTestClient("B", 64)
+	register(t, cr, b)
+	expectWelcome(t, b, "B")
+	f := expectMusic(t, b, "dQw4w9WgXcQ", false, "A")
+	if f.Pos < 50 {
+		t.Fatalf("pos = %d, want at least the 50 ms played before A left", f.Pos)
+	}
+	expect(t, b, typeJoin, "B", "")
+
+	time.Sleep(50 * time.Millisecond) // still paused: the position does not advance
+	c := newTestClient("C", 64)
+	register(t, cr, c)
+	expectWelcome(t, c, "C")
+	if g := expectMusic(t, c, "dQw4w9WgXcQ", false, "A"); g.Pos != f.Pos {
+		t.Fatalf("paused pos moved from %d to %d", f.Pos, g.Pos)
+	}
+}
+
+// CHAT-30, CHAT-03: the last client removed as slow also pauses the room.
+func TestMusicLastSlowDropPauses(t *testing.T) {
+	cr := NewMusicRoom("musica")
+	x := newTestClient("x", 0)
+	cr.clients[x] = struct{}{}
+	cr.taken[foldKey("x")] = struct{}{}
+	cr.player.apply(loadCmd, "x", time.Now().Add(-time.Hour)) // an hour in, so a stale pos stands out
+
+	cr.dispatch(inbound{from: x, kind: inboundMusic, music: playCmd}) // x cannot take the frame
+
+	expectClosed(t, x)
+	if len(cr.clients) != 0 {
+		t.Fatalf("clients = %d, want 0", len(cr.clients))
+	}
+	if cr.player.playing || cr.player.pos < int64(time.Hour/time.Millisecond) {
+		t.Fatalf("player = %+v, want paused at about an hour", *cr.player)
+	}
+}
+
+// CHAT-30, CHAT-21: without a shared player a control is dropped, history is unchanged and chat still flows.
+func TestMusicRoomWithoutPlayer(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+
+	musicCtl(t, cr, a, loadCmd)
+	musicCtl(t, cr, a, playCmd)
+	broadcast(t, cr, a, "hola")
+	for _, c := range []*Client{a, b} {
+		expect(t, c, typeChat, "A", "hola")
+		expectEmpty(t, c)
+	}
+
+	c := newTestClient("C", 64)
+	register(t, cr, c)
+	_, hist := expectWelcome(t, c, "C")
+	expectHistory(t, hist, message{Type: typeChat, From: "A", Text: "hola"})
+	expect(t, c, typeJoin, "C", "") // no music frame
+	expectEmpty(t, c)
+}
+
+// CHAT-30, CHAT-18: music frames are never stored in history.
+func TestMusicNotInHistory(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a := newTestClient("A", 64)
+	joinAll(t, cr, a)
+	musicCtl(t, cr, a, loadCmd)
+	expectMusic(t, a, "dQw4w9WgXcQ", true, "A")
+	broadcast(t, cr, a, "hola")
+	expect(t, a, typeChat, "A", "hola")
+
+	b := newTestClient("B", 64)
+	register(t, cr, b)
+	_, hist := expectWelcome(t, b, "B")
+	expectHistory(t, hist, message{Type: typeChat, From: "A", Text: "hola"})
+	expectMusic(t, b, "dQw4w9WgXcQ", true, "A")
+}
+
+// CHAT-21: a control from a client that is no longer a member is ignored.
+func TestMusicFromNonMemberDropped(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, ghost := newTestClient("A", 64), newTestClient("ghost", 64)
+	joinAll(t, cr, a)
+
+	musicCtl(t, cr, ghost, loadCmd)
+	broadcast(t, cr, a, "after")
+	expect(t, a, typeChat, "A", "after")
+	expectEmpty(t, a)
+	expectEmpty(t, ghost)
+
+	b := newTestClient("B", 64) // nothing was loaded, so no snapshot
+	register(t, cr, b)
+	expectWelcome(t, b, "B")
+	expect(t, b, typeJoin, "B", "")
+}
+
+// CHAT-30, CHAT-03: a member that cannot take a music frame is removed and announced as left.
+func TestMusicSlowClientDropped(t *testing.T) {
+	cr := NewMusicRoom("musica")
+	o, a, x := newTestClient("o", 16), newTestClient("a", 16), newTestClient("x", 0)
+	for _, c := range []*Client{o, a, x} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.dispatch(inbound{from: a, kind: inboundMusic, music: loadCmd})
+
+	expectClosed(t, x)
+	for _, c := range []*Client{o, a} {
+		expectMusic(t, c, "dQw4w9WgXcQ", true, "a")
+		expect(t, c, typeLeave, "x", "")
+		expectEmpty(t, c)
+	}
+	if !cr.player.playing {
+		t.Fatal("the room still has members, so the player must keep playing")
+	}
 }

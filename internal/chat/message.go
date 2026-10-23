@@ -16,6 +16,7 @@ const (
 	typeDM      = "dm"
 	typeDMError = "dm_error"
 	typeTyping  = "typing"
+	typeMusic   = "music"
 	historySize = 50 // chat messages kept for newcomers
 
 	reasonInvalid = "invalid"
@@ -82,6 +83,17 @@ type typingDMFrame struct {
 	TS   int64  `json:"ts"`
 }
 
+// musicFrame is a room's shared player state (CHAT-30). pos is computed when the frame is
+// built, so receivers treat it as "now" and server/client clock skew doesn't matter. Never stored.
+type musicFrame struct {
+	Type    string `json:"type"` // always "music"
+	Video   string `json:"video"`
+	Playing bool   `json:"playing"`
+	Pos     int64  `json:"pos"` // ms
+	By      string `json:"by"`
+	TS      int64  `json:"ts"`
+}
+
 type inboundKind uint8
 
 const (
@@ -89,15 +101,17 @@ const (
 	inboundDM                        // to and text set
 	inboundBadDM                     // dm envelope with a bad to/text; answered with dm_error invalid
 	inboundTyping                    // typing signal; to == "" is a room signal
+	inboundMusic                     // validated music control (CHAT-30)
 )
 
 // inbound is a classified client text frame on its way to the hub. It travels on
 // Room.broadcast whatever its kind, so one client's frames keep their order.
 type inbound struct {
-	from *Client
-	kind inboundKind
-	to   string // inboundDM: cleanNickname(to), never "". inboundTyping: "" for a room signal
-	text string
+	from  *Client
+	kind  inboundKind
+	to    string // inboundDM: cleanNickname(to), never "". inboundTyping: "" for a room signal
+	text  string
+	music musicCmd // inboundMusic only
 }
 
 // parseInbound classifies a size- and UTF-8-checked text frame (CHAT-21). ok is
@@ -129,6 +143,14 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 			to, toOK := jsonString(raw)
 			to = cleanNickname(to)
 			return inbound{kind: inboundTyping, to: to}, toOK && to != "" // invalid: silent discard
+		case typeMusic:
+			// CHAT-21 rule 2a: validated completely here, and an invalid control is
+			// discarded instead of falling back to chat.
+			cmd, valid := parseMusic(env)
+			if !valid {
+				return inbound{}, false
+			}
+			return inbound{kind: inboundMusic, music: cmd}, true
 		case typeChat:
 			// A non-string text intentionally falls through to the plain-text rule (CHAT-21).
 			if textOK {
@@ -138,6 +160,34 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 	}
 	whole := string(frame)
 	return inbound{text: whole}, strings.TrimSpace(whole) != ""
+}
+
+// parseMusic validates a music control's fields (CHAT-30). Whether a video is loaded is
+// the hub's business.
+func parseMusic(env map[string]json.RawMessage) (musicCmd, bool) {
+	action, _ := jsonString(env["action"])
+	switch action {
+	case musicLoad:
+		video, ok := jsonString(env["video"])
+		return musicCmd{action: action, video: video}, ok && videoID.MatchString(video)
+	case musicPlay, musicPause:
+		return musicCmd{action: action}, true
+	case musicSeek:
+		pos, ok := jsonMillis(env["pos"])
+		return musicCmd{action: action, pos: pos}, ok && pos >= 0 && pos <= maxMusicPos
+	}
+	return musicCmd{}, false
+}
+
+// jsonMillis decodes a JSON integer. "null" (which Unmarshal would read as 0), strings,
+// booleans, objects, fractions and exponents are all rejected.
+func jsonMillis(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 || (raw[0] != '-' && (raw[0] < '0' || raw[0] > '9')) {
+		return 0, false
+	}
+	var n int64
+	err := json.Unmarshal(raw, &n)
+	return n, err == nil
 }
 
 // jsonString reports whether raw is a JSON string and returns its value ("null" is not a string).

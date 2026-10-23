@@ -87,10 +87,13 @@ func TestIndexSecurityHeaders(t *testing.T) {
 		"img-src 'self' https://media.giphy.com https://media0.giphy.com https://media1.giphy.com " +
 		"https://media2.giphy.com https://media3.giphy.com https://media4.giphy.com " +
 		"https://i.giphy.com https://media.tenor.com https://i.imgur.com; " +
-		"connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		"connect-src 'self'; frame-src https://www.youtube-nocookie.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 	csp := resp.Header.Get("Content-Security-Policy")
 	if csp != wantCSP {
 		t.Errorf("Content-Security-Policy = %q, want %q", csp, wantCSP)
+	}
+	if !strings.Contains(csp, "script-src 'self';") {
+		t.Errorf("script-src must stay 'self' only: %q", csp)
 	}
 	for _, bad := range []string{"unsafe-inline", "unsafe-eval"} {
 		if strings.Contains(csp, bad) {
@@ -541,5 +544,138 @@ func TestIndexHasAvatarField(t *testing.T) {
 	}
 	if !strings.Contains(html, `id="profile-avatar"`) {
 		t.Error(`index.html missing id="profile-avatar"`)
+	}
+}
+
+// SRV-06: the player room is named once in Go and once in the page, and they must agree.
+func TestMusicRoomMirroredInJS(t *testing.T) {
+	if !slices.Contains(roomIDs, musicRoom) {
+		t.Fatalf("roomIDs %v does not contain musicRoom %q", roomIDs, musicRoom)
+	}
+	m := regexp.MustCompile(`const MUSIC_ROOM = '([^']*)'`).FindSubmatch(appJS)
+	if m == nil {
+		t.Fatal("MUSIC_ROOM not found in app.js")
+	}
+	if string(m[1]) != musicRoom {
+		t.Errorf("MUSIC_ROOM = %q, want %q (musicRoom)", m[1], musicRoom)
+	}
+}
+
+// dialRoomConn connects to room with a same-host Origin and consumes welcome, users and history.
+func dialRoomConn(t *testing.T, ts *httptest.Server, room, nick string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?nickname=" + nick + "&room=" + url.QueryEscape(room)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{ts.URL}})
+	if err != nil {
+		t.Fatalf("dial %s in %s: %v", nick, room, err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	for _, want := range []string{"welcome", "users", "history"} {
+		if got := readFrameType(t, conn); got != want {
+			t.Fatalf("frame = %q, want %q", got, want)
+		}
+	}
+	return conn
+}
+
+// readFrameType reads one frame and returns its type, skipping join notices.
+func readFrameType(t *testing.T, conn *websocket.Conn) string {
+	t.Helper()
+	for {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(data, &head); err != nil {
+			t.Fatalf("invalid JSON %q: %v", data, err)
+		}
+		if head.Type != "join" {
+			return head.Type
+		}
+	}
+}
+
+// SRV-06: only the musica room has a shared player; a control in any other room is dropped, never chat.
+func TestMusicOnlyInMusica(t *testing.T) {
+	ts := newTestServer(t)
+	const load = `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`
+
+	m := dialRoomConn(t, ts, "musica", "A")
+	if err := m.WriteMessage(websocket.TextMessage, []byte(load)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFrameType(t, m); got != "music" {
+		t.Fatalf("musica answered %q, want a music frame", got)
+	}
+
+	g := dialRoomConn(t, ts, "general", "A")
+	for _, frame := range []string{load, "hola"} {
+		if err := g.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readFrameType(t, g); got != "chat" { // the chat is the first and only reply
+		t.Fatalf("general answered %q first, want only the chat", got)
+	}
+}
+
+// CHAT-31: the player strip sits between the room tabs and the rule, hidden, with every control.
+func TestIndexHasMusicPlayer(t *testing.T) {
+	html := string(indexHTML)
+	for _, want := range []string{
+		`id="music-url"`, `id="music-load"`, `id="music-toggle"`, `id="music-seek"`,
+		`id="music-time"`, `id="music-volume"`, `id="music-mute"`, `id="music-now"`,
+		`id="music-error"`, `id="music-listen"`, `id="music-player"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %s", want)
+		}
+	}
+	startTag := func(id string) string {
+		i := strings.Index(html, `id="`+id+`"`)
+		if i < 0 {
+			t.Fatalf("index.html missing id=%q", id)
+		}
+		return html[strings.LastIndex(html[:i], "<") : i+strings.Index(html[i:], ">")]
+	}
+	if !regexp.MustCompile(`\shidden[\s>]`).MatchString(startTag("music") + ">") {
+		t.Errorf("#music must start hidden: %s", startTag("music"))
+	}
+	if !regexp.MustCompile(`(?s)id="music-load"[^>]*>\s*Poner\s*<`).MatchString(html) {
+		t.Error(`#music-load must be the "Poner" button`)
+	}
+	if !regexp.MustCompile(`(?s)id="music-listen"[^>]*>\s*Escuchar\s*<`).MatchString(html) {
+		t.Error(`#music-listen must be the "Escuchar" button`)
+	}
+	tabs, music, rule := strings.Index(html, `id="room-tabs"`), strings.Index(html, `id="music"`), strings.Index(html, `class="rule"`)
+	if tabs < 0 || music < 0 || rule < 0 || tabs >= music || music >= rule {
+		t.Fatalf(`id="music" must sit between id="room-tabs" and class="rule" (tabs=%d music=%d rule=%d)`, tabs, music, rule)
+	}
+	// The page must not contact YouTube before "Escuchar" (CHAT-31): the frame is built by app.js only.
+	if strings.Contains(strings.ToLower(html), "<iframe") {
+		t.Error("index.html contains an <iframe>")
+	}
+	if m := regexp.MustCompile(`(?i)(https?:)?//[^"'\s]*youtu`).FindString(html); m != "" {
+		t.Errorf("index.html references a YouTube URL: %q", m)
+	}
+}
+
+// CHAT-31: no YouTube script is ever loaded; the iframe is driven with postMessage.
+func TestNoYouTubeScript(t *testing.T) {
+	js := string(appJS)
+	for _, banned := range []string{"iframe_api", "createElement('script')", `createElement("script")`, "youtube.com/s/", "youtube.com/iframe"} {
+		if strings.Contains(js, banned) {
+			t.Errorf("app.js contains %q", banned)
+		}
+	}
+	if m := regexp.MustCompile(`(?i)https://(www\.|m\.|music\.)?youtube\.com/[^'"\x60\s]*\.js`).FindString(js); m != "" {
+		t.Errorf("app.js references a YouTube script URL: %q", m)
+	}
+	if !strings.Contains(js, "youtube-nocookie.com/embed/") {
+		t.Error("app.js does not build the youtube-nocookie.com/embed/ URL")
 	}
 }

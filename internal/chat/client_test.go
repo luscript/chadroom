@@ -804,6 +804,39 @@ func TestParseInbound(t *testing.T) {
 		{"typing to only bidi", "{\"type\":\"typing\",\"to\":\"‮\"}", inbound{}, true},
 		{"typing key case sensitive", `{"TYPE":"typing"}`, inbound{text: `{"TYPE":"typing"}`}, false},
 		{"typing value case sensitive", `{"type":"Typing"}`, inbound{text: `{"type":"Typing"}`}, false},
+		{"music load", `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicLoad, video: "dQw4w9WgXcQ"}}, false},
+		{"music load dashes and underscores", `{"type":"music","action":"load","video":"a-_B1c2D3e4"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicLoad, video: "a-_B1c2D3e4"}}, false},
+		{"music load extra fields ignored", `{"type":"music","action":"load","video":"dQw4w9WgXcQ","pos":"x","text":"hola","by":"C"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicLoad, video: "dQw4w9WgXcQ"}}, false},
+		{"music play", `{"type":"music","action":"play"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicPlay}}, false},
+		{"music pause", `{"type":"music","action":"pause","extra":1}`, inbound{kind: inboundMusic, music: musicCmd{action: musicPause}}, false},
+		{"music play with text is not chat", `{"type":"music","action":"play","text":"hola"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicPlay}}, false},
+		{"music seek", `{"type":"music","action":"seek","pos":60000}`, inbound{kind: inboundMusic, music: musicCmd{action: musicSeek, pos: 60000}}, false},
+		{"music seek zero", `{"type":"music","action":"seek","pos":0}`, inbound{kind: inboundMusic, music: musicCmd{action: musicSeek}}, false},
+		{"music seek max", `{"type":"music","action":"seek","pos":86400000}`, inbound{kind: inboundMusic, music: musicCmd{action: musicSeek, pos: 86400000}}, false},
+		{"music without action", `{"type":"music"}`, inbound{}, true},
+		{"music unknown action", `{"type":"music","action":"stop"}`, inbound{}, true},
+		{"music action case sensitive", `{"type":"music","action":"PLAY"}`, inbound{}, true},
+		{"music action not a string", `{"type":"music","action":5}`, inbound{}, true},
+		{"music action null", `{"type":"music","action":null}`, inbound{}, true},
+		{"music load without video", `{"type":"music","action":"load"}`, inbound{}, true},
+		{"music load video 10 chars", `{"type":"music","action":"load","video":"dQw4w9WgXc"}`, inbound{}, true},
+		{"music load video 12 chars", `{"type":"music","action":"load","video":"dQw4w9WgXcQQ"}`, inbound{}, true},
+		{"music load video url", `{"type":"music","action":"load","video":"https://youtu.be/dQw4w9WgXcQ"}`, inbound{}, true},
+		{"music load video trailing newline", `{"type":"music","action":"load","video":"dQw4w9WgXcQ\n"}`, inbound{}, true},
+		{"music load video bad char", `{"type":"music","action":"load","video":"dQw4w9WgX!Q"}`, inbound{}, true},
+		{"music load video not a string", `{"type":"music","action":"load","video":12345678901}`, inbound{}, true},
+		{"music load video null", `{"type":"music","action":"load","video":null}`, inbound{}, true},
+		{"music seek without pos", `{"type":"music","action":"seek"}`, inbound{}, true},
+		{"music seek pos null", `{"type":"music","action":"seek","pos":null}`, inbound{}, true},
+		{"music seek pos string", `{"type":"music","action":"seek","pos":"5"}`, inbound{}, true},
+		{"music seek pos bool", `{"type":"music","action":"seek","pos":true}`, inbound{}, true},
+		{"music seek pos negative", `{"type":"music","action":"seek","pos":-1}`, inbound{}, true},
+		{"music seek pos fraction", `{"type":"music","action":"seek","pos":1.5}`, inbound{}, true},
+		{"music seek pos exponent", `{"type":"music","action":"seek","pos":1e3}`, inbound{}, true},
+		{"music seek pos over max", `{"type":"music","action":"seek","pos":86400001}`, inbound{}, true},
+		{"music seek pos beyond int64", `{"type":"music","action":"seek","pos":9223372036854775808}`, inbound{}, true},
+		{"music key case sensitive", `{"TYPE":"music","action":"play"}`, inbound{text: `{"TYPE":"music","action":"play"}`}, false},
+		{"music value case sensitive", `{"type":"MUSIC","action":"play"}`, inbound{text: `{"type":"MUSIC","action":"play"}`}, false},
 		{"empty frame", ``, inbound{}, true},
 		{"spaces frame", `  `, inbound{}, true},
 	}
@@ -932,24 +965,49 @@ func readTyping(t *testing.T, conn *websocket.Conn) typingDMFrame {
 	return decodeTyping(t, nextNonJoin(t, conn))
 }
 
-// CHAT-26: the gate admits one signal per interval and a discarded one does not move the window.
-func TestTypingGate(t *testing.T) {
+// CHAT-26, CHAT-30: the gate admits one event per interval and a discarded one does not move the window.
+func TestRateGate(t *testing.T) {
 	base := time.Unix(1000, 0)
-	var g typingGate
-	steps := []struct {
-		at   time.Duration
-		want bool
-	}{
-		{0, true},
-		{999 * time.Millisecond, false},
-		{time.Second, true}, // boundary: exactly one interval later
-		{1500 * time.Millisecond, false},
-		{2 * time.Second, true}, // the discarded 1.5 s did not reset the window
-	}
-	for _, s := range steps {
-		if got := g.allow(base.Add(s.at)); got != s.want {
-			t.Fatalf("allow(+%v) = %v, want %v", s.at, got, s.want)
+	tests := []struct {
+		name     string
+		interval time.Duration
+		steps    []struct {
+			at   time.Duration
+			want bool
 		}
+	}{
+		{"typing", typingInterval, []struct {
+			at   time.Duration
+			want bool
+		}{
+			{0, true},
+			{999 * time.Millisecond, false},
+			{time.Second, true}, // boundary: exactly one interval later
+			{1500 * time.Millisecond, false},
+			{2 * time.Second, true}, // the discarded 1.5 s did not reset the window
+		}},
+		{"music", musicInterval, []struct {
+			at   time.Duration
+			want bool
+		}{
+			{0, true},
+			{259 * time.Millisecond, false},
+			{260 * time.Millisecond, true}, // boundary
+			{400 * time.Millisecond, false},
+			{520 * time.Millisecond, true}, // the discarded 400 ms did not reset the window
+			{780 * time.Millisecond, true}, // 4 admitted within the first second, never 5 (CHAT-30)
+			{1039 * time.Millisecond, false},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := rateGate{interval: tt.interval}
+			for _, s := range tt.steps {
+				if got := g.allow(base.Add(s.at)); got != s.want {
+					t.Fatalf("allow(+%v) = %v, want %v", s.at, got, s.want)
+				}
+			}
+		})
 	}
 }
 
@@ -1044,4 +1102,112 @@ func TestThrottledTypingExtendsReadDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	recvUntil(t, bMsgs, typeChat, "A", "alive")
+}
+
+// readMusic reads the next frame (skipping joins) and requires it to be a music frame.
+func readMusic(t *testing.T, conn *websocket.Conn) musicFrame {
+	t.Helper()
+	return decodeMusic(t, nextNonJoin(t, conn))
+}
+
+// CHAT-21, CHAT-30: a control in a room with a player reaches everyone, sender included.
+// In a room without one it is dropped and never becomes chat (the chat sent after it arrives alone).
+func TestMusicOverWebSocket(t *testing.T) {
+	srv, _ := startRooms(t, nil, NewMusicRoom("musica"), NewRoom("general"))
+	a, _ := dialRoom(t, srv, "musica", "A")
+	b, _ := dialRoom(t, srv, "musica", "B")
+
+	send(t, a, `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	for _, conn := range []*websocket.Conn{a, b} {
+		if f := readMusic(t, conn); f.Video != "dQw4w9WgXcQ" || !f.Playing || f.By != "A" {
+			t.Fatalf("music = %+v, want dQw4w9WgXcQ playing by A", f)
+		}
+	}
+
+	c, _ := dialRoom(t, srv, "general", "C")
+	d, _ := dialRoom(t, srv, "general", "D")
+	send(t, c, `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	send(t, c, `{"type":"music","action":"bogus"}`)
+	send(t, c, "hola")
+	for _, conn := range []*websocket.Conn{c, d} {
+		if m := nextChat(t, conn, ""); m.Text != "hola" { // a music frame would fail decode first
+			t.Fatalf("chat = %+v, want hola", m)
+		}
+	}
+}
+
+// CHAT-21 rule 2a: an invalid control is dropped, not relayed as text, and the connection stays open.
+func TestInvalidMusicDiscarded(t *testing.T) {
+	srv, _ := startServer(t, NewMusicRoom("musica"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, `{"type":"music"}`)
+	send(t, a, `{"type":"music","action":"load","video":"abc","text":"hola"}`)
+	send(t, a, `{"type":"music","action":"seek","pos":1.5}`)
+	send(t, a, "hola")
+	for _, conn := range []*websocket.Conn{a, b} {
+		if m := nextChat(t, conn, ""); m.Text != "hola" {
+			t.Fatalf("first chat = %+v, want hola", m)
+		}
+	}
+}
+
+// CHAT-30: the newcomer's frames are welcome, users, history, music, then its join.
+func TestMusicNewcomerOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewMusicRoom("musica"))
+	a, _ := dial(t, srv, "A")
+	send(t, a, `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	readMusic(t, a)
+
+	conn := dialRaw(t, srv, "C")
+	if m := readMsg(t, conn); m.Type != typeWelcome {
+		t.Fatalf("frame 1 = %+v, want welcome", m)
+	}
+	decodeUsers(t, readRaw(t, conn))
+	decodeHistory(t, readRaw(t, conn))
+	if f := decodeMusic(t, readRaw(t, conn)); f.Video != "dQw4w9WgXcQ" || !f.Playing || f.By != "A" {
+		t.Fatalf("frame 4 = %+v, want the loaded state by A", f)
+	}
+	if m := readMsg(t, conn); m.Type != typeJoin || m.From != "C" {
+		t.Fatalf("frame 5 = %+v, want join C", m)
+	}
+}
+
+// CHAT-30: at most 4 controls per second per connection are accepted; the connection stays open.
+func TestMusicThrottledOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewMusicRoom("musica"))
+	a, _ := dial(t, srv, "A")
+
+	send(t, a, `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	for i := 0; i < 20; i++ {
+		send(t, a, `{"type":"music","action":"play"}`)
+	}
+	send(t, a, "hola")
+	frames := 0
+	for {
+		raw := nextNonJoin(t, a)
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			t.Fatalf("invalid JSON %q: %v", raw, err)
+		}
+		if head.Type == typeChat {
+			break
+		}
+		if head.Type != typeMusic {
+			t.Fatalf("unexpected frame %s", raw)
+		}
+		frames++
+	}
+	// The 21 frames arrive within a few ms, so normally 1 is accepted; allow up to 5 so a slow
+	// machine that spreads the sends over 1 s (4 per second plus the first) cannot flake.
+	if frames < 1 || frames > 5 {
+		t.Fatalf("music frames before the chat = %d, want 1..5", frames)
+	}
+	send(t, a, "otra")
+	if m := nextChat(t, a, ""); m.Text != "otra" {
+		t.Fatalf("chat = %+v, want otra", m)
+	}
 }

@@ -51,14 +51,24 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Drain the upstream body on non-200 before closing (connection reuse).
 - [ ] No feedback when a GIF click fails to send (`sendText` false); same as the paste box.
 
-## `music-player` (room `musica`)
-- [ ] Web music player in the `musica` room only (hidden in `general` / `juegos`).
-- [ ] Open decisions for the design phase: audio source (embedded/self-hosted files, allowlisted
-      external hosts, or a third-party embed), and whether playback is local per user or
-      synced for the whole room (sync needs new envelope types handled by `Room.Run`).
-- [ ] Constraints to respect: strict CSP (add `media-src`/`frame-src` only for allowlisted
-      hosts, no inline code); same Go/`app.js` host-list coherence test as `imageHosts`;
-      external media leaks viewers' IPs, same as images.
+## `music-player` — done as `room-music-sync`, archived 2026-10-23 (manual UI check pending)
+- [x] Shared YouTube / YouTube Music player in `musica`: one track, global play/pause/seek,
+      server-authoritative state, `postMessage` control (no YouTube script), consent via "Escuchar".
+- Local-file variant (`MUSIC_DIR`) was built and then dropped by the user; it lives unmerged on
+      branch `feat/music-player`.
+
+## `room-music-sync-polish` (deferred from `room-music-sync` verify — low priority)
+- [ ] Manual two-browser checklist from `changes/archive/2026-10-23-room-music-sync/design.md`
+      (steps 1 and 7 first: referrer / error 153 on localhost, error codes).
+- [ ] Try `sandbox="allow-scripts allow-same-origin"` on the iframe; keep it only if the embed,
+      autoplay and handshake still work.
+- [ ] `Permissions-Policy` header (camera/mic/geolocation off; autoplay/encrypted-media for self +
+      youtube-nocookie). Pairs with `ops-hardening`.
+- [ ] Fan-out: N connections × 4 controls/s; room-wide coalescing or per-IP cap (`rate-limiting`).
+- [ ] Seek bar disabled until "Escuchar" (no duration known); frames during buffering may cause a
+      drift seek (jitter); Safari/iOS may block `playVideo` into the iframe.
+- [ ] Undocumented `postMessage` protocol: if YouTube changes it, sync breaks (chat unaffected).
+- [ ] Queue / playlists, titles/thumbnails, DJ role (out of scope today).
 
 ## `profile-picture` — done, archived 2026-10-23 (manual UI check pending)
 - [x] Profile picture next to messages and in the online list (allowlisted image URL at join,

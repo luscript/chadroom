@@ -31,6 +31,7 @@ type Room struct {
 	register   chan *Client
 	unregister chan *Client
 	done       chan struct{} // closed by Run when it exits
+	player     *player       // nil: this room has no shared player (CHAT-30); set only by NewMusicRoom
 
 	// Unexported so tests can shorten them right after NewRoom.
 	writeWait      time.Duration
@@ -55,6 +56,13 @@ func NewRoom(id string) *Room {
 		pingPeriod:     defaultPingPeriod,
 		maxMessageSize: defaultMaxMessageSize,
 	}
+}
+
+// NewMusicRoom is NewRoom plus a shared player (CHAT-30).
+func NewMusicRoom(id string) *Room {
+	cr := NewRoom(id)
+	cr.player = &player{}
+	return cr
 }
 
 // Run handles client registration and broadcasting until ctx is cancelled.
@@ -88,11 +96,15 @@ func (cr *Room) admit(c *Client) {
 	cr.clients[c] = struct{}{}
 	cr.taken[foldKey(name)] = struct{}{}
 	close(c.registered) // publishes the final nickname to the pumps
-	ts := time.Now().UnixMilli()
+	now := time.Now()
+	ts := now.UnixMilli()
 	private := [][]byte{
 		encode(message{Type: typeWelcome, From: name, Avatar: c.avatar, TS: ts}),
 		encode(usersFrame{Type: typeUsers, Users: cr.userNames(), Avatars: cr.avatars(), TS: ts}),
 		encode(historyFrame{typeHistory, cr.history, ts}),
+	}
+	if cr.player != nil && cr.player.video != "" {
+		private = append(private, encode(cr.player.frame(now))) // CHAT-30: state right after history
 	}
 	for _, f := range private {
 		if f == nil || !cr.deliver(c, f) {
@@ -181,6 +193,8 @@ func (cr *Room) dispatch(in inbound) {
 		cr.dmError(in.from, "", reasonInvalid)
 	case inboundTyping:
 		cr.typing(in)
+	case inboundMusic:
+		cr.music(in)
 	default:
 		cr.relay(in)
 	}
@@ -229,6 +243,21 @@ func (cr *Room) typing(in inbound) {
 	}
 	if f := encode(typingDMFrame{typeTyping, in.from.nickname, to.nickname, ts}); f != nil {
 		cr.offer(to, f)
+	}
+}
+
+// music applies a validated control to the shared player and sends the new state to the
+// whole room, sender included. Must-have delivery; never stored or logged. Run-only.
+func (cr *Room) music(in inbound) {
+	if cr.player == nil {
+		return // CHAT-21 rule 2a: no shared player in this room
+	}
+	now := time.Now()
+	if !cr.player.apply(in.music, in.from.nickname, now) {
+		return // needs a loaded video
+	}
+	if f := encode(cr.player.frame(now)); f != nil {
+		cr.publish(f)
 	}
 }
 
@@ -290,6 +319,9 @@ func (cr *Room) remove(c *Client) {
 	delete(cr.clients, c)
 	delete(cr.taken, foldKey(c.nickname))
 	close(c.send)
+	if len(cr.clients) == 0 && cr.player != nil {
+		cr.player.halt(time.Now()) // CHAT-30: nobody left to hear it
+	}
 }
 
 // deliver queues msg for c without blocking; a client whose buffer is full is

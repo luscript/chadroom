@@ -309,6 +309,8 @@
     scrollToBottom();
     updateLeaveBtn();
     renderTyping();
+    renderMusic();
+    if (musicShown()) { createPlayer(); reconcile(); } else pauseLocal(); // createPlayer: only if consent and a video
   }
 
   function teardown(room) {
@@ -326,6 +328,7 @@
     room.unread = 0;
     room.outage = false;
     renderTab(room);
+    if (room.id === MUSIC_ROOM) resetMusic();
   }
 
   // — join —
@@ -458,6 +461,7 @@
   function setStatus(room, s) {
     room.status = s;
     if (room === active) showStatus(room);
+    if (room.id === MUSIC_ROOM) renderMusic();
   }
 
   function showStatus(room) {
@@ -491,6 +495,11 @@
       if (Array.isArray(msg.messages)) renderHistory(room, msg.messages);
       return;
     }
+    // music carries no from (it has by) and exists only in the player room.
+    if (msg.type === 'music') {
+      if (room.id === MUSIC_ROOM) onMusicFrame(msg);
+      return;
+    }
     // dm_error carries no from either. It goes to the conversation it names; with no
     // such conversation (e.g. an invalid frame) it goes to the pane the user is looking at.
     if (msg.type === 'dm_error') {
@@ -511,6 +520,7 @@
           renderProfile();
         }
         room.attempt = 0;
+        if (room.id === MUSIC_ROOM) music.awaitSnapshot = true; // a snapshot, if any, comes before our own join
         setStatus(room, 'online');
         break;
       case 'chat':
@@ -551,6 +561,13 @@
         else room.avatars.delete(msg.from);
         if (room === active) renderUsers();
         addSystem(room, msg.from + ' se unió 🎉');
+        // Our own join closes the snapshot slot: no snapshot means the server has no track (it may have restarted).
+        if (room.id === MUSIC_ROOM && msg.from === room.myName && music.awaitSnapshot) {
+          music.awaitSnapshot = false;
+          music.srv = null;
+          renderMusic();
+          reconcile();
+        }
         break;
       case 'leave':
         room.users.delete(msg.from);
@@ -946,5 +963,416 @@
     e.preventDefault(); // the panel is inside #send-form: Enter would submit the draft
     clearTimeout(gifTimer);
     loadGifs(gifSearch.value.trim());
+  });
+
+  // — shared music (CHAT-30, CHAT-31) —
+  // Only the musica room has a player. The server holds its state; this page follows it.
+  // Nothing here contacts YouTube until the user presses "Escuchar", and no YouTube script is
+  // ever loaded: the iframe is driven with postMessage, the way YouTube's own widget does it.
+  const MUSIC_ROOM = 'musica'; // mirrors musicRoom in cmd/chatroom/main.go
+  const YT_ORIGIN = 'https://www.youtube-nocookie.com';
+  const YT_EMBED = 'https://www.youtube-nocookie.com/embed/';
+  const YT_ID = /^[A-Za-z0-9_-]{11}$/;
+  const YT_WATCH_HOSTS = new Set(['www.youtube.com', 'youtube.com', 'm.youtube.com', 'music.youtube.com']);
+  const YT_SHORTS_HOSTS = new Set(['www.youtube.com', 'youtube.com', 'm.youtube.com']);
+  const YT_SHORT_LINK_PATH = /^\/([A-Za-z0-9_-]{11})$/;
+  const YT_SHORTS_PATH = /^\/shorts\/([A-Za-z0-9_-]{11})\/?$/;
+  const YT_STATES = new Set([-1, 0, 1, 2, 3, 5]); // playerState values
+  const YT_LISTEN_MS = 250; // handshake period (the widget's own)
+  const YT_LISTEN_TRIES = 40; // 10 s without an answer: give up
+  const YT_MAX_MESSAGE = 65536;
+  const MUSIC_DRIFT_MS = 2000;
+  const MUSIC_SETTLE_MS = 3000; // after a command, give the player time before judging it
+  const MUSIC_SEND_GAP_MS = 300; // stays above the server's 260 ms gate (musicInterval)
+  const MUSIC_WAIT_TEXT = 'Esperá un segundo…';
+  const MUSIC_TICK_MS = 500;
+  // Fixed texts by error code: nothing from the iframe ever reaches the DOM.
+  const MUSIC_ERRORS = {
+    100: 'El video no existe o es privado.',
+    101: 'Este video no se puede reproducir fuera de YouTube.',
+    150: 'Este video no se puede reproducir fuera de YouTube.',
+    153: 'YouTube rechazó el reproductor (falta el referer).',
+  };
+
+  const music = {
+    consent: false, // "Escuchar" pressed: the iframe may exist (kept for the page's life)
+    blocked: false, // the browser refused to start playback: ask for a click again
+    frame: null, ready: false, listenTimer: null,
+    srv: null, // {video, playing, pos, by, at}: the server's state, the only thing the UI shows
+    awaitSnapshot: false, // between welcome and our own join: a snapshot may still arrive
+    loaded: '', // video id handed to the player
+    state: -1, time: 0, timeAt: 0, duration: 0, // what the player last reported (seconds)
+    settleUntil: 0, playTries: 0,
+    errored: false, // the embed reported an error for this video: no play retries, no "Escuchar" again
+    seeking: false, tick: null, lastSend: -Infinity,
+    pendingSeek: null, seekTimer: null, // a seek that arrived inside the send gap (the latest one wins)
+    muted: false,
+  };
+
+  const musicRoom = () => rooms.get(MUSIC_ROOM);
+  const musicShown = () => { const r = musicRoom(); return !!r && r.joined && active === r; };
+
+  // The 11-character id for the link forms CHAT-31 allows, else null.
+  function parseYouTubeId(text) {
+    let url;
+    try { url = new URL(String(text).trim()); } catch { return null; }
+    if (url.protocol !== 'https:' || url.port !== '' || url.username !== '' || url.password !== '') return null;
+    let id = null;
+    let m;
+    if (YT_WATCH_HOSTS.has(url.hostname) && url.pathname === '/watch') {
+      id = url.searchParams.get('v');
+    } else if (url.hostname === 'youtu.be' && (m = YT_SHORT_LINK_PATH.exec(url.pathname))) {
+      id = m[1];
+    } else if (YT_SHORTS_HOSTS.has(url.hostname) && (m = YT_SHORTS_PATH.exec(url.pathname))) {
+      id = m[1];
+    }
+    return id !== null && YT_ID.test(id) ? id : null;
+  }
+
+  // Controls only: the page shows what the server answers, never what it asked for.
+  // Inside the send gap a seek is held and sent when the gap ends (the latest wins, so dragging
+  // the bar still lands where the user let go); anything else is refused with a short message.
+  function sendMusic(action, extra) {
+    const room = musicRoom();
+    if (!room || room.status !== 'online' || !room.ws || room.ws.readyState !== WebSocket.OPEN) return false;
+    const now = performance.now();
+    const wait = music.lastSend + MUSIC_SEND_GAP_MS - now;
+    if (wait > 0) {
+      if (action === 'seek') {
+        music.pendingSeek = extra;
+        if (music.seekTimer === null) music.seekTimer = setTimeout(flushSeek, wait);
+        return true;
+      }
+      setMusicError(MUSIC_WAIT_TEXT);
+      setTimeout(() => { if ($('music-error').textContent === MUSIC_WAIT_TEXT) setMusicError(''); }, 1500);
+      return false;
+    }
+    music.lastSend = now;
+    room.ws.send(JSON.stringify({ ...extra, type: 'music', action }));
+    return true;
+  }
+
+  function flushSeek() {
+    const extra = music.pendingSeek;
+    music.seekTimer = null;
+    music.pendingSeek = null;
+    if (extra) sendMusic('seek', extra); // goes through the gap check again
+  }
+
+  function onMusicFrame(msg) {
+    if (typeof msg.video !== 'string' || !YT_ID.test(msg.video) || typeof msg.playing !== 'boolean' ||
+        !Number.isFinite(msg.pos) || msg.pos < 0 || typeof msg.by !== 'string') return;
+    music.awaitSnapshot = false;
+    if (!music.srv || music.srv.video !== msg.video) music.duration = 0;
+    music.srv = { video: msg.video, playing: msg.playing, pos: msg.pos, by: msg.by, at: performance.now() };
+    music.settleUntil = 0; // a global action applies at once
+    music.playTries = 0;
+    createPlayer(); // a no-op without consent, while hidden, or with a player already
+    renderMusic();
+    reconcile();
+  }
+
+  // Where the shared track is now, in ms.
+  function expectedMs() {
+    const s = music.srv;
+    return s ? s.pos + (s.playing ? performance.now() - s.at : 0) : 0;
+  }
+
+  // The player's own position, extrapolated like the widget does (at most 1 s ahead).
+  function localMs() {
+    return music.time * 1000 + (music.state === 1 ? Math.min(performance.now() - music.timeAt, 1000) : 0);
+  }
+
+  const musicEnded = () => !!music.srv && music.duration > 0 && expectedMs() >= music.duration * 1000;
+
+  function formatClock(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor(total / 60) % 60;
+    const s = String(total % 60).padStart(2, '0');
+    return h > 0 ? h + ':' + String(m).padStart(2, '0') + ':' + s : m + ':' + s;
+  }
+
+  function setMusicError(text) {
+    $('music-error').textContent = text;
+    $('music-error').hidden = !text;
+  }
+
+  function showMusicError(code) {
+    setMusicError(MUSIC_ERRORS[code] || 'No se pudo reproducir el video.');
+  }
+
+  function renderMusic() {
+    const shown = musicShown();
+    $('music').hidden = !shown;
+    if (!shown) {
+      clearInterval(music.tick);
+      music.tick = null;
+      return;
+    }
+    if (music.tick === null) music.tick = setInterval(musicTick, MUSIC_TICK_MS);
+    const room = musicRoom();
+    const online = room.status === 'online';
+    const s = music.srv;
+    const ended = musicEnded();
+    $('music-load').disabled = !online;
+    const toggle = $('music-toggle');
+    toggle.disabled = !s || !online;
+    if (ended) { toggle.textContent = '↺'; toggle.setAttribute('aria-label', 'Repetir'); }
+    else if (s && s.playing) { toggle.textContent = '⏸'; toggle.setAttribute('aria-label', 'Pausar para todos'); }
+    else { toggle.textContent = '▶'; toggle.setAttribute('aria-label', 'Reproducir para todos'); }
+
+    const seek = $('music-seek');
+    const dur = music.duration;
+    seek.disabled = !s || !online || !(dur > 0);
+    seek.max = String(dur > 0 ? Math.floor(dur) : 0);
+    if (!music.seeking) seek.value = String(dur > 0 ? Math.min(Math.floor(expectedMs() / 1000), Math.floor(dur)) : 0);
+
+    let time = '0:00';
+    if (s && ended) time = 'Terminó';
+    else if (s) time = formatClock(dur > 0 ? Math.min(expectedMs(), dur * 1000) : expectedMs()) + (dur > 0 ? ' / ' + formatClock(dur * 1000) : '');
+    $('music-time').textContent = time;
+    $('music-now').textContent = s ? 'youtu.be/' + s.video + ' · último cambio: ' + s.by : 'No suena nada. Pegá un link y tocá Poner.';
+    $('music-consent').hidden = music.consent && (!music.blocked || music.errored);
+    $('music-player').hidden = !music.frame;
+  }
+
+  // reconcile() here (not only on frames) retries a stalled player and heals drift, and it also
+  // undoes a pause the user made inside the iframe.
+  function musicTick() {
+    renderMusic();
+    reconcile();
+  }
+
+  // — the YouTube iframe —
+  // Built only after "Escuchar", and only while the musica pane is on screen (never while the
+  // user is in another room). Every attribute is set before it is appended, so the very first
+  // request already carries the referrer policy.
+  function createPlayer() {
+    if (music.frame || !music.consent || !music.srv || !musicShown()) return;
+    const frame = document.createElement('iframe');
+    frame.title = 'Reproductor de YouTube';
+    frame.referrerPolicy = 'strict-origin-when-cross-origin'; // keeps error 153 away; sends only the origin
+    frame.allow = 'autoplay; encrypted-media';
+    frame.width = '356';
+    frame.height = '200';
+    frame.addEventListener('load', startListening);
+    frame.src = YT_EMBED + music.srv.video + '?enablejsapi=1&controls=0&disablekb=1&playsinline=1&rel=0' +
+      '&iv_load_policy=3&widgetid=1&origin=' + encodeURIComponent(location.origin);
+    music.frame = frame;
+    $('music-player').append(frame);
+    $('music-player').hidden = false;
+  }
+
+  function ytPost(payload) {
+    const target = music.frame && music.frame.contentWindow;
+    if (target) target.postMessage(JSON.stringify(payload), YT_ORIGIN);
+  }
+
+  // A no-op until the player answers; reconcile() re-derives every command afterwards, so there is no queue.
+  function ytCommand(func, args = []) {
+    if (music.ready) ytPost({ event: 'command', func, args, id: 1, channel: 'widget' });
+  }
+
+  // The player ignores us until it hears "listening"; it answers with its first message.
+  function startListening() {
+    if (music.ready || !music.frame) return;
+    clearInterval(music.listenTimer);
+    let tries = 0;
+    const ping = () => {
+      if (++tries > YT_LISTEN_TRIES) {
+        // Dead end otherwise: drop the frame and ask for "Escuchar" again, which builds a new one.
+        clearInterval(music.listenTimer);
+        music.listenTimer = null;
+        if (music.frame) { music.frame.remove(); music.frame = null; }
+        music.ready = false;
+        music.loaded = '';
+        music.blocked = true;
+        setMusicError('No se pudo cargar el reproductor.');
+        renderMusic();
+        return;
+      }
+      ytPost({ event: 'listening', id: 1, channel: 'widget' });
+    };
+    music.listenTimer = setInterval(ping, YT_LISTEN_MS);
+    ping();
+  }
+
+  function onYTMessage(e) {
+    const frame = music.frame;
+    if (!frame || e.source !== frame.contentWindow || e.origin !== YT_ORIGIN) return;
+    if (typeof e.data !== 'string' || e.data.length > YT_MAX_MESSAGE) return;
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.event !== 'string') return;
+    if (!music.ready) {
+      music.ready = true;
+      clearInterval(music.listenTimer);
+      music.listenTimer = null;
+      for (const name of ['onStateChange', 'onError', 'onAutoplayBlocked']) ytCommand('addEventListener', [name]);
+      ytCommand('setVolume', [Number($('music-volume').value)]);
+      ytCommand(music.muted ? 'mute' : 'unMute');
+    }
+    const info = msg.info;
+    switch (msg.event) {
+      case 'initialDelivery':
+      case 'infoDelivery':
+        if (info && typeof info === 'object' && !Array.isArray(info)) {
+          if (Number.isFinite(info.currentTime) && info.currentTime >= 0) {
+            music.time = info.currentTime;
+            music.timeAt = performance.now();
+          }
+          if (YT_STATES.has(info.playerState)) music.state = info.playerState;
+          // Ignore a duration that may still belong to the previous video.
+          if (Number.isFinite(info.duration) && info.duration > 0 && music.srv && music.loaded === music.srv.video) {
+            music.duration = info.duration;
+          }
+        }
+        break;
+      case 'onStateChange':
+        if (YT_STATES.has(info)) music.state = info;
+        break;
+      case 'onError':
+        music.errored = true; // retrying play cannot fix an embed error
+        showMusicError(Number.isInteger(info) ? info : 0);
+        break;
+      case 'onAutoplayBlocked':
+        if (!music.errored) music.blocked = true;
+        break;
+    }
+    renderMusic();
+    reconcile();
+  }
+  window.addEventListener('message', onYTMessage);
+
+  // Makes the local player match the server state. Idempotent: safe to call from anywhere.
+  // Local player events are never sent as controls; the server is the only authority.
+  function reconcile() {
+    if (!music.ready || !musicShown()) return;
+    const s = music.srv;
+    const now = performance.now();
+    if (music.state === 1 && (music.playTries !== 0 || music.blocked)) {
+      music.playTries = 0;
+      music.blocked = false;
+      renderMusic();
+    }
+    if (!s) {
+      if (music.state === 1 || music.state === 3) ytCommand('pauseVideo');
+      return;
+    }
+    if (s.video !== music.loaded) {
+      ytCommand(s.playing ? 'loadVideoById' : 'cueVideoById', [s.video, expectedMs() / 1000]);
+      music.loaded = s.video;
+      music.duration = 0;
+      music.time = 0;
+      music.state = -1;
+      music.settleUntil = now + MUSIC_SETTLE_MS;
+      music.errored = false; // a new video gets a fresh chance
+      setMusicError('');
+      return;
+    }
+    const ended = musicEnded();
+    if (s.playing && !ended && music.state !== 1 && music.state !== 3) {
+      if (!music.blocked && !music.errored && now >= music.settleUntil) {
+        if (music.playTries >= 2) {
+          music.blocked = true; // two tries went nowhere: ask for a click
+          renderMusic();
+        } else {
+          music.playTries++;
+          // An ended player (state 0) would restart from 0 on playVideo, so move it to the
+          // server position first.
+          if (music.state === 0) ytCommand('seekTo', [expectedMs() / 1000, true]);
+          ytCommand('playVideo');
+          music.settleUntil = now + MUSIC_SETTLE_MS;
+        }
+      }
+    } else if (!s.playing && (music.state === 1 || music.state === 3)) {
+      ytCommand('pauseVideo');
+    }
+    if (!ended && music.state !== -1 && now >= music.settleUntil &&
+        Math.abs(localMs() - expectedMs()) > MUSIC_DRIFT_MS) {
+      ytCommand('seekTo', [expectedMs() / 1000, true]);
+      if (!s.playing) ytCommand('pauseVideo'); // a cued or unstarted video may start playing on seek
+      music.settleUntil = now + MUSIC_SETTLE_MS;
+    }
+  }
+
+  // Leaving musica silences the local player only: no control goes to the room.
+  function pauseLocal() {
+    ytCommand('pauseVideo');
+  }
+
+  // The room's socket is gone for good (leave): back to the state before any frame. Consent stays.
+  function resetMusic() {
+    clearInterval(music.listenTimer);
+    music.listenTimer = null;
+    if (music.frame) { music.frame.remove(); music.frame = null; }
+    music.ready = false;
+    music.blocked = false;
+    music.errored = false;
+    clearTimeout(music.seekTimer);
+    music.seekTimer = null;
+    music.pendingSeek = null;
+    music.srv = null;
+    music.awaitSnapshot = false;
+    music.loaded = '';
+    music.state = -1;
+    music.time = 0;
+    music.timeAt = 0;
+    music.duration = 0;
+    music.settleUntil = 0;
+    music.playTries = 0;
+    music.seeking = false;
+    setMusicError('');
+    renderMusic();
+  }
+
+  // — strip handlers —
+  $('music-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const id = parseYouTubeId($('music-url').value);
+    if (id === null) {
+      setMusicError('Ese link no es de YouTube.');
+      return;
+    }
+    if (sendMusic('load', { video: id })) {
+      $('music-url').value = '';
+      setMusicError('');
+    }
+  });
+  $('music-url').addEventListener('input', () => setMusicError(''));
+
+  $('music-toggle').addEventListener('click', () => {
+    const s = music.srv;
+    if (!s) return;
+    if (musicEnded()) sendMusic('seek', { pos: 0 });
+    else sendMusic(s.playing ? 'pause' : 'play');
+  });
+
+  $('music-seek').addEventListener('input', () => { music.seeking = true; });
+  $('music-seek').addEventListener('change', () => {
+    music.seeking = false;
+    sendMusic('seek', { pos: Math.round(Number($('music-seek').value) * 1000) });
+  });
+
+  $('music-mute').addEventListener('click', () => {
+    music.muted = !music.muted;
+    $('music-mute').setAttribute('aria-pressed', String(music.muted));
+    $('music-mute').textContent = music.muted ? '🔇' : '🔊';
+    ytCommand(music.muted ? 'mute' : 'unMute');
+  });
+  $('music-volume').addEventListener('input', () => {
+    ytCommand('setVolume', [Number($('music-volume').value)]);
+  });
+
+  // The one consent point: the first request to YouTube happens here.
+  $('music-listen').addEventListener('click', () => {
+    music.consent = true;
+    music.blocked = false;
+    music.playTries = 0;
+    music.settleUntil = 0;
+    if (music.srv && !music.frame) { setMusicError(''); createPlayer(); } // a retry after a failed handshake starts clean
+    else if (music.srv && music.srv.playing) ytCommand('playVideo');
+    renderMusic();
   });
 })();

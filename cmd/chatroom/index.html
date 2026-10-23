@@ -68,6 +68,27 @@
       <div id="room-tabs" class="room-tabs" role="tablist" aria-label="Salas"></div>
       <button id="room-leave-btn" type="button" class="btn btn-ghost room-leave" disabled>Dejar sala</button>
     </nav>
+    <section id="music" class="music" aria-label="Música compartida" hidden>
+      <form id="music-form" class="music-load" autocomplete="off" novalidate>
+        <input id="music-url" class="input" type="url" inputmode="url" maxlength="2048"
+          placeholder="Pegá un link de YouTube o YouTube Music" aria-label="Link de YouTube">
+        <button id="music-load" type="submit" class="btn">Poner</button>
+      </form>
+      <div class="music-controls">
+        <button id="music-toggle" type="button" class="btn" aria-label="Reproducir para todos" disabled>▶</button>
+        <input id="music-seek" type="range" min="0" max="0" step="1" value="0" aria-label="Posición" disabled>
+        <span id="music-time" class="music-time">0:00</span>
+        <button id="music-mute" type="button" class="btn btn-ghost" aria-label="Silenciar" aria-pressed="false">🔊</button>
+        <input id="music-volume" type="range" min="0" max="100" value="100" aria-label="Volumen">
+      </div>
+      <div id="music-now" class="music-now">No suena nada. Pegá un link y tocá Poner.</div>
+      <div id="music-error" class="music-error" role="alert" hidden></div>
+      <div id="music-consent" class="music-consent">
+        <button id="music-listen" type="button" class="btn btn-accent">Escuchar</button>
+        <span>Carga el reproductor de YouTube (youtube-nocookie.com) en esta página.</span>
+      </div>
+      <div id="music-player" class="music-player" hidden></div>
+    </section>
     <div class="rule"></div>
 
     <div id="scroller" class="scroller" role="tabpanel"></div>

@@ -61,12 +61,18 @@ func validAvatar(raw string) bool {
 }
 
 // roomIDs is the fixed room set, in display order; the first is the default room.
-var roomIDs = []string{"general", "juegos", "musica"}
+var roomIDs = []string{"general", "juegos", musicRoom}
+
+// musicRoom is the room with the shared YouTube player (CHAT-30); mirrored by MUSIC_ROOM in app.js.
+const musicRoom = "musica"
+
+// youtubeEmbedHost is the only frame source: the player embed, which sets no cookies until played (SRV-05).
+const youtubeEmbedHost = "https://www.youtube-nocookie.com"
 
 var contentSecurityPolicy = buildCSP(imageHosts)
 
 // buildCSP renders the page's Content-Security-Policy: everything is same-origin
-// except the image hosts.
+// except the image hosts and the YouTube embed frame.
 func buildCSP(hosts []string) string {
 	img := []string{"img-src", "'self'"}
 	for _, h := range hosts {
@@ -78,6 +84,7 @@ func buildCSP(hosts []string) string {
 		"style-src 'self'",
 		strings.Join(img, " "),
 		"connect-src 'self'",
+		"frame-src " + youtubeEmbedHost,
 		"base-uri 'none'",
 		"form-action 'none'",
 		"frame-ancestors 'none'",
@@ -111,7 +118,11 @@ func serveAsset(contentType string, body []byte) gin.HandlerFunc {
 func newChatServer(allowedOrigins []string) *chat.Server {
 	rooms := make([]*chat.Room, len(roomIDs))
 	for i, id := range roomIDs {
-		rooms[i] = chat.NewRoom(id)
+		if id == musicRoom {
+			rooms[i] = chat.NewMusicRoom(id)
+		} else {
+			rooms[i] = chat.NewRoom(id)
+		}
 	}
 	return chat.NewServer(allowedOrigins, validAvatar, rooms...)
 }
