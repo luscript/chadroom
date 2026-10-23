@@ -242,6 +242,7 @@
     $('room-name').textContent = conv ? '@' + conv.peer + ' · #' + room.id : '#' + room.id;
     const me = room.myName || requestedNick;
     $('me').textContent = me;
+    $('profile-nick').textContent = me;
     $('me').title = me;
     showStatus(room);
     shown.unread = 0;
@@ -412,6 +413,7 @@
         room.myName = msg.from;
         if (room === active) {
           $('me').textContent = room.myName;
+          $('profile-nick').textContent = room.myName;
           $('me').title = room.myName;
           renderUsers();
         }

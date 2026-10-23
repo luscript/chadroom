@@ -48,8 +48,8 @@ func TestServeIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "Chatroom") {
-		t.Fatal("body missing \"Chatroom\"")
+	if !strings.Contains(string(body), "pinkroom") {
+		t.Fatal("body missing \"pinkroom\"")
 	}
 }
 
@@ -81,7 +81,7 @@ func TestIndexSecurityHeaders(t *testing.T) {
 		t.Errorf("Referrer-Policy = %q", got)
 	}
 	const wantCSP = "default-src 'none'; script-src 'self'; " +
-		"style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; " +
+		"style-src 'self'; " +
 		"img-src 'self' https://media.giphy.com https://media0.giphy.com https://media1.giphy.com " +
 		"https://media2.giphy.com https://media3.giphy.com https://media4.giphy.com " +
 		"https://i.giphy.com https://media.tenor.com https://i.imgur.com; " +

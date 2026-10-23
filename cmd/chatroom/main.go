@@ -43,7 +43,7 @@ var roomIDs = []string{"general", "juegos", "musica"}
 var contentSecurityPolicy = buildCSP(imageHosts)
 
 // buildCSP renders the page's Content-Security-Policy: everything is same-origin
-// except Google Fonts and the image hosts.
+// except the image hosts.
 func buildCSP(hosts []string) string {
 	img := []string{"img-src", "'self'"}
 	for _, h := range hosts {
@@ -52,8 +52,7 @@ func buildCSP(hosts []string) string {
 	return strings.Join([]string{
 		"default-src 'none'",
 		"script-src 'self'",
-		"style-src 'self' https://fonts.googleapis.com",
-		"font-src https://fonts.gstatic.com",
+		"style-src 'self'",
 		strings.Join(img, " "),
 		"connect-src 'self'",
 		"base-uri 'none'",
