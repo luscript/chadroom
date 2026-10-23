@@ -987,6 +987,7 @@
   const MUSIC_WAIT_TEXT = 'Esperá un segundo…';
   const MUSIC_TICK_MS = 500;
   const MUSIC_ASSERT_MS = 2000; // while the player has never reported a state: re-send the server's intent this often
+  const MUSIC_STALE_MS = 1000; // after a load: ignore the widget's reports of the previous video this long
   const MUSIC_SEEK_FRAME_MS = 1000; // a frame this far from where we expected the track is a server seek
   // Fixed texts by error code: nothing from the iframe ever reaches the DOM.
   const MUSIC_ERRORS = {
@@ -1006,7 +1007,7 @@
     state: -1, time: 0, timeAt: 0, duration: 0, // what the player last reported (seconds)
     reported: false, // the player has reported a playerState for the loaded video (the real widget may never)
     assertAt: 0, // last blind play/pause while the state is unknown
-    settleUntil: 0, playTries: 0,
+    settleUntil: 0, playTries: 0, ignoreInfoUntil: 0,
     errored: false, // the embed reported an error for this video: no play retries, no "Escuchar" again
     seeking: false, tick: null, lastSend: -Infinity,
     pendingSeek: null, seekTimer: null, // a seek that arrived inside the send gap (the latest one wins)
@@ -1014,7 +1015,7 @@
   };
 
   const musicRoom = () => rooms.get(MUSIC_ROOM);
-  const musicShown = () => { const r = musicRoom(); return !!r && r.joined && active === r; };
+  const musicShown = () => { const r = musicRoom(); return !!r && r.joined && active === r && !activeConv; };
 
   // The 11-character id for the link forms CHAT-31 allows, else null.
   function parseYouTubeId(text) {
@@ -1067,7 +1068,13 @@
     if (typeof msg.video !== 'string' || !YT_ID.test(msg.video) || typeof msg.playing !== 'boolean' ||
         !Number.isFinite(msg.pos) || msg.pos < 0 || typeof msg.by !== 'string') return;
     music.awaitSnapshot = false;
-    if (!music.srv || music.srv.video !== msg.video) music.duration = 0;
+    if (!music.srv || music.srv.video !== msg.video) {
+      music.duration = 0;
+      // A seek held for the previous video must not land on the new one.
+      clearTimeout(music.seekTimer);
+      music.seekTimer = null;
+      music.pendingSeek = null;
+    }
     // A frame far from where the track should be now is a server seek (or a new video).
     const seek = !!music.srv && music.srv.video === msg.video && Math.abs(msg.pos - expectedMs()) > MUSIC_SEEK_FRAME_MS;
     music.srv = { video: msg.video, playing: msg.playing, pos: msg.pos, by: msg.by, at: performance.now() };
@@ -1087,6 +1094,16 @@
   // The player's own position, extrapolated like the widget does (at most 1 s ahead).
   function localMs() {
     return music.time * 1000 + (music.state === 1 ? Math.min(performance.now() - music.timeAt, 1000) : 0);
+  }
+
+  // The start argument for load/cue: whole seconds, finite and >= 0 (a bare float such as 1e-7
+  // is how a just-received frame would otherwise be serialised).
+  const startSeconds = () => Math.floor(Math.max(0, expectedMs()) / 1000) || 0;
+
+  // seekTo target: never past the end of a known duration (a seek beyond it can derail the embed).
+  function seekSeconds() {
+    const t = Math.max(0, expectedMs() / 1000) || 0;
+    return music.duration > 0 ? Math.min(t, music.duration) : t;
   }
 
   const musicEnded = () => !!music.srv && music.duration > 0 && expectedMs() >= music.duration * 1000;
@@ -1230,6 +1247,9 @@
       case 'initialDelivery':
       case 'infoDelivery':
         if (info && typeof info === 'object' && !Array.isArray(info)) {
+          // Right after a load the widget still reports the previous video (its time, state and
+          // duration) for a moment; judging drift against that would seek the new video.
+          if (performance.now() < music.ignoreInfoUntil) break;
           if (Number.isFinite(info.currentTime) && info.currentTime >= 0) {
             music.time = info.currentTime;
             music.timeAt = performance.now();
@@ -1277,8 +1297,9 @@
       return;
     }
     if (s.video !== music.loaded) {
-      ytCommand(s.playing ? 'loadVideoById' : 'cueVideoById', [s.video, expectedMs() / 1000]);
+      ytCommand(s.playing ? 'loadVideoById' : 'cueVideoById', [s.video, startSeconds()]);
       music.loaded = s.video;
+      music.ignoreInfoUntil = now + MUSIC_STALE_MS;
       music.duration = 0;
       music.time = 0;
       music.state = -1;
@@ -1291,10 +1312,10 @@
     }
     const ended = musicEnded();
     if (frame) {
-      if (frame.seek) ytCommand('seekTo', [expectedMs() / 1000, true]);
+      if (frame.seek) ytCommand('seekTo', [seekSeconds(), true]);
       if (!s.playing) ytCommand('pauseVideo');
       else if (!ended && !music.errored) {
-        if (music.state === 0 && !frame.seek) ytCommand('seekTo', [expectedMs() / 1000, true]);
+        if (music.state === 0 && !frame.seek) ytCommand('seekTo', [seekSeconds(), true]);
         ytCommand('playVideo');
       }
       music.assertAt = now;
@@ -1318,7 +1339,7 @@
           music.playTries++;
           // An ended player (state 0) would restart from 0 on playVideo, so move it to the
           // server position first.
-          if (music.state === 0) ytCommand('seekTo', [expectedMs() / 1000, true]);
+          if (music.state === 0) ytCommand('seekTo', [seekSeconds(), true]);
           ytCommand('playVideo');
           music.settleUntil = now + MUSIC_SETTLE_MS;
         }
@@ -1328,7 +1349,7 @@
     }
     if (!ended && music.state !== -1 && now >= music.settleUntil &&
         Math.abs(localMs() - expectedMs()) > MUSIC_DRIFT_MS) {
-      ytCommand('seekTo', [expectedMs() / 1000, true]);
+      ytCommand('seekTo', [seekSeconds(), true]);
       if (!s.playing) ytCommand('pauseVideo'); // a cued or unstarted video may start playing on seek
       music.settleUntil = now + MUSIC_SETTLE_MS;
     }
@@ -1361,6 +1382,7 @@
     music.duration = 0;
     music.settleUntil = 0;
     music.playTries = 0;
+    music.ignoreInfoUntil = 0;
     music.seeking = false;
     setMusicError('');
     renderMusic();
