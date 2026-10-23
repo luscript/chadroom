@@ -1,21 +1,24 @@
 schema: project-map-v1
-generated: 2026-10-22T18:40:00Z
-generated_commit: 0cdca6a
+generated: 2026-10-23T14:48:45Z
+generated_commit: bdfb1ed
 
 modules:
   - name: chatroom-cmd
     path: cmd/chatroom
-    description: "Composition root. main wires signal.NotifyContext (SIGINT/SIGTERM) and ALLOWED_ORIGINS into serve(ctx, addr, origins) -> run(ctx, listener, origins), which starts Room.Run, an http.Server (ReadHeaderTimeout/IdleTimeout/MaxHeaderBytes) and graceful shutdown returning an exit code. newRouter (gin, no trusted proxies): GET / (servePage: nosniff, Cache-Control no-cache, Content-Security-Policy, X-Frame-Options DENY), GET /app.js and /app.css (serveAsset: exact content type, nosniff, no-cache), GET /ws. imageHosts (Giphy/Tenor/Imgur) is the single source for CSP img-src via buildCSP and is mirrored by IMAGE_HOSTS in app.js (TestImageHostsMirroredInJS). parseAllowedOrigins trims blanks and drops \"null\". Listens on :8080"
+    description: "Composition root. main reads ALLOWED_ORIGINS and GIPHY_API_KEY (trimmed) into config and calls serve(ctx, addr, cfg) -> run(ctx, listener, cfg) with signal.NotifyContext (SIGINT/SIGTERM), listening on const addr :8080. run builds the chat.Server via newChatServer (one chat.NewRoom per roomIDs entry: general, juegos, musica; the first is the default), starts Server.Run, starts an http.Server (ReadHeaderTimeout 10s, IdleTimeout 60s, MaxHeaderBytes 8KiB), and shuts down gracefully (cancel, wait for rooms to close their websockets, srv.Shutdown 5s); it returns an exit code. A gifSearch is created only when GIPHY_API_KEY is non-empty, otherwise it logs that GIF search is disabled. newRouter (gin.Default, no trusted proxies): GET / (servePage: nosniff, Cache-Control no-cache, Content-Security-Policy, X-Frame-Options DENY, Referrer-Policy no-referrer), GET /app.js and /app.css (serveAsset: exact content type, nosniff, no-cache), GET /rooms (serveRooms: {\"rooms\":[...]}), GET /ws (chat.Server.HandleWebSocket), GET /gifs (registered only if gifSearch != nil). imageHosts (media/media0-4/i.giphy.com, media.tenor.com, i.imgur.com) is the single source for CSP img-src via buildCSP (default-src 'none'; script/style/connect 'self'; base-uri/form-action 'none'; frame-ancestors 'none'; no media-src/frame-src) and is mirrored by IMAGE_HOSTS in app.js (TestImageHostsMirroredInJS). parseAllowedOrigins trims blanks and drops \"null\". gifs.go: gifSearch proxies Giphy trending/search (giphyAPI https://api.giphy.com; limit 24, rating pg-13, lang es; q trimmed, max 50 runes, else 400 query_too_long; 5s client timeout, redirects not followed, body capped at 1 MiB; TTL cache 10 min, max 100 entries, keyed by lowercased q, guarded by a mutex, empty results are not cached; upstream failure returns 502 {\"error\":\"unavailable\"}). canonicalGIF accepts only https, an exact host in imageHosts that is also a giphy.com host, a .gif path, no userinfo/port/opaque, and strips query and fragment. The API key is never logged or returned (fetch discards the *url.Error). Response is {\"gifs\":[{\"url\",\"preview\"}]}."
     language: go
     entry_points:
       - cmd/chatroom/main.go
+      - cmd/chatroom/gifs.go
     test_paths:
       - cmd/chatroom/main_test.go
+      - cmd/chatroom/gifs_test.go
   - name: chat
     path: internal/chat
-    description: "Chat hub. room.go = Room (clients registry + taken set of foldKey(nickname), both owned by Run(ctx); broadcast chan inbound{from,text}; Run assigns the final nickname on register, closes client.registered, delivers welcome then fans out join; drops chat from non-members; leave(c) relays c's already-queued inbound before removing it (re-checks membership after the drain); deliver/fanOut non-blocking with silent slow-client drop; remove() is the single removal path; done chan, checkOrigin allowlist, HandleWebSocket waits on registered before starting pumps). message.go = JSON envelope {type,from,text,ts} (chat/join/leave/welcome), encode marshals once per event. nickname.go = normalizeNickname (ToValidUTF8, strip Cc + Bidi_Control, trim, 32 runes, \"Anonymous\"), truncateRunes, foldKey (EqualFold-equivalent key), assignNickname (lowest free \" (n)\" suffix). client.go = Client (conn, send, registered, nickname) with readPump (4096-byte limit, deadlines, pong; closes on binary/invalid UTF-8; drops blank frames) and writePump (sole conn writer, pings)"
+    description: "Chat hub. server.go = Server over a fixed set of rooms (NewServer(allowedOrigins, rooms...) panics on no rooms or an empty/duplicate id); Run starts every room (WaitGroup); HandleWebSocket resolves ?room= (missing -> default room, unknown -> 404 before upgrade), upgrades (1024-byte buffers) with checkOrigin (same host case-insensitively, no Origin, or ALLOWED_ORIGINS; \"null\" rejected -> 403), then room.serveConn(conn, normalizeNickname(?nickname)). room.go = Room (id, clients, taken set of foldKey(nickname), history window, dropped, broadcast chan inbound carrying every kind so a client's frames stay ordered, register/unregister/done; consts sendBufferSize 256, maxNicknameRunes 32, write wait 10s, pong wait 60s, ping period 0.9*pong, max message 4096; timing fields are unexported so tests shorten them). Only Run touches the registry and closes send (no locks). admit assigns the final nickname, closes client.registered, privately delivers welcome, users and history, then publishes join. dispatch routes by kind: chat -> relay (store in history, fan out), dm -> direct (deliver to recipient and echo to sender, never stored; dm_error invalid|self|offline to the sender only), typing -> best-effort via offer (never stored, never drops a client; room signal excludes the sender, DM signal goes to the recipient only, self/offline are silent). leave drains queued inbound before removing c; deliver/fanOut are non-blocking and remove slow clients (announced as leave via announceDropped); remove() is the single removal path. message.go = outbound JSON frames with a unix-ms ts: message{type,from,text,ts} for chat/join/leave/welcome (no omitempty), usersFrame{users []string sorted by foldKey}, historyFrame{messages, historySize 50}, dmFrame{from,to,text}, dmErrorFrame{to,reason}, typingFrame{from} and typingDMFrame{from,to}. parseInbound classifies text frames: JSON object with exact-key type dm/typing/chat, otherwise the whole frame is plain chat text (an unknown type falls back to chat text); blank frames are dropped silently. nickname.go = cleanNickname/normalizeNickname (ToValidUTF8, strip Cc + Bidi_Control, trim, 32 runes, \"Anonymous\"), truncateRunes, foldKey (SimpleFold orbit minimum), Room.assignNickname (lowest free \" (n)\" suffix, n>=2). client.go = Client (conn, send, registered, nickname); readPump (read limit, deadlines refreshed on any frame and on pong; binary -> close 1003, invalid UTF-8 -> close 1007; typingGate allows at most 1 typing signal/s per connection; unregisters on exit) and writePump (sole writer, pings, close frame on send closed); logError skips normal closes. Test helpers (room_test.go): startRoom, newTestClient, register, broadcast, joinAll, dm, typingSignal, expect*/decode*, frameFields/exactFields; server_test.go: joinRoom, dialOriginRoom."
     language: go
     entry_points:
+      - internal/chat/server.go
       - internal/chat/room.go
       - internal/chat/client.go
       - internal/chat/message.go
@@ -23,9 +26,10 @@ modules:
     test_paths:
       - internal/chat/room_test.go
       - internal/chat/client_test.go
+      - internal/chat/server_test.go
   - name: web-client
     path: cmd/chatroom
-    description: "Browser client (Nocturne design, Spanish UI), all embedded via go:embed. index.html has no inline code (CSP, guarded by TestIndexHasNoInlineCode) and loads app.css + app.js. app.js: join form; connect() to ws(s)://location.host/ws with the typed nickname; online only on welcome; on unexpected close scheduleReconnect() with exponential backoff + equal jitter (1 s doubling, 30 s cap, reset on welcome), one lost/reconnected notice per outage, reconnectNow() on window online / tab visible, Salir cancels the timer; enforces MAX_MESSAGE_BYTES=4096; emoji panel; GIF panel (URL pasted); isAllowedImage (new URL, https, exact host in IMAGE_HOSTS, no port/credentials/fragment, image extension) decides inline <img> vs text; parses frames as JSON by type (unknown ignored), identity from welcome, own iff from === welcome name; textContent only; Inter from Google Fonts"
+    description: "Browser client (Spanish voseo UI; Nocturne token theme overridden by a retro 'pinkroom' theme appended at the end of app.css with long minified lines), embedded via go:embed (index.html, app.js, app.css). index.html has no inline code (CSP, guarded by TestIndexHasNoInlineCode); join form #join-form with a single #nick field; header with #users-btn/#users-panel popover; .chat-main = nav.rooms, #scroller, #typing, form.composer (emoji and GIF popovers); aside.scrapbook 'MI PERFIL' (#profile-nick, .profile-art; hidden at <=800px). app.js (IIFE): loadRooms() from GET /rooms (room ids validated by ^[a-z0-9-]{1,32}$); one pane/WebSocket per joined room via connect(room) to ws(s)://host/ws?room=<id>&nickname=<nick>; online only on welcome (room.myName); activate(room, conv) is the single room-switch hook; reconnect with exponential backoff and jitter (RETRY_BASE_MS 1000, RETRY_MAX_MS 30000, reset on welcome), reconnectNow on window online / tab visible; MAX_MESSAGE_BYTES 4096. Handles inbound frames by type: welcome, users (renderUsers, room.users Set<string>), history (renderHistory -> addChat), join/leave, chat, dm, dm_error (showDMError) and typing. addChat(pane, author, text, ts) renders li.msg > div.avatar-slot (letter div.avatar only when author changes) + div.msg-body; same path for rooms, DMs and history. Private conversations (createConversation/openConversation, per-peer tabs, unread badges) send JSON {type:\"dm\",to,text}. Typing: notifyTyping throttled to TYPING_SEND_MS 3000, remote typist expires after TYPING_TTL_MS 5000. Panels registry {emoji,gif,users} with togglePanel/closePanels (Escape, outside click). GIF panel: loadGifs(q) calls GET /gifs?q= with a 300 ms debounce, disableGifSearch() when /gifs is missing; isAllowedImage (https, exact host in IMAGE_HOSTS, no port/credentials/fragment, extension gif|webp|png|jpe?g) decides inline <img> (referrerPolicy no-referrer) vs text. textContent only, no innerHTML; no localStorage."
     language: html/javascript/css
     entry_points:
       - cmd/chatroom/index.html
@@ -35,7 +39,7 @@ modules:
       - cmd/chatroom/main_test.go
   - name: openspec
     path: openspec
-    description: "Spec-Driven Development artifacts: specs/{chat,server}/spec.md (current requirements CHAT-xx, SRV-xx), changes/<name>/ (active change: proposal, specs deltas, design, tasks), changes/archive/ (completed changes), backlog.md (future changes grouped by name), config.yaml (SDD rules)"
+    description: "Spec-Driven Development artifacts: specs/{chat,server}/spec.md (current requirements CHAT-01..CHAT-27, SRV-01..SRV-08), changes/<name>/ (active changes), changes/archive/YYYY-MM-DD-<slug>/ (8 completed changes: fix-channel-handling, structured-messages, frontend-hardening, online-users-and-history, multiple-rooms, private-chat, typing-indicator, gif-picker), backlog.md (future changes), config.yaml (SDD rules, project_map auto_refresh advise, threshold 5), project-map.yaml"
     language: markdown
     entry_points:
       - openspec/backlog.md
@@ -46,14 +50,14 @@ dependencies:
   production:
     - name: github.com/gin-gonic/gin
       version: v1.12.0
-      purpose: "HTTP router (GET / and GET /ws). Marked \"// indirect\" in go.mod though imported directly — needs go mod tidy (go.mod requires go 1.27.3; all deps in one require block)"
+      purpose: "HTTP router (GET /, /app.js, /app.css, /rooms, /ws, /gifs). Still marked \"// indirect\" in go.mod though imported directly; needs go mod tidy (go.mod: go 1.27.3, one require block)"
     - name: github.com/gorilla/websocket
       version: v1.5.3
-      purpose: "WebSocket upgrade and connection I/O. Also marked \"// indirect\" incorrectly"
+      purpose: "WebSocket upgrade and connection I/O in internal/chat. Also still marked \"// indirect\" incorrectly"
   development: []
 
 testing:
-  framework: go stdlib testing (+ net/http/httptest, gorilla websocket Dialer for integration)
+  framework: go stdlib testing (+ net/http/httptest, gorilla websocket Dialer for integration, httptest fake Giphy upstream)
   command: go test -race ./...
   config_files: []
   coverage:
@@ -61,25 +65,36 @@ testing:
     threshold: null
 
 conventions:
-  commit_style: "Conventional Commits, type(scope): subject (e.g. fix(chat):, feat(ui):, docs:); first commit was \"Initial commit\""
-  branch_naming: "type/slug (fix/channel-handling, feat/structured-messages); main is default"
-  code_style: gofmt; no golangci-lint config
-  documentation: short Go doc comments above types/functions
+  commit_style: "Conventional Commits, type(scope): subject (e.g. feat(gifs):, feat(chat):, fix(chat):, docs:); PRs merged via GitHub merge commits (\"Merge pull request #N from luscript/feat/...\")"
+  branch_naming: "type/slug (feat/gif-picker, feat/typing-indicator, fix/channel-handling); main is default"
+  code_style: "gofmt (snap: use /snap/go/current/bin/gofmt); no golangci-lint config; hub pattern (only Room.Run touches clients and closes send; no locks); no inline code in the page (strict CSP); image hosts in imageHosts and IMAGE_HOSTS must match"
+  documentation: "short Go doc comments above types/functions that explain the why, citing spec IDs (CHAT-xx/SRV-xx); README.md documents API and protocol; CLAUDE.md for project rules"
   examples:
-    - "Constructor pattern: func NewRoom(allowedOrigins []string) *Room returns a fully initialized struct with made channels"
-    - "Goroutine pumps per connection: go client.writePump(cr); go client.readPump(cr) — readPump owns unregister, writePump owns all conn writes; only Room.Run closes send"
-    - "Error handling: c.logError(\"Read\", err) (logs only abnormal closes) then return; no wrapping, no custom error types"
+    - "Constructor pattern: NewRoom(id) *Room and NewServer(allowedOrigins, rooms...) *Server return fully initialized structs; programmer errors panic in NewServer"
+    - "Goroutine pumps per connection: serveConn waits on client.registered, then go writePump + go readPump; writePump owns all conn writes, readPump owns unregister, only Room.Run closes send"
+    - "Error handling: c.logError(roomID, op, err) logs only abnormal closes; no wrapping or custom error types; gifs.fetch returns sanitized errors.New(...) so the API key never leaks"
+    - "Testability seams: unexported Room timing fields, gifSearch.baseURL/client/now injectable"
 
 api_surface:
   - name: WebSocket chat endpoint
     type: REST
-    path: GET /ws?nickname=<string>
-    description: "Upgrades to WebSocket. Inbound: plain UTF-8 text frames <=4096 bytes (blank ones ignored). Outbound: JSON {\"type\",\"from\",\"text\",\"ts\"} with type chat|join|leave|welcome (text \"\" for non-chat, ts Unix ms); welcome is the first frame and carries the assigned nickname. Nicknames normalized (control/bidi stripped, trimmed, <=32 runes, \"Anonymous\") and unique case-insensitively via \" (n)\" suffix"
-    auth: null (Origin check - same-origin or ALLOWED_ORIGINS; null rejected)
+    path: GET /ws?room=<id>&nickname=<string>
+    description: "Upgrades to WebSocket. room: general|juegos|musica; missing/empty -> general; unknown -> 404 (no upgrade). Inbound text frames <=4096 bytes (binary closes 1003, invalid UTF-8 closes 1007): plain text or JSON {type:chat,text} | {type:dm,to,text} | {type:typing[,to]} (typing max 1/s per connection); blank ignored. Outbound JSON with ts in Unix ms: welcome (first frame, assigned nickname), users {users:[]}, history {messages:[] <=50}, join/leave/chat {type,from,text,ts}, dm {from,to,text} (to recipient and echoed to sender), dm_error {to,reason: invalid|self|offline}, typing {from[,to]}. Nicknames normalized (control/bidi stripped, trimmed, <=32 runes, \"Anonymous\") and unique case-insensitively per room via \" (n)\" suffix"
+    auth: null (Origin check - same host, no Origin header, or ALLOWED_ORIGINS; "null" rejected with 403)
+  - name: Room list
+    type: REST
+    path: GET /rooms
+    description: "Returns {\"rooms\":[\"general\",\"juegos\",\"musica\"]} in display order (default first), with nosniff and no-cache"
+    auth: null
+  - name: GIF search proxy
+    type: REST
+    path: GET /gifs?q=<string>
+    description: "Only registered when GIPHY_API_KEY is set (otherwise 404). Proxies Giphy trending (q empty) or search; returns {\"gifs\":[{\"url\",\"preview\"}]} (max 24, pg-13, lang es, https giphy .gif URLs only). q over 50 runes -> 400 {\"error\":\"query_too_long\"}; upstream failure -> 502 {\"error\":\"unavailable\"}. 10 min TTL cache, 100 entries. Key never logged or returned"
+    auth: null (server holds GIPHY_API_KEY)
   - name: Chat page
     type: REST
     path: GET /
-    description: "Serves the embedded index.html with nosniff, Cache-Control no-cache, X-Frame-Options DENY and a strict Content-Security-Policy (no unsafe-inline; img-src 'self' + allowlisted image hosts; connect-src 'self')"
+    description: "Serves the embedded index.html with nosniff, Cache-Control no-cache, X-Frame-Options DENY, Referrer-Policy no-referrer and a strict Content-Security-Policy (no unsafe-inline; img-src 'self' + imageHosts over https; connect-src 'self')"
     auth: null
   - name: Page assets
     type: REST
@@ -87,19 +102,14 @@ api_surface:
     description: "Embedded script and stylesheet (text/javascript, text/css; charset=utf-8) with nosniff and no-cache"
     auth: null
 staleness:
-  status: stale
-  checked_at: 2026-10-23T13:27:21.823Z
-  since_commit: 0cdca6a
-  head_commit: 624a2f2
+  status: fresh
+  checked_at: 2026-10-23T14:48:45Z
+  since_commit: bdfb1ed
+  head_commit: bdfb1ed
   threshold: 5
   drift:
     changed_files_in_modules: 0
     dependency_manifests_changed: false
-    modules_added:
-      - cmd
-      - docs
-      - internal
-      - openspec
+    modules_added: []
     modules_removed: []
-  invalidated_by:
-    - modules
+  invalidated_by: []
