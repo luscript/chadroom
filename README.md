@@ -213,4 +213,4 @@ El proyecto usa Spec-Driven Development. Todo lo relacionado está en `openspec/
 
 <p align="center"><img src="docs/readme/divider.svg" alt=""></p>
 
-<p align="center">✳ Hecho por luscript ♥ · quedate un ratito, estás en casa.</p>
+<p align="center">✳ Hecho por luscript ♥ </p>
