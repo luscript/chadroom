@@ -38,6 +38,7 @@ Chat en tiempo real en Go (gin + gorilla/websocket) con salas fijas (`general`, 
 
 ```
 cmd/chatroom/        main: router gin, http.Server, señales, CSP y lista de hosts de imágenes
+  gifs.go            GET /gifs: proxy a Giphy (trending/búsqueda), caché TTL, validación de URLs
   index.html, app.js, app.css   frontend (embebido con go:embed)
   main_test.go       tests del router, CSP y coherencia de hosts de imágenes (Go vs app.js)
 internal/chat/
@@ -52,7 +53,8 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 
 ## Comandos
 
-- Correr: `go run ./cmd/chatroom` (puerto `:8080`; `ALLOWED_ORIGINS` opcional)
+- Correr: `go run ./cmd/chatroom` (puerto `:8080`; `ALLOWED_ORIGINS` y `GIPHY_API_KEY` opcionales).
+  Go no lee `.env`: cargarlo con `set -a; . ./.env; set +a` antes de correr.
 - Tests: `go test -race ./...`
 - Formato: `gofmt` (con snap, usar `/snap/go/current/bin/go` y `gofmt`; el wrapper traga el output)
 
@@ -61,4 +63,5 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - Patrón hub: solo `Room.Run` toca el registro de clientes y cierra `send`; no agregar locks.
 - Para sumar un host de imágenes: `imageHosts` (`main.go`) **y** `IMAGE_HOSTS` (`app.js`); un test falla si difieren.
 - Sin código inline en la página (CSP estricta).
+- La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`).
 - Cambios con diseño van por SDD en `openspec/changes/`. En curso: ninguno.

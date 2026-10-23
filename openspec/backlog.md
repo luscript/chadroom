@@ -29,20 +29,27 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       or a server-side proxy.
 
 ## `frontend-polish` (deferred from `frontend-hardening` verify — low priority)
-- [ ] Self-host Inter (woff2 embedded, `font-src 'self'`, drop Google preconnect): Google
-      Fonts sees every user's IP and the page loses its font offline / on an isolated LAN.
+- [x] ~~Self-host Inter~~ — obsolete: the pinkroom redesign dropped Google Fonts (CSP
+      `style-src 'self'`, no `font-src`). `app.css` still names `"Inter"` with a `system-ui` fallback.
 - [ ] Reconnect never gives up on permanent failures (403 origin is reported as 1006);
       consider an attempt cap or a "retry" button after N minutes.
 - [ ] Trusted Types: `require-trusted-types-for 'script'` in the CSP (no sinks today).
 - [ ] First join that fails shows "Conexión perdida… / Reconectado" without ever having been
       connected; use a `wasOnline` flag for the wording.
 
-## `gif-picker` (after `frontend-hardening`)
-- [ ] GIF panel with search + trending, like the emoji panel.
-- [ ] Server endpoint (e.g. `GET /gifs?q=`) calling Giphy with `GIPHY_API_KEY` from the
-      environment (key never sent to the browser); panel hidden when the key is unset.
-- [ ] HTTP client with timeout, response trimmed to the fields the page needs; "Powered by
+## `gif-picker` — done, archived 2026-10-23 (manual UI check user-verified)
+- [x] GIF panel with search + trending, like the emoji panel.
+- [x] Server endpoint `GET /gifs?q=` calling Giphy with `GIPHY_API_KEY` from the environment
+      (key never sent to the browser); search UI hidden when the key is unset.
+- [x] HTTP client with timeout, response trimmed to the fields the page needs; "Powered by
       GIPHY" attribution. Images come only from the allowlisted Giphy hosts.
+
+## `gif-picker-polish` (deferred from `gif-picker` verify — low priority)
+- [ ] Quota: unique `/gifs` queries are unauthenticated; add singleflight + a small cap on
+      in-flight upstream calls (503 when busy). Belongs with `rate-limiting`.
+- [ ] gin access log records `/gifs?q=` search terms; strip the query in the logger.
+- [ ] Drain the upstream body on non-200 before closing (connection reuse).
+- [ ] No feedback when a GIF click fails to send (`sendText` false); same as the paste box.
 
 ## `music-player` (room `musica`)
 - [ ] Web music player in the `musica` room only (hidden in `general` / `juegos`).

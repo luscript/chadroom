@@ -725,7 +725,7 @@
     if (!opening) return;
     panels[key].panel.hidden = false;
     panels[key].btn.setAttribute('aria-expanded', 'true');
-    if (key === 'gif') $('gif-url').focus();
+    if (key === 'gif') openGifPanel();
   }
 
   function closePanels() {
@@ -781,5 +781,87 @@
       updateSendState();
       closePanels();
     }
+  });
+
+  // — GIF search —
+  const GIF_DEBOUNCE_MS = 300;
+  const gifSearch = $('gif-search'), gifGrid = $('gif-grid'), gifStatus = $('gif-status');
+  let gifSeq = 0; // id of the latest /gifs request; older responses are ignored
+  let gifTimer = 0;
+  let gifLoaded = false; // a result list has rendered at least once
+  let gifPending = false; // the latest /gifs request is still in flight
+  let gifSearchOff = false; // /gifs answered 404 (no key): only the paste box is left
+
+  function openGifPanel() {
+    if (gifSearchOff) { gifUrl.focus(); return; }
+    gifSearch.focus();
+    if (!gifLoaded && !gifPending) loadGifs(gifSearch.value.trim());
+  }
+
+  async function loadGifs(q) {
+    const seq = ++gifSeq;
+    gifPending = true;
+    gifStatus.textContent = 'Cargando…';
+    try {
+      const res = await fetch('/gifs?q=' + encodeURIComponent(q));
+      if (seq !== gifSeq) return;
+      if (res.status === 404) { disableGifSearch(); return; }
+      if (!res.ok) throw new Error('gifs: ' + res.status);
+      const body = await res.json();
+      if (seq !== gifSeq) return;
+      if (!body || !Array.isArray(body.gifs)) throw new Error('gifs: bad body');
+      renderGifs(body.gifs);
+    } catch {
+      if (seq === gifSeq) showGifError();
+    } finally {
+      if (seq === gifSeq) gifPending = false;
+    }
+  }
+
+  function renderGifs(list) {
+    const items = [];
+    for (const g of list) {
+      if (!g || typeof g.url !== 'string' || !isAllowedImage(g.url)) continue;
+      const preview = typeof g.preview === 'string' && isAllowedImage(g.preview) ? g.preview : g.url;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'gif-item';
+      btn.setAttribute('aria-label', 'Enviar GIF');
+      const img = document.createElement('img');
+      img.alt = '';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.referrerPolicy = 'no-referrer';
+      img.src = preview;
+      btn.append(img);
+      btn.addEventListener('click', () => { if (sendText(g.url)) closePanels(); });
+      items.push(btn);
+    }
+    gifGrid.replaceChildren(...items);
+    gifStatus.textContent = items.length === 0 ? 'Sin resultados' : '';
+    gifLoaded = true;
+  }
+
+  function showGifError() {
+    gifGrid.replaceChildren();
+    gifStatus.textContent = 'No se pudieron cargar los GIF';
+  }
+
+  function disableGifSearch() {
+    gifSearchOff = true;
+    const hadFocus = document.activeElement === gifSearch;
+    $('gif-search-box').hidden = true;
+    if (hadFocus) gifUrl.focus();
+  }
+
+  gifSearch.addEventListener('input', () => {
+    clearTimeout(gifTimer);
+    gifTimer = setTimeout(() => loadGifs(gifSearch.value.trim()), GIF_DEBOUNCE_MS);
+  });
+  gifSearch.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault(); // the panel is inside #send-form: Enter would submit the draft
+    clearTimeout(gifTimer);
+    loadGifs(gifSearch.value.trim());
   });
 })();
