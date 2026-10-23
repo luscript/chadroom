@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,7 +21,17 @@ const testDeadline = 2 * time.Second
 
 func startRoom(t *testing.T) (*Room, context.CancelFunc) {
 	t.Helper()
-	cr := NewRoom("general")
+	return runRoom(t, NewRoom("general"))
+}
+
+// startMusicRoom runs a room with a shared player (CHAT-30).
+func startMusicRoom(t *testing.T) (*Room, context.CancelFunc) {
+	t.Helper()
+	return runRoom(t, NewMusicRoom("musica"))
+}
+
+func runRoom(t *testing.T, cr *Room) (*Room, context.CancelFunc) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	go cr.Run(ctx)
 	t.Cleanup(cancel)
@@ -814,6 +827,20 @@ func TestNewRoomDefaults(t *testing.T) {
 	if cap(cr.broadcast) != sendBufferSize {
 		t.Errorf("broadcast cap = %d, want %d", cap(cr.broadcast), sendBufferSize)
 	}
+	if cr.player != nil {
+		t.Errorf("player = %+v, want nil (no shared player)", cr.player)
+	}
+}
+
+// CHAT-30: NewMusicRoom is NewRoom plus an empty player.
+func TestNewMusicRoom(t *testing.T) {
+	cr := NewMusicRoom("musica")
+	if cr.id != "musica" || cr.maxMessageSize != 4096 || cap(cr.broadcast) != sendBufferSize {
+		t.Errorf("NewMusicRoom differs from NewRoom defaults: %+v", cr)
+	}
+	if cr.player == nil || !reflect.DeepEqual(*cr.player, player{}) {
+		t.Errorf("player = %+v, want an empty player", cr.player)
+	}
 }
 
 func TestNormalizeNickname(t *testing.T) {
@@ -1408,5 +1435,834 @@ func TestTypingNotLogged(t *testing.T) {
 
 	if buf.String() != "" {
 		t.Fatalf("typing logged: %s", buf.String())
+	}
+}
+
+// avatarClient is newTestClient with an avatar; the hub treats it as an opaque string.
+func avatarClient(nick, avatar string) *Client {
+	c := newTestClient(nick, 16)
+	c.avatar = avatar
+	return c
+}
+
+// expectAvatarFrame requires the next frame on c to carry exactly keys and returns the raw fields.
+func expectAvatarFrame(t *testing.T, c *Client, keys ...string) map[string]json.RawMessage {
+	t.Helper()
+	return exactFields(t, nextRaw(t, c), keys...)
+}
+
+// CHAT-28: welcome and join carry the avatar only when the client has one.
+func TestAvatarOnWelcomeAndJoin(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs := newTestClient("obs", 16)
+	joinAll(t, cr, obs)
+
+	a := avatarClient("a", "pic-a")
+	register(t, cr, a)
+	w := expectAvatarFrame(t, a, "type", "from", "text", "ts", "avatar")
+	if string(w["avatar"]) != `"pic-a"` {
+		t.Fatalf("welcome avatar = %s", w["avatar"])
+	}
+	exactFields(t, nextRaw(t, a), "type", "users", "avatars", "ts")
+	decodeHistory(t, nextRaw(t, a))
+	j := exactFields(t, nextRaw(t, a), "type", "from", "text", "ts", "avatar")
+	if string(j["avatar"]) != `"pic-a"` || string(j["type"]) != `"join"` {
+		t.Fatalf("own join = %v", j)
+	}
+	j = exactFields(t, nextRaw(t, obs), "type", "from", "text", "ts", "avatar")
+	if string(j["avatar"]) != `"pic-a"` || string(j["type"]) != `"join"` {
+		t.Fatalf("join seen by obs = %v", j)
+	}
+
+	b := newTestClient("b", 16)
+	register(t, cr, b)
+	if w := next(t, b); w.Type != typeWelcome || w.From != "b" { // decode: exactly 4 fields, no avatar
+		t.Fatalf("got %+v, want welcome b", w)
+	}
+	skip(t, b, 2) // users (lists a's avatar) and history
+	expect(t, b, typeJoin, "b", "")
+}
+
+// CHAT-28: the users frame maps only members that have an avatar and is omitted when nobody has one.
+func TestUsersFrameAvatars(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := avatarClient("a", "pic-a"), newTestClient("b", 16)
+	register(t, cr, a)
+	register(t, cr, b)
+	skip(t, a, privateFrames+2) // private frames, own join, b's join
+
+	c := avatarClient("c", "pic-c")
+	register(t, cr, c)
+	nextRaw(t, c) // welcome
+	f := exactFields(t, nextRaw(t, c), "type", "users", "avatars", "ts")
+	var got map[string]string
+	if err := json.Unmarshal(f["avatars"], &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"a": "pic-a", "c": "pic-c"}; !maps.Equal(got, want) {
+		t.Fatalf("avatars = %v, want %v", got, want)
+	}
+
+	// A newcomer without a picture still receives the avatars of the members that have one.
+	cr3, _ := startRoom(t)
+	register(t, cr3, avatarClient("p", "pic-p"))
+	q := newTestClient("q", 16)
+	register(t, cr3, q)
+	nextRaw(t, q) // welcome
+	f = exactFields(t, nextRaw(t, q), "type", "users", "avatars", "ts")
+	got = nil
+	if err := json.Unmarshal(f["avatars"], &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"p": "pic-p"}; !maps.Equal(got, want) {
+		t.Fatalf("avatars for a newcomer without one = %v, want %v", got, want)
+	}
+
+	cr2, _ := startRoom(t)
+	x, y := newTestClient("x", 16), newTestClient("y", 16)
+	joinAll(t, cr2, x, y) // expectWelcome -> decodeUsers: exactly type, users, ts
+}
+
+// skip discards the next n frames queued on c.
+func skip(t *testing.T, c *Client, n int) {
+	t.Helper()
+	for range n {
+		nextRaw(t, c)
+	}
+}
+
+// CHAT-28: chat frames and their history entries keep the sender's avatar, even after it leaves.
+func TestChatAndHistoryKeepAvatar(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := avatarClient("a", "pic-a"), newTestClient("b", 16)
+	register(t, cr, a)
+	register(t, cr, b)
+	skip(t, a, privateFrames+2) // private frames, own join, b's join
+	skip(t, b, privateFrames+1) // private frames, own join
+
+	broadcast(t, cr, a, "from a")
+	for _, c := range []*Client{a, b} {
+		f := expectAvatarFrame(t, c, "type", "from", "text", "ts", "avatar")
+		if string(f["avatar"]) != `"pic-a"` {
+			t.Fatalf("chat avatar = %s", f["avatar"])
+		}
+	}
+	broadcast(t, cr, b, "from b")
+	expect(t, a, typeChat, "b", "from b") // decode: no avatar field
+	expect(t, b, typeChat, "b", "from b")
+
+	unregister(t, cr, a)
+	expect(t, b, typeLeave, "a", "")
+
+	late := newTestClient("late", 16)
+	register(t, cr, late)
+	nextRaw(t, late) // welcome
+	nextRaw(t, late) // users
+	var hist struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(nextRaw(t, late), &hist); err != nil || len(hist.Messages) != 2 {
+		t.Fatalf("history = %+v, err %v", hist, err)
+	}
+	f := exactFields(t, hist.Messages[0], "type", "from", "text", "ts", "avatar")
+	if string(f["avatar"]) != `"pic-a"` {
+		t.Fatalf("history avatar = %s", f["avatar"])
+	}
+	decode(t, hist.Messages[1]) // b has none: exactly four fields
+}
+
+// CHAT-28: leave, dm, dm_error and typing frames never carry an avatar.
+func TestAvatarNotOnLeaveDMTyping(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := avatarClient("a", "pic-a"), newTestClient("b", 16)
+	register(t, cr, a)
+	register(t, cr, b)
+	skip(t, a, privateFrames+2)
+	skip(t, b, privateFrames+1)
+
+	dm(t, cr, a, "b", "psst")
+	expectDM(t, b, "a", "b", "psst")
+	expectDM(t, a, "a", "b", "psst")
+	dm(t, cr, a, "nobody", "x")
+	expectDMError(t, a, "nobody", reasonOffline)
+	typingSignal(t, cr, a, "")
+	expectTyping(t, b, "a", "")
+	typingSignal(t, cr, a, "b")
+	expectTyping(t, b, "a", "b")
+
+	unregister(t, cr, a)
+	if m := next(t, b); m.Type != typeLeave || m.From != "a" { // decode: exactly four fields
+		t.Fatalf("got %+v, want leave a", m)
+	}
+}
+
+// CHAT-28: a nickname reused after its owner left inherits no avatar.
+func TestReusedNicknameNoStaleAvatar(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs, bob := newTestClient("obs", 16), avatarClient("bob", "pic-bob")
+	joinAll(t, cr, obs)
+	register(t, cr, bob)
+	skip(t, obs, 1) // bob's join
+	unregister(t, cr, bob)
+	expect(t, obs, typeLeave, "bob", "")
+
+	bob2 := newTestClient("bob", 16)
+	register(t, cr, bob2)
+	expectWelcome(t, bob2, "bob") // users frame passes decodeUsers: no avatars key
+	expect(t, bob2, typeJoin, "bob", "")
+	expect(t, obs, typeJoin, "bob", "")
+}
+
+// decodeMusic parses a music frame with exactly type, video, playing, pos, by, seq, queue and ts.
+func decodeMusic(t *testing.T, b []byte) musicFrame {
+	t.Helper()
+	fields := exactFields(t, b, "type", "video", "playing", "pos", "by", "seq", "queue", "ts")
+	var f musicFrame
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("decode music %q: %v", b, err)
+	}
+	if f.Type != typeMusic {
+		t.Fatalf("type = %q, want music", f.Type)
+	}
+	for _, k := range []string{"pos", "ts", "seq"} { // integers, not 1.5 or 1e3
+		if _, err := strconv.ParseInt(string(fields[k]), 10, 64); err != nil {
+			t.Fatalf("%s = %s, want an integer", k, fields[k])
+		}
+	}
+	if !bytes.HasPrefix(fields["queue"], []byte("[")) { // [] when empty, never null
+		t.Fatalf("queue = %s, want an array", fields["queue"])
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(fields["queue"], &items); err != nil {
+		t.Fatalf("decode queue %s: %v", fields["queue"], err)
+	}
+	for _, it := range items {
+		raw, _ := json.Marshal(it)
+		item := exactFields(t, raw, "id", "video", "by")
+		if _, err := strconv.ParseInt(string(item["id"]), 10, 64); err != nil {
+			t.Fatalf("queue id = %s, want an integer", item["id"])
+		}
+	}
+	return f
+}
+
+// expectMusic waits for the next frame on c, requires a music frame with this video,
+// playing and by, and returns it so callers can check pos.
+func expectMusic(t *testing.T, c *Client, video string, playing bool, by string) musicFrame {
+	t.Helper()
+	f := decodeMusic(t, nextRaw(t, c))
+	if f.Video != video || f.Playing != playing || f.By != by {
+		t.Fatalf("music = %+v, want video %q playing %v by %q", f, video, playing, by)
+	}
+	return f
+}
+
+// musicCtl queues a validated music control as if it had been read from from's connection.
+func musicCtl(t *testing.T, cr *Room, from *Client, cmd musicCmd) {
+	t.Helper()
+	select {
+	case cr.broadcast <- inbound{from: from, kind: inboundMusic, music: cmd}:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout queueing music control")
+	}
+}
+
+const (
+	v1 = "dQw4w9WgXcQ"
+	v2 = "aaaaaaaaaaa"
+	v3 = "bbbbbbbbbbb"
+)
+
+var (
+	playCmd  = musicCmd{action: musicPlay}
+	pauseCmd = musicCmd{action: musicPause}
+	skipCmd  = musicCmd{action: musicSkip}
+)
+
+func addCmd(video string) musicCmd { return musicCmd{action: musicAdd, video: video} }
+func seekCmd(pos int64) musicCmd   { return musicCmd{action: musicSeek, pos: pos} }
+func removeCmd(id int64) musicCmd  { return musicCmd{action: musicRemove, id: id} }
+func endedCmd(seq int64) musicCmd  { return musicCmd{action: musicEnded, seq: seq} }
+
+// queueIDs lists the ids of the queued tracks, never nil.
+func queueIDs(q []queueItem) []int64 {
+	ids := make([]int64, 0, len(q))
+	for _, it := range q {
+		ids = append(ids, it.ID)
+	}
+	return ids
+}
+
+// CHAT-30: the player's state machine, with fixed clock readings.
+func TestPlayerApply(t *testing.T) {
+	t0 := time.Unix(5000, 0)
+	at := func(ms int64) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+
+	type state struct {
+		video    string
+		playing  bool
+		pos      int64 // position at the step's now
+		by       string
+		seq      int64
+		ids      []int64
+		finished bool
+	}
+	snap := func(p *player, now time.Time) state {
+		return state{p.video, p.playing, p.position(now), p.by, p.seq, queueIDs(p.queue), p.finished}
+	}
+
+	t.Run("no video", func(t *testing.T) {
+		for _, c := range []musicCmd{playCmd, pauseCmd, seekCmd(5), skipCmd, endedCmd(1), removeCmd(1)} {
+			p := &player{}
+			if p.apply(c, "A", t0) {
+				t.Fatalf("%s with no video was accepted", c.action)
+			}
+			if !reflect.DeepEqual(*p, player{}) {
+				t.Fatalf("%s with no video changed the state: %+v", c.action, *p)
+			}
+		}
+	})
+
+	// One player walks through the steps; a rejected step must leave the state untouched.
+	steps := []struct {
+		name string
+		cmd  musicCmd
+		by   string
+		now  int64 // ms after t0
+		ok   bool
+		want state // checked at now
+	}{
+		{"first add starts", addCmd(v1), "A", 1000, true, state{v1, true, 0, "A", 1, []int64{}, false}},
+		{"add while current queues", addCmd(v2), "B", 2000, true, state{v1, true, 1000, "A", 1, []int64{1}, false}},
+		{"second add gets the next id", addCmd(v3), "C", 3000, true, state{v1, true, 2000, "A", 1, []int64{1, 2}, false}},
+		{"remove a missing id", removeCmd(99), "A", 3100, false, state{v1, true, 2100, "A", 1, []int64{1, 2}, false}},
+		{"remove an existing id", removeCmd(1), "A", 3500, true, state{v1, true, 2500, "A", 1, []int64{2}, false}},
+		{"ids are not reused after a remove", addCmd(v2), "B", 4000, true, state{v1, true, 3000, "A", 1, []int64{2, 3}, false}},
+		{"pause", pauseCmd, "B", 5000, true, state{v1, false, 4000, "B", 1, []int64{2, 3}, false}},
+		{"skip from paused", skipCmd, "D", 6000, true, state{v3, true, 0, "C", 2, []int64{3}, false}},
+		{"ended with a stale seq", endedCmd(1), "A", 7000, false, state{v3, true, 1000, "C", 2, []int64{3}, false}},
+		{"ended advances", endedCmd(2), "A", 8000, true, state{v2, true, 0, "B", 3, []int64{}, false}},
+		{"ended with an empty queue finishes", endedCmd(3), "A", 10000, true, state{v2, false, 2000, "B", 3, []int64{}, true}},
+		{"ended again while finished", endedCmd(3), "A", 10500, false, state{v2, false, 2000, "B", 3, []int64{}, true}},
+		{"skip with an empty queue", skipCmd, "A", 11000, false, state{v2, false, 2000, "B", 3, []int64{}, true}},
+		{"pause keeps finished", pauseCmd, "D", 11500, true, state{v2, false, 2000, "D", 3, []int64{}, true}},
+		{"play clears finished", playCmd, "A", 12000, true, state{v2, true, 2000, "A", 3, []int64{}, false}},
+		{"ended finishes again", endedCmd(3), "A", 14000, true, state{v2, false, 4000, "A", 3, []int64{}, true}},
+		{"seek clears finished", seekCmd(500), "B", 15000, true, state{v2, false, 500, "B", 3, []int64{}, false}},
+		{"play from the seek", playCmd, "B", 16000, true, state{v2, true, 500, "B", 3, []int64{}, false}},
+		{"ended finishes a third time", endedCmd(3), "B", 17000, true, state{v2, false, 1500, "B", 3, []int64{}, true}},
+		{"add while finished with an empty queue", addCmd(v1), "E", 18000, true, state{v1, true, 0, "E", 4, []int64{}, false}},
+	}
+	p := &player{}
+	for _, s := range steps {
+		before := *p
+		before.queue = slices.Clone(p.queue)
+		got := p.apply(s.cmd, s.by, at(s.now))
+		if got != s.ok {
+			t.Fatalf("%s: accepted = %v, want %v", s.name, got, s.ok)
+		}
+		if st := snap(p, at(s.now)); !reflect.DeepEqual(st, s.want) {
+			t.Fatalf("%s: state = %+v, want %+v", s.name, st, s.want)
+		}
+		if !s.ok && !reflect.DeepEqual(*p, before) {
+			t.Fatalf("%s: a rejected control changed the state: %+v", s.name, *p)
+		}
+	}
+
+	t.Run("skip from finished with a queue", func(t *testing.T) {
+		p := &player{video: v1, seq: 1, finished: true, at: t0, queue: []queueItem{{7, v2, "B"}}}
+		if !p.apply(skipCmd, "A", at(500)) {
+			t.Fatal("skip rejected")
+		}
+		if st := snap(p, at(500)); !reflect.DeepEqual(st, state{v2, true, 0, "B", 2, []int64{}, false}) {
+			t.Fatalf("state = %+v", st)
+		}
+	})
+
+	t.Run("ended while paused advances", func(t *testing.T) {
+		p := &player{}
+		p.apply(addCmd(v1), "A", t0)
+		p.apply(addCmd(v2), "B", at(100))
+		p.apply(pauseCmd, "A", at(200))
+		if !p.apply(endedCmd(1), "C", at(300)) {
+			t.Fatal("ended while paused on an unfinished track was rejected")
+		}
+		if st := snap(p, at(300)); !reflect.DeepEqual(st, state{v2, true, 0, "B", 2, []int64{}, false}) {
+			t.Fatalf("state = %+v", st)
+		}
+	})
+
+	t.Run("queue cap", func(t *testing.T) {
+		p := &player{}
+		p.apply(addCmd(v1), "A", t0)
+		for i := 0; i < maxMusicQueue; i++ {
+			if !p.apply(addCmd(v2), "A", t0) {
+				t.Fatalf("add %d rejected", i+1)
+			}
+		}
+		if p.apply(addCmd(v3), "A", t0) {
+			t.Fatal("add past the cap was accepted")
+		}
+		if len(p.queue) != maxMusicQueue || p.nextID != maxMusicQueue {
+			t.Fatalf("queue = %d, nextID = %d, want %d", len(p.queue), p.nextID, maxMusicQueue)
+		}
+		p.apply(removeCmd(1), "A", t0)
+		if !p.apply(addCmd(v3), "A", t0) {
+			t.Fatal("add after a remove rejected")
+		}
+		if last := p.queue[len(p.queue)-1]; last.ID != maxMusicQueue+1 {
+			t.Fatalf("last id = %d, want %d", last.ID, maxMusicQueue+1)
+		}
+	})
+
+	t.Run("halt", func(t *testing.T) {
+		p := &player{}
+		p.apply(addCmd(v1), "A", at(0))
+		p.apply(addCmd(v2), "B", at(0))
+		p.apply(endedCmd(1), "A", at(1000)) // v2 current, by B, seq 2
+		p.apply(addCmd(v3), "C", at(1000))
+		p.halt(at(5000)) // freezes 4000 ms in; by, queue, seq and finished unchanged
+		if st := snap(p, at(99999)); !reflect.DeepEqual(st, state{v2, false, 4000, "B", 2, []int64{2}, false}) {
+			t.Fatalf("halt: %+v", st)
+		}
+		p.halt(at(99999)) // halting a paused player changes nothing
+		if p.pos != 4000 {
+			t.Fatalf("second halt moved pos to %d", p.pos)
+		}
+		f := &player{}
+		f.apply(addCmd(v1), "A", at(0))
+		f.apply(endedCmd(1), "A", at(1000)) // finished, already paused
+		f.halt(at(2000))
+		if !f.finished || f.pos != 1000 || f.seq != 1 {
+			t.Fatalf("halt on a finished player: %+v", *f)
+		}
+	})
+}
+
+// CHAT-30: the frame has the spec's field order, [] for an empty queue, and its own copy of the queue.
+func TestPlayerFrameQueue(t *testing.T) {
+	now := time.Unix(5000, 0)
+	p := &player{}
+	p.apply(addCmd(v1), "A", now)
+	f := p.frame(now)
+	want := fmt.Sprintf(`{"type":"music","video":"%s","playing":true,"pos":0,"by":"A","seq":1,"queue":[],"ts":%d}`, v1, now.UnixMilli())
+	if got := string(encode(f)); got != want {
+		t.Fatalf("frame = %s, want %s", got, want)
+	}
+
+	p.apply(addCmd(v2), "B", now)
+	p.apply(addCmd(v3), "C", now)
+	f = p.frame(now)
+	wantQ := `"queue":[{"id":1,"video":"aaaaaaaaaaa","by":"B"},{"id":2,"video":"bbbbbbbbbbb","by":"C"}]`
+	if got := string(encode(f)); !strings.Contains(got, wantQ) {
+		t.Fatalf("frame = %s, want it to contain %s", got, wantQ)
+	}
+
+	p.apply(skipCmd, "A", now) // mutates the state's queue after the frame was built
+	p.apply(removeCmd(2), "A", now)
+	if got := string(encode(f)); !strings.Contains(got, wantQ) {
+		t.Fatalf("frame queue changed with the state: %s", got)
+	}
+}
+
+// CHAT-30: add is broadcast to everyone, the sender included, with exactly the documented fields.
+func TestMusicAddBroadcast(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+
+	start := time.Now()
+	musicCtl(t, cr, a, addCmd(v1))
+	for _, c := range []*Client{a, b} {
+		f := expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+		if f.Seq != 1 || len(f.Queue) != 0 {
+			t.Fatalf("first add: seq %d queue %+v, want seq 1 and an empty queue", f.Seq, f.Queue)
+		}
+		if elapsed := time.Since(start).Milliseconds(); f.Pos < 0 || f.Pos > elapsed {
+			t.Fatalf("pos = %d, want within 0..%d", f.Pos, elapsed)
+		}
+		if f.TS < start.UnixMilli() || f.TS > time.Now().UnixMilli() {
+			t.Fatalf("ts = %d outside the test window", f.TS)
+		}
+	}
+	expectEmpty(t, a)
+	expectEmpty(t, b)
+}
+
+// CHAT-30: pause, seek and play keep the position; by follows the sender.
+func TestMusicPauseSeekPlay(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+	both := []*Client{a, b}
+	start := time.Now()
+
+	musicCtl(t, cr, a, addCmd(v1))
+	for _, c := range both {
+		expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+	}
+	musicCtl(t, cr, b, pauseCmd)
+	var pausedAt int64
+	for _, c := range both {
+		pausedAt = expectMusic(t, c, "dQw4w9WgXcQ", false, "B").Pos
+	}
+	musicCtl(t, cr, a, seekCmd(60000))
+	for _, c := range both {
+		if f := expectMusic(t, c, "dQw4w9WgXcQ", false, "A"); f.Pos != 60000 {
+			t.Fatalf("seek pos = %d, want exactly 60000 while paused", f.Pos)
+		}
+	}
+	musicCtl(t, cr, b, playCmd)
+	for _, c := range both {
+		f := expectMusic(t, c, "dQw4w9WgXcQ", true, "B")
+		if f.Pos < 60000 || f.Pos > 60000+time.Since(start).Milliseconds() {
+			t.Fatalf("play pos = %d, want 60000 plus a little", f.Pos)
+		}
+	}
+	musicCtl(t, cr, a, seekCmd(5000)) // seeking while playing keeps playing
+	for _, c := range both {
+		f := expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+		if f.Pos < 5000 || f.Pos > 5000+time.Since(start).Milliseconds() {
+			t.Fatalf("seek pos = %d, want 5000 plus a little", f.Pos)
+		}
+	}
+	musicCtl(t, cr, a, playCmd) // play while playing is accepted and broadcast
+	for _, c := range both {
+		expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+	}
+	if pausedAt < 0 || pausedAt > time.Since(start).Milliseconds() {
+		t.Fatalf("pause pos = %d out of range", pausedAt)
+	}
+}
+
+// expectMusicAll requires the same music frame (video, playing, by, seq, queue) on every client.
+func expectMusicAll(t *testing.T, cs []*Client, video string, playing bool, by string, seq int64, queue []queueItem) {
+	t.Helper()
+	for _, c := range cs {
+		f := expectMusic(t, c, video, playing, by)
+		if f.Seq != seq || !slices.Equal(f.Queue, queue) {
+			t.Fatalf("music = %+v, want seq %d queue %+v", f, seq, queue)
+		}
+	}
+}
+
+// CHAT-30: add while something is current queues the track and keeps the current state.
+func TestMusicAddQueues(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+	both := []*Client{a, b}
+
+	musicCtl(t, cr, a, addCmd(v1))
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{})
+	musicCtl(t, cr, b, addCmd(v2)) // current by/pos unchanged: the frame still says A
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{{1, v2, "B"}})
+	musicCtl(t, cr, a, addCmd(v3))
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{{1, v2, "B"}, {2, v3, "A"}})
+	expectEmpty(t, a)
+	expectEmpty(t, b)
+}
+
+// CHAT-30: skip starts the head of the queue, attributed to whoever added it.
+func TestMusicSkipAdvances(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+	both := []*Client{a, b}
+
+	musicCtl(t, cr, a, addCmd(v1))
+	musicCtl(t, cr, b, addCmd(v2))
+	musicCtl(t, cr, b, addCmd(v3))
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{})
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{{1, v2, "B"}})
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{{1, v2, "B"}, {2, v3, "B"}})
+
+	musicCtl(t, cr, a, skipCmd)
+	for _, c := range both {
+		f := expectMusic(t, c, v2, true, "B")
+		if f.Seq != 2 || f.Pos > 1000 || !slices.Equal(f.Queue, []queueItem{{2, v3, "B"}}) {
+			t.Fatalf("after skip = %+v", f)
+		}
+	}
+	expectEmpty(t, a)
+}
+
+// CHAT-30: every client reports the same track ending; only the first report advances.
+func TestMusicEndedOnce(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b, c := newTestClient("A", 64), newTestClient("B", 64), newTestClient("C", 64)
+	joinAll(t, cr, a, b, c)
+	all := []*Client{a, b, c}
+
+	musicCtl(t, cr, a, addCmd(v1))
+	musicCtl(t, cr, a, addCmd(v2))
+	expectMusicAll(t, all, v1, true, "A", 1, []queueItem{})
+	expectMusicAll(t, all, v1, true, "A", 1, []queueItem{{1, v2, "A"}})
+
+	for _, from := range all {
+		musicCtl(t, cr, from, endedCmd(1))
+	}
+	expectMusicAll(t, all, v2, true, "A", 2, []queueItem{})
+
+	broadcast(t, cr, a, "after") // Run handled the three reports first, so a second frame would precede it
+	for _, c := range all {
+		expect(t, c, typeChat, "A", "after")
+		expectEmpty(t, c)
+	}
+}
+
+// CHAT-30: the last track ending leaves the player paused on it; a later add starts anew.
+func TestMusicLastTrackEnds(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+	both := []*Client{a, b}
+
+	musicCtl(t, cr, a, addCmd(v1))
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{})
+	musicCtl(t, cr, b, endedCmd(1))
+	expectMusicAll(t, both, v1, false, "A", 1, []queueItem{})
+
+	musicCtl(t, cr, b, addCmd(v2))
+	for _, c := range both {
+		f := expectMusic(t, c, v2, true, "B")
+		if f.Seq != 2 || f.Pos > 1000 || len(f.Queue) != 0 {
+			t.Fatalf("add after the end = %+v", f)
+		}
+	}
+}
+
+// CHAT-30: remove is by id; a second remove of the same id is discarded.
+func TestMusicRemoveById(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+	both := []*Client{a, b}
+
+	musicCtl(t, cr, a, addCmd(v1))
+	musicCtl(t, cr, a, addCmd(v2))
+	musicCtl(t, cr, a, addCmd(v3))
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{})
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{{1, v2, "A"}})
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{{1, v2, "A"}, {2, v3, "A"}})
+
+	musicCtl(t, cr, b, removeCmd(1))
+	expectMusicAll(t, both, v1, true, "A", 1, []queueItem{{2, v3, "A"}})
+	musicCtl(t, cr, b, removeCmd(1))
+	broadcast(t, cr, a, "after")
+	for _, c := range both {
+		expect(t, c, typeChat, "A", "after")
+		expectEmpty(t, c)
+	}
+}
+
+// CHAT-30: with 30 tracks queued another add is discarded without any reply.
+func TestMusicQueueCap(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a := newTestClient("A", 64)
+	joinAll(t, cr, a)
+
+	for i := 0; i < 1+maxMusicQueue; i++ {
+		musicCtl(t, cr, a, addCmd(v1))
+		f := expectMusic(t, a, v1, true, "A")
+		if len(f.Queue) != i {
+			t.Fatalf("add %d: queue = %d", i+1, len(f.Queue))
+		}
+	}
+	musicCtl(t, cr, a, addCmd(v2))
+	broadcast(t, cr, a, "after")
+	expect(t, a, typeChat, "A", "after")
+	expectEmpty(t, a)
+}
+
+// CHAT-30: play, pause, seek, skip, ended and remove with nothing current are discarded without any reply.
+func TestMusicNeedsVideo(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+
+	for _, c := range []musicCmd{playCmd, pauseCmd, seekCmd(5), skipCmd, endedCmd(1), removeCmd(1)} {
+		musicCtl(t, cr, a, c)
+	}
+	broadcast(t, cr, a, "after") // Run handled the controls first, so a reply would precede it
+	for _, c := range []*Client{a, b} {
+		expect(t, c, typeChat, "A", "after")
+		expectEmpty(t, c)
+	}
+}
+
+// CHAT-30: a newcomer gets the current state right after history, before its join; none while nothing is loaded.
+func TestMusicNewcomerSnapshot(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a := newTestClient("A", 64)
+	joinAll(t, cr, a)
+
+	empty := newTestClient("E", 64)
+	register(t, cr, empty)
+	expectWelcome(t, empty, "E")
+	expect(t, empty, typeJoin, "E", "") // no music frame: nothing is loaded
+	expect(t, a, typeJoin, "E", "")
+
+	before := time.Now()
+	musicCtl(t, cr, a, addCmd(v1))
+	expectMusic(t, a, "dQw4w9WgXcQ", true, "A")
+	expectMusic(t, empty, "dQw4w9WgXcQ", true, "A")
+	musicCtl(t, cr, a, addCmd(v2))
+	musicCtl(t, cr, a, addCmd(v3))
+	for i := 0; i < 2; i++ {
+		expectMusic(t, a, "dQw4w9WgXcQ", true, "A")
+		expectMusic(t, empty, "dQw4w9WgXcQ", true, "A")
+	}
+	loaded := time.Now()
+	time.Sleep(20 * time.Millisecond)
+
+	joining := time.Now()
+	c := newTestClient("C", 64)
+	register(t, cr, c)
+	expectWelcome(t, c, "C")
+	f := expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+	if f.Seq != 1 || !slices.Equal(f.Queue, []queueItem{{1, v2, "A"}, {2, v3, "A"}}) {
+		t.Fatalf("snapshot seq %d queue %+v, want seq 1 and the 2 queued tracks", f.Seq, f.Queue)
+	}
+	if min, max := joining.Sub(loaded).Milliseconds(), time.Since(before).Milliseconds(); f.Pos < min || f.Pos > max {
+		t.Fatalf("snapshot pos = %d, want within %d..%d", f.Pos, min, max)
+	}
+	expect(t, c, typeJoin, "C", "")
+	expectEmpty(t, c)
+	// The snapshot is private: nobody else gets a second music frame.
+	expect(t, a, typeJoin, "C", "")
+	expectEmpty(t, a)
+}
+
+// CHAT-30: when the last client leaves, the player pauses at the current position.
+func TestMusicEmptyRoomPauses(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a := newTestClient("A", 64)
+	joinAll(t, cr, a)
+	musicCtl(t, cr, a, addCmd(v1))
+	musicCtl(t, cr, a, addCmd(v2))
+	expectMusic(t, a, "dQw4w9WgXcQ", true, "A")
+	expectMusic(t, a, "dQw4w9WgXcQ", true, "A")
+	time.Sleep(50 * time.Millisecond)
+	unregister(t, cr, a)
+	expectClosed(t, a)
+	time.Sleep(100 * time.Millisecond)
+
+	b := newTestClient("B", 64)
+	register(t, cr, b)
+	expectWelcome(t, b, "B")
+	f := expectMusic(t, b, "dQw4w9WgXcQ", false, "A")
+	if f.Seq != 1 || !slices.Equal(f.Queue, []queueItem{{1, v2, "A"}}) {
+		t.Fatalf("seq %d queue %+v, want the queue kept", f.Seq, f.Queue)
+	}
+	if f.Pos < 50 {
+		t.Fatalf("pos = %d, want at least the 50 ms played before A left", f.Pos)
+	}
+	expect(t, b, typeJoin, "B", "")
+
+	time.Sleep(50 * time.Millisecond) // still paused: the position does not advance
+	c := newTestClient("C", 64)
+	register(t, cr, c)
+	expectWelcome(t, c, "C")
+	if g := expectMusic(t, c, "dQw4w9WgXcQ", false, "A"); g.Pos != f.Pos {
+		t.Fatalf("paused pos moved from %d to %d", f.Pos, g.Pos)
+	}
+}
+
+// CHAT-30, CHAT-03: the last client removed as slow also pauses the room.
+func TestMusicLastSlowDropPauses(t *testing.T) {
+	cr := NewMusicRoom("musica")
+	x := newTestClient("x", 0)
+	cr.clients[x] = struct{}{}
+	cr.taken[foldKey("x")] = struct{}{}
+	cr.player.apply(addCmd(v1), "x", time.Now().Add(-time.Hour)) // an hour in, so a stale pos stands out
+
+	cr.dispatch(inbound{from: x, kind: inboundMusic, music: playCmd}) // x cannot take the frame
+
+	expectClosed(t, x)
+	if len(cr.clients) != 0 {
+		t.Fatalf("clients = %d, want 0", len(cr.clients))
+	}
+	if cr.player.playing || cr.player.pos < int64(time.Hour/time.Millisecond) {
+		t.Fatalf("player = %+v, want paused at about an hour", *cr.player)
+	}
+}
+
+// CHAT-30, CHAT-21: without a shared player a control is dropped, history is unchanged and chat still flows.
+func TestMusicRoomWithoutPlayer(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+
+	musicCtl(t, cr, a, addCmd(v1))
+	musicCtl(t, cr, a, playCmd)
+	broadcast(t, cr, a, "hola")
+	for _, c := range []*Client{a, b} {
+		expect(t, c, typeChat, "A", "hola")
+		expectEmpty(t, c)
+	}
+
+	c := newTestClient("C", 64)
+	register(t, cr, c)
+	_, hist := expectWelcome(t, c, "C")
+	expectHistory(t, hist, message{Type: typeChat, From: "A", Text: "hola"})
+	expect(t, c, typeJoin, "C", "") // no music frame
+	expectEmpty(t, c)
+}
+
+// CHAT-30, CHAT-18: music frames are never stored in history.
+func TestMusicNotInHistory(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a := newTestClient("A", 64)
+	joinAll(t, cr, a)
+	musicCtl(t, cr, a, addCmd(v1))
+	expectMusic(t, a, "dQw4w9WgXcQ", true, "A")
+	broadcast(t, cr, a, "hola")
+	expect(t, a, typeChat, "A", "hola")
+
+	b := newTestClient("B", 64)
+	register(t, cr, b)
+	_, hist := expectWelcome(t, b, "B")
+	expectHistory(t, hist, message{Type: typeChat, From: "A", Text: "hola"})
+	expectMusic(t, b, "dQw4w9WgXcQ", true, "A")
+}
+
+// CHAT-21: a control from a client that is no longer a member is ignored.
+func TestMusicFromNonMemberDropped(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, ghost := newTestClient("A", 64), newTestClient("ghost", 64)
+	joinAll(t, cr, a)
+
+	musicCtl(t, cr, ghost, addCmd(v1))
+	broadcast(t, cr, a, "after")
+	expect(t, a, typeChat, "A", "after")
+	expectEmpty(t, a)
+	expectEmpty(t, ghost)
+
+	b := newTestClient("B", 64) // nothing was loaded, so no snapshot
+	register(t, cr, b)
+	expectWelcome(t, b, "B")
+	expect(t, b, typeJoin, "B", "")
+}
+
+// CHAT-30, CHAT-03: a member that cannot take a music frame is removed and announced as left.
+func TestMusicSlowClientDropped(t *testing.T) {
+	cr := NewMusicRoom("musica")
+	o, a, x := newTestClient("o", 16), newTestClient("a", 16), newTestClient("x", 0)
+	for _, c := range []*Client{o, a, x} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.dispatch(inbound{from: a, kind: inboundMusic, music: addCmd(v1)})
+
+	expectClosed(t, x)
+	for _, c := range []*Client{o, a} {
+		expectMusic(t, c, "dQw4w9WgXcQ", true, "a")
+		expect(t, c, typeLeave, "x", "")
+		expectEmpty(t, c)
+	}
+	if !cr.player.playing {
+		t.Fatal("the room still has members, so the player must keep playing")
 	}
 }

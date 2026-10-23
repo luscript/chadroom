@@ -13,12 +13,16 @@ import (
 // typingInterval is the minimum time between two typing signals forwarded from one connection (CHAT-26).
 const typingInterval = time.Second
 
-// typingGate admits at most one typing signal per typingInterval. It belongs to a single
-// readPump goroutine, so it needs no lock. A discarded signal does not move the window.
-type typingGate struct{ last time.Time }
+// rateGate admits at most one event per interval. It belongs to a single readPump
+// goroutine, so it needs no lock. A discarded event does not move the window.
+type rateGate struct {
+	interval time.Duration
+	last     time.Time
+}
 
-func (g *typingGate) allow(now time.Time) bool {
-	if !g.last.IsZero() && now.Sub(g.last) < typingInterval {
+// allow reports whether an event at now may pass. Only an admitted event moves the window.
+func (g *rateGate) allow(now time.Time) bool {
+	if !g.last.IsZero() && now.Sub(g.last) < g.interval {
 		return false
 	}
 	g.last = now
@@ -32,6 +36,7 @@ type Client struct {
 	send       chan []byte
 	registered chan struct{} // closed by Run once nickname is final
 	nickname   string        // requested until registered is closed, final after
+	avatar     string        // validated URL or ""; set before register and never changed (CHAT-28)
 }
 
 // logError logs abnormal connection errors with the room and nickname, skipping the
@@ -93,7 +98,9 @@ func (c *Client) readPump(cr *Room) {
 	c.conn.SetPongHandler(func(string) error {
 		return c.conn.SetReadDeadline(time.Now().Add(cr.pongWait))
 	})
-	var gate typingGate
+	typing := rateGate{interval: typingInterval}
+	music := rateGate{interval: musicInterval}
+	ended := rateGate{interval: musicInterval} // CHAT-30: its own budget, so a click can't starve an end report
 	for {
 		mt, message, err := c.conn.ReadMessage()
 		if err != nil {
@@ -114,8 +121,17 @@ func (c *Client) readPump(cr *Room) {
 		if !ok {
 			continue // CHAT-13: blank text is ignored, connection stays open
 		}
-		if in.kind == inboundTyping && !gate.allow(time.Now()) {
+		if in.kind == inboundTyping && !typing.allow(time.Now()) {
 			continue // CHAT-26: over the per-connection budget; connection stays open
+		}
+		if in.kind == inboundMusic {
+			gate := &music
+			if in.music.action == musicEnded {
+				gate = &ended
+			}
+			if !gate.allow(time.Now()) {
+				continue // CHAT-30: over the per-connection budget; connection stays open
+			}
 		}
 		in.from = c
 		select {

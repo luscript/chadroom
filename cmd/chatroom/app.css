@@ -85,6 +85,7 @@ p { margin: 0; }
 .brand span { font: 500 13px var(--font-heading); letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-text); }
 .field { display: flex; flex-direction: column; gap: var(--space-2); }
 .join-error { font-size: 13px; color: var(--color-accent-300); }
+.field-hint { margin: 0; font-size: 12px; }
 .field label { font-size: 12px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-neutral-500); }
 
 /* — chat header — */
@@ -144,6 +145,9 @@ p { margin: 0; }
   font-size: 13px; font-weight: 500; background: var(--color-accent-900); color: var(--color-accent-300);
   box-shadow: 0 0 0 1px var(--color-accent-800);
 }
+img.avatar { object-fit: cover; }
+.users-list .avatar { width: 20px; height: 20px; flex: none; font-size: 11px; }
+.profile-avatar { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .msg-body { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
 .msg-head { display: flex; align-items: baseline; gap: var(--space-3); min-width: 0; }
 .msg-head .author { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
@@ -199,11 +203,38 @@ p { margin: 0; }
 .gif-row { display: flex; gap: var(--space-2); }
 .gif-row .input { flex: 1; min-width: 0; }
 
+/* — music — */
+.music { flex: none; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: var(--space-3); min-width: 0; max-width: 100%; padding: 0 var(--gutter) var(--space-3); }
+.music > * { min-width: 0; }
+.music-load, .music-controls, .music-consent { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.music-load .input { flex: 1; min-width: 0; }
+.music-controls #music-seek { flex: 1; min-width: 80px; accent-color: var(--color-accent); }
+.music-controls #music-volume { width: 90px; accent-color: var(--color-accent); }
+.music-time { min-width: 5.5em; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--color-neutral-400); }
+.music-now { font-size: 13px; color: var(--color-neutral-400); overflow-wrap: anywhere; }
+.music-error { font-size: 13px; color: var(--color-accent-300); }
+.music-queue { list-style: none; margin: 0; padding: 0; max-height: 7.5em; overflow-y: auto; font-size: 13px; color: var(--color-neutral-400); }
+.music-queue-item { display: flex; align-items: center; gap: var(--space-2); }
+.music-queue-item span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.music-consent { font-size: 12px; color: var(--color-neutral-400); }
+.btn-accent { color: var(--color-accent); border-color: var(--color-accent); }
+.btn-accent:hover { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.music-player { width: 356px; max-width: 100%; }
+/* No clicks on the video: YouTube would toggle play/pause only in this browser and desync the room. The strip's buttons are the only controls. */
+.music-player iframe { display: block; width: 100%; min-width: 200px; height: 200px; border: 0; pointer-events: none; }
+/* Wide screens: video on the right, controls on the left, so the strip stays ~200px tall. */
+@media (min-width: 1000px) {
+  .music:has(.music-player:not([hidden])) { grid-template-columns: minmax(0, 1fr) 356px; align-items: start; }
+  .music:has(.music-player:not([hidden])) .music-player { grid-column: 2; grid-row: 1 / span 7; }
+}
+
 @media (max-width: 560px) {
   h1 { font-size: 32px; }
   .chat-header .status-label { display: none; }
   .chat-header .tag { max-width: 96px; }
   .rooms { gap: var(--space-3); }
+  .music-controls #music-volume { width: 64px; }
+  .music-load .btn { flex: none; }
 }
 
 /* CHADROOM — retro skin. Original hooks preserved. */
@@ -217,3 +248,8 @@ body{height:auto;min-height:100vh;background-color:#f9dfeb;background-image:line
 .join{align-items:center;background:radial-gradient(ellipse,#fff6fc,#f3cee5);padding:24px}.join form{max-width:410px;padding:25px;border:2px outset #fff;background:#fceaf4;box-shadow:5px 5px #b981a8}.join h1{font:bold italic 36px/1.1 Georgia;color:#ac276e}.join .brand span{font-weight:bold}.join .btn-primary{width:100%;padding:12px}.join .input{background:#fffafd;border:2px inset #e9c8de}.text-muted{color:#815a71}
 @media(max-width:800px){body{padding:20px 12px}.edition{display:none}#chat-view{grid-template-columns:minmax(0,1fr)}.scrapbook{display:none}.app{height:calc(100dvh - 160px);min-height:540px}.chat-header{padding:10px;gap:8px}.chat-header .actions{gap:6px}.chat-main{padding:10px}.desktop-brand{margin-bottom:16px}.wordmark{font-size:40px}.desktop-footer span:nth-child(2){display:none}.chat-header .tag{display:none}}
 @media(max-width:480px){body{padding:12px 6px}.menu-strip span:last-child{display:none}.window-title{font-size:10px}.chat-header .name{font-size:17px}.chat-header .title>svg{display:none}.chat-header .actions{gap:4px}.chat-header .btn{padding:6px}.room-tab{padding:9px 10px}.scroller{padding:12px}.composer-bar{gap:5px}.composer-bar #draft{order:1;flex-basis:100%}.composer-bar #send-btn{margin-left:auto}.window-status span:last-child{display:none}.app{height:calc(100dvh - 145px)}.desktop-footer{font-size:9px}.join form{padding:18px}.join{padding:12px}.room-leave{max-width:62px;white-space:normal}}
+.music{padding:8px 0}.music-error{color:#a22263}.btn-accent{background:#fce4f1;color:#a22263;border-color:#ee92bf}
+@media(max-width:480px){.music-controls{gap:5px}.music-controls #music-volume{width:56px}}
+/* The video needs >=200px, so give the room more height while the strip is shown. */
+.app:has(#music:not([hidden])){height:900px}
+@media(max-width:800px){.app:has(#music:not([hidden])){height:auto;min-height:calc(100dvh - 160px)}.chat-main:has(#music:not([hidden])) .scroller{min-height:220px}}

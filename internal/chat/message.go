@@ -16,6 +16,7 @@ const (
 	typeDM      = "dm"
 	typeDMError = "dm_error"
 	typeTyping  = "typing"
+	typeMusic   = "music"
 	historySize = 50 // chat messages kept for newcomers
 
 	reasonInvalid = "invalid"
@@ -23,21 +24,24 @@ const (
 	reasonOffline = "offline"
 )
 
-// message is the outbound JSON envelope. Field order is the JSON order and
-// there is no omitempty: every chat/join/leave/welcome frame carries all four
-// fields. users and history frames have their own shapes below.
+// message is the outbound JSON envelope. Field order is the JSON order. type, from,
+// text and ts are always present; avatar only when the sender has one (welcome, join,
+// chat and history entries, never leave), so frames without a picture are unchanged
+// (CHAT-28). users and history frames have their own shapes below.
 type message struct {
-	Type string `json:"type"` // chat | join | leave | welcome
-	From string `json:"from"`
-	Text string `json:"text"` // "" for everything but chat
-	TS   int64  `json:"ts"`   // unix milliseconds
+	Type   string `json:"type"` // chat | join | leave | welcome
+	From   string `json:"from"`
+	Text   string `json:"text"` // "" for everything but chat
+	TS     int64  `json:"ts"`   // unix milliseconds
+	Avatar string `json:"avatar,omitempty"`
 }
 
 // usersFrame is the private snapshot of connected nicknames sent on join.
 type usersFrame struct {
-	Type  string   `json:"type"`  // always "users"
-	Users []string `json:"users"` // never nil: [] when empty (unreachable: includes the newcomer)
-	TS    int64    `json:"ts"`
+	Type    string            `json:"type"`              // always "users"
+	Users   []string          `json:"users"`             // never nil: [] when empty (unreachable: includes the newcomer)
+	Avatars map[string]string `json:"avatars,omitempty"` // nick -> url, only members with one (CHAT-28)
+	TS      int64             `json:"ts"`
 }
 
 // historyFrame is the private replay of recent chat messages sent on join.
@@ -79,6 +83,19 @@ type typingDMFrame struct {
 	TS   int64  `json:"ts"`
 }
 
+// musicFrame is a room's shared player state (CHAT-30). pos is computed when the frame is
+// built, so receivers treat it as "now" and server/client clock skew doesn't matter. Never stored.
+type musicFrame struct {
+	Type    string      `json:"type"` // always "music"
+	Video   string      `json:"video"`
+	Playing bool        `json:"playing"`
+	Pos     int64       `json:"pos"` // ms
+	By      string      `json:"by"`
+	Seq     int64       `json:"seq"`   // tracks that have become current; the page reports ended per seq
+	Queue   []queueItem `json:"queue"` // never nil: [] when empty
+	TS      int64       `json:"ts"`
+}
+
 type inboundKind uint8
 
 const (
@@ -86,15 +103,17 @@ const (
 	inboundDM                        // to and text set
 	inboundBadDM                     // dm envelope with a bad to/text; answered with dm_error invalid
 	inboundTyping                    // typing signal; to == "" is a room signal
+	inboundMusic                     // validated music control (CHAT-30)
 )
 
 // inbound is a classified client text frame on its way to the hub. It travels on
 // Room.broadcast whatever its kind, so one client's frames keep their order.
 type inbound struct {
-	from *Client
-	kind inboundKind
-	to   string // inboundDM: cleanNickname(to), never "". inboundTyping: "" for a room signal
-	text string
+	from  *Client
+	kind  inboundKind
+	to    string // inboundDM: cleanNickname(to), never "". inboundTyping: "" for a room signal
+	text  string
+	music musicCmd // inboundMusic only
 }
 
 // parseInbound classifies a size- and UTF-8-checked text frame (CHAT-21). ok is
@@ -126,6 +145,14 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 			to, toOK := jsonString(raw)
 			to = cleanNickname(to)
 			return inbound{kind: inboundTyping, to: to}, toOK && to != "" // invalid: silent discard
+		case typeMusic:
+			// CHAT-21 rule 2a: validated completely here, and an invalid control is
+			// discarded instead of falling back to chat.
+			cmd, valid := parseMusic(env)
+			if !valid {
+				return inbound{}, false
+			}
+			return inbound{kind: inboundMusic, music: cmd}, true
 		case typeChat:
 			// A non-string text intentionally falls through to the plain-text rule (CHAT-21).
 			if textOK {
@@ -135,6 +162,40 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 	}
 	whole := string(frame)
 	return inbound{text: whole}, strings.TrimSpace(whole) != ""
+}
+
+// parseMusic validates a music control's fields (CHAT-30). Whether it applies to the
+// current state is the hub's business.
+func parseMusic(env map[string]json.RawMessage) (musicCmd, bool) {
+	action, _ := jsonString(env["action"])
+	switch action {
+	case musicAdd:
+		video, ok := jsonString(env["video"])
+		return musicCmd{action: action, video: video}, ok && videoID.MatchString(video)
+	case musicRemove:
+		id, ok := jsonInt(env["id"])
+		return musicCmd{action: action, id: id}, ok && id >= 1
+	case musicSkip, musicPlay, musicPause:
+		return musicCmd{action: action}, true
+	case musicEnded:
+		seq, ok := jsonInt(env["seq"])
+		return musicCmd{action: action, seq: seq}, ok && seq >= 1
+	case musicSeek:
+		pos, ok := jsonInt(env["pos"])
+		return musicCmd{action: action, pos: pos}, ok && pos >= 0 && pos <= maxMusicPos
+	}
+	return musicCmd{}, false
+}
+
+// jsonInt decodes a JSON integer. "null" (which Unmarshal would read as 0), strings,
+// booleans, objects, fractions and exponents are all rejected.
+func jsonInt(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 || (raw[0] != '-' && (raw[0] < '0' || raw[0] > '9')) {
+		return 0, false
+	}
+	var n int64
+	err := json.Unmarshal(raw, &n)
+	return n, err == nil
 }
 
 // jsonString reports whether raw is a JSON string and returns its value ("null" is not a string).

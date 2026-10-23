@@ -25,6 +25,12 @@
         <!-- maxlength mirrors maxNicknameRunes in internal/chat/room.go -->
         <input id="nick" class="input" type="text" maxlength="32" autofocus placeholder="Ej: xX_Lu_Xx">
       </div>
+      <div class="field">
+        <label for="avatar-url">Foto de perfil (opcional)</label>
+        <!-- maxlength mirrors maxAvatarBytes in cmd/chatroom/main.go -->
+        <input id="avatar-url" class="input" type="url" maxlength="512" placeholder="https://i.imgur.com/….png" aria-describedby="avatar-hint">
+        <p id="avatar-hint" class="field-hint text-muted">Pegá el link de una imagen de Giphy, Tenor o Imgur.</p>
+      </div>
       <div>
         <button id="join-btn" type="submit" class="btn btn-primary" disabled>Conectar →</button>
       </div>
@@ -62,6 +68,29 @@
       <div id="room-tabs" class="room-tabs" role="tablist" aria-label="Salas"></div>
       <button id="room-leave-btn" type="button" class="btn btn-ghost room-leave" disabled>Dejar sala</button>
     </nav>
+    <section id="music" class="music" aria-label="Música compartida" hidden>
+      <form id="music-form" class="music-load" autocomplete="off" novalidate>
+        <input id="music-url" class="input" type="url" inputmode="url" maxlength="2048"
+          placeholder="Pegá un link de YouTube o YouTube Music" aria-label="Link de YouTube">
+        <button id="music-load" type="submit" class="btn">Poner</button>
+      </form>
+      <div class="music-controls">
+        <button id="music-toggle" type="button" class="btn" aria-label="Reproducir para todos" disabled>▶</button>
+        <button id="music-skip" type="button" class="btn" aria-label="Saltar al siguiente" disabled>⏭</button>
+        <input id="music-seek" type="range" min="0" max="0" step="1" value="0" aria-label="Posición" disabled>
+        <span id="music-time" class="music-time">0:00</span>
+        <button id="music-mute" type="button" class="btn btn-ghost" aria-label="Silenciar" aria-pressed="false">🔊</button>
+        <input id="music-volume" type="range" min="0" max="100" value="100" aria-label="Volumen">
+      </div>
+      <div id="music-now" class="music-now">No suena nada. Pegá un link y tocá Poner.</div>
+      <ol id="music-queue" class="music-queue" aria-label="Cola" hidden></ol>
+      <div id="music-error" class="music-error" role="alert" hidden></div>
+      <div id="music-consent" class="music-consent" hidden>
+        <button id="music-listen" type="button" class="btn btn-accent">Escuchar</button>
+        <span>Tu navegador bloqueó el audio: apretá Escuchar.</span>
+      </div>
+      <div id="music-player" class="music-player" hidden></div>
+    </section>
     <div class="rule"></div>
 
     <div id="scroller" class="scroller" role="tabpanel"></div>
@@ -97,7 +126,7 @@
           <svg width="16" height="16" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M231.4,44.34a15.89,15.89,0,0,0-16.1-3.38L31.5,106.9a16,16,0,0,0-1.8,29.55l82.6,39.25,39.25,82.6A15.87,15.87,0,0,0,166.2,268h.6a15.88,15.88,0,0,0,14.4-11.1L235,72.4A15.89,15.89,0,0,0,231.4,44.34ZM166.5,251.9l-34.7-73a8,8,0,0,0-3.7-3.7l-73-34.7L218.3,57.7Z" transform="translate(0 -12)"/></svg>
         </button>
       </div>
-    </form></div><aside class="scrapbook"><div class="aside-label">✦ MI PERFIL </div><div class="profile-card"><div class="profile-art" aria-hidden="true">♡<span>✧</span></div><b id="profile-nick"></b><p>✿ vibecoder profesional ✿</p><span class="mood">● disponible</span></div><div class="sticky"><span>nota mental:</span><p>Los días son más lindos<br>cuando hay sobra<br>de tokens en claude.</p><i>♡</i></div><div class="mini-stamp">100% buenas prácticas<br>0% vibecodeo</div></aside>
+    </form></div><aside class="scrapbook"><div class="aside-label">✦ MI PERFIL </div><div class="profile-card"><div class="profile-art" aria-hidden="true"><img id="profile-avatar" class="profile-avatar" alt="" referrerpolicy="no-referrer" hidden>♡<span>✧</span></div><b id="profile-nick"></b><p>✿ vibecoder profesional ✿</p><span class="mood">● disponible</span></div><div class="sticky"><span>nota mental:</span><p>Los días son más lindos<br>cuando hay sobra<br>de tokens en claude.</p><i>♡</i></div><div class="mini-stamp">100% buenas prácticas<br>0% vibecodeo</div></aside>
   </section><div class="window-status"><span>✦ este texto sobra</span><span>este también</span></div>
 </div><footer class="desktop-footer"><span>✳ YA NO SÉ QUÉ MÁS PONER</span><span>* espirito de 1999. conexión de hoy xd</span><span>Hecho por luscript</span></footer>
 <script src="/app.js"></script>

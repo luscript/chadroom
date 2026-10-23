@@ -7,11 +7,16 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"chatroom/internal/chat"
 
@@ -37,13 +42,37 @@ var imageHosts = []string{
 	"media.tenor.com", "i.imgur.com",
 }
 
+const maxAvatarBytes = 512 // mirrored by MAX_AVATAR_BYTES in app.js
+
+// avatarPath mirrors IMAGE_PATH in app.js.
+var avatarPath = regexp.MustCompile(`(?i)\.(gif|webp|png|jpe?g)$`)
+
+// validAvatar accepts the same URLs the page renders inline (isAllowedImage): https, an exact
+// imageHosts host (so no port), no userinfo, no fragment, an image extension, at most
+// maxAvatarBytes (CHAT-28). The URL is relayed exactly as given; it is never rewritten.
+func validAvatar(raw string) bool {
+	if raw == "" || len(raw) > maxAvatarBytes || !utf8.ValidString(raw) || strings.Contains(raw, "#") ||
+		strings.ContainsFunc(raw, unicode.IsSpace) {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Opaque == "" && u.User == nil &&
+		slices.Contains(imageHosts, u.Host) && avatarPath.MatchString(u.EscapedPath())
+}
+
 // roomIDs is the fixed room set, in display order; the first is the default room.
-var roomIDs = []string{"general", "juegos", "musica"}
+var roomIDs = []string{"general", "juegos", musicRoom}
+
+// musicRoom is the room with the shared YouTube player (CHAT-30); mirrored by MUSIC_ROOM in app.js.
+const musicRoom = "musica"
+
+// youtubeEmbedHost is the only frame source: the player embed, which sets no cookies until played (SRV-05).
+const youtubeEmbedHost = "https://www.youtube-nocookie.com"
 
 var contentSecurityPolicy = buildCSP(imageHosts)
 
 // buildCSP renders the page's Content-Security-Policy: everything is same-origin
-// except the image hosts.
+// except the image hosts and the YouTube embed frame.
 func buildCSP(hosts []string) string {
 	img := []string{"img-src", "'self'"}
 	for _, h := range hosts {
@@ -55,6 +84,7 @@ func buildCSP(hosts []string) string {
 		"style-src 'self'",
 		strings.Join(img, " "),
 		"connect-src 'self'",
+		"frame-src " + youtubeEmbedHost,
 		"base-uri 'none'",
 		"form-action 'none'",
 		"frame-ancestors 'none'",
@@ -88,9 +118,13 @@ func serveAsset(contentType string, body []byte) gin.HandlerFunc {
 func newChatServer(allowedOrigins []string) *chat.Server {
 	rooms := make([]*chat.Room, len(roomIDs))
 	for i, id := range roomIDs {
-		rooms[i] = chat.NewRoom(id)
+		if id == musicRoom {
+			rooms[i] = chat.NewMusicRoom(id)
+		} else {
+			rooms[i] = chat.NewRoom(id)
+		}
 	}
-	return chat.NewServer(allowedOrigins, rooms...)
+	return chat.NewServer(allowedOrigins, validAvatar, rooms...)
 }
 
 // serveRooms returns the room list as {"rooms":[...]}.

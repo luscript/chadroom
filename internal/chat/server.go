@@ -18,13 +18,16 @@ type Server struct {
 	rooms          map[string]*Room
 	defaultRoom    *Room // first room passed to NewServer; used when ?room is missing or empty
 	allowedOrigins map[string]struct{}
+	validAvatar    func(string) bool // nil: every ?avatar is dropped
 	upgrader       websocket.Upgrader
 }
 
 // NewServer builds a Server over rooms. allowedOrigins lists extra origins
 // (e.g. "https://example.com") accepted besides same-host requests.
+// validAvatar reports whether a requested avatar URL may be shown to others; nil
+// disables avatars (CHAT-28). The chat package treats avatars as opaque strings.
 // It panics if rooms is empty or an id is empty or repeated (programmer error).
-func NewServer(allowedOrigins []string, rooms ...*Room) *Server {
+func NewServer(allowedOrigins []string, validAvatar func(string) bool, rooms ...*Room) *Server {
 	if len(rooms) == 0 {
 		panic("chat: NewServer needs at least one room")
 	}
@@ -32,6 +35,7 @@ func NewServer(allowedOrigins []string, rooms ...*Room) *Server {
 		rooms:          make(map[string]*Room, len(rooms)),
 		defaultRoom:    rooms[0],
 		allowedOrigins: make(map[string]struct{}, len(allowedOrigins)),
+		validAvatar:    validAvatar,
 	}
 	for _, r := range rooms {
 		if r.id == "" {
@@ -80,7 +84,11 @@ func (s *Server) HandleWebSocket(c *gin.Context) {
 		log.Println("Upgrade error:", err)
 		return
 	}
-	room.serveConn(conn, normalizeNickname(c.Query("nickname")))
+	avatar := c.Query("avatar")
+	if avatar != "" && (s.validAvatar == nil || !s.validAvatar(avatar)) {
+		avatar = "" // invalid or disabled: join without a picture, never reject (CHAT-28)
+	}
+	room.serveConn(conn, normalizeNickname(c.Query("nickname")), avatar)
 }
 
 // checkOrigin accepts same-host origins, requests without Origin (non-browser

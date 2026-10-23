@@ -9,10 +9,10 @@ independent hub, and every requirement in this spec applies **within one room** 
 client connection belongs to exactly one room, and a user is in several rooms by opening one
 connection per room (CHAT-20). Wire protocol: inbound frames (client → server) are UTF-8 text,
 either plain text containing only a room message or a JSON envelope for a room message, a
-direct message or a typing signal (CHAT-21); outbound frames (server → client) are JSON
-objects built only by the server: event envelopes `{"type","from","text","ts"}` (CHAT-10), the
+direct message, a typing signal or a music control (CHAT-21, CHAT-30); outbound frames (server → client) are JSON
+objects built only by the server: event envelopes `{"type","from","text","ts"}` with an optional `avatar` (CHAT-10, CHAT-28), the
 `users` (CHAT-17) and `history` (CHAT-18) snapshot frames, the `dm` and `dm_error` frames
-(CHAT-22, CHAT-23) and the `typing` frame (CHAT-26). Frames carry no room field; the
+(CHAT-22, CHAT-23) the `typing` frame (CHAT-26) and the `music` state frame (CHAT-30). Frames carry no room field; the
 connection identifies the room. Nicknames are normalized (CHAT-09) and unique
 case-insensitively within a room (CHAT-12).
 
@@ -247,21 +247,25 @@ The result is then made unique (CHAT-12).
 Every event frame the server sends to a client — `chat`, `join`, `leave` and `welcome` —
 MUST be a text frame containing a single JSON object with exactly these fields:
 
-| Field  | JSON type | Value |
-|--------|-----------|-------|
-| `type` | string    | one of `chat`, `join`, `leave`, `welcome` |
-| `from` | string    | the server-assigned nickname of the client the event is about |
-| `text` | string    | the message text for `chat`; the empty string for every other type |
-| `ts`   | number    | server time when the event was produced, as integer Unix milliseconds |
+| Field    | JSON type | Value |
+|----------|-----------|-------|
+| `type`   | string    | one of `chat`, `join`, `leave`, `welcome` |
+| `from`   | string    | the server-assigned nickname of the client the event is about |
+| `text`   | string    | the message text for `chat`; the empty string for every other type |
+| `ts`     | number    | server time when the event was produced, as integer Unix milliseconds |
+| `avatar` | string    | **optional**: present only on `chat`, `join` and `welcome`, and only when the client the event is about has a profile picture (CHAT-28); its value is that picture's URL |
 
-The only other data frames are the `users` (CHAT-17) and `history` (CHAT-18) snapshots and
-the `dm` (CHAT-22) and `dm_error` (CHAT-23) frames, whose shapes are defined there; each
-entry of `history.messages` is a `chat` envelope with exactly the fields above.
+`avatar` MUST NOT appear on `leave` envelopes, and MUST NOT appear with an empty value.
 
-The envelope MUST be produced only by the server. `from` MUST always be the nickname the
-server assigned to the originating connection and MUST NOT be taken from any client
-payload. Message text MUST be carried only in `text` and MUST NOT alter `type` or `from`,
-whatever characters it contains.
+The only other data frames are the `users` (CHAT-17) and `history` (CHAT-18) snapshots, the
+`dm` (CHAT-22) and `dm_error` (CHAT-23) frames, the `typing` frame (CHAT-26) and the `music`
+frame (CHAT-30), whose shapes are defined there; each entry of `history.messages` is a `chat`
+envelope with exactly the fields above.
+
+The envelope MUST be produced only by the server. `from` and `avatar` MUST always be the
+nickname and profile picture the server assigned to the originating connection and MUST NOT be
+taken from any message payload. Message text MUST be carried only in `text` and MUST NOT alter
+`type`, `from` or `avatar`, whatever characters it contains.
 
 #### Scenario: Chat envelope
 
@@ -290,6 +294,19 @@ whatever characters it contains.
 - GIVEN clients `A` and `B` are connected
 - WHEN `A` sends `say "hi" \ <b>` followed by a tab and a newline
 - THEN `B` receives a valid JSON frame whose decoded `text` equals the sent text exactly
+
+#### Scenario: Chat envelope carries the sender's avatar
+
+- GIVEN client `A` connected with a valid avatar `U` and client `B` connected without one
+- WHEN `A` sends `hola` and then `B` sends `chau`
+- THEN every client receives `type` = `chat`, `from` = `A`, `text` = `hola`, `avatar` = `U`
+- AND then `type` = `chat`, `from` = `B`, `text` = `chau` with no `avatar` field
+
+#### Scenario: Avatar cannot be forged in a message
+
+- GIVEN client `A` is connected without an avatar
+- WHEN `A` sends the inbound envelope `{"type":"chat","text":"hi","avatar":"https://i.imgur.com/x.png"}`
+- THEN the relayed `chat` envelope has no `avatar` field
 
 ### Requirement: CHAT-11 Welcome message
 
@@ -548,22 +565,24 @@ from the previous one (e.g. `Lucía (2)` while the server still holds the old co
 ### Requirement: CHAT-17 Online users list
 
 When a client registers, the server MUST send that client — and only that client — one
-`users` frame right after its `welcome` (CHAT-11). The frame is a JSON object with exactly
-these fields:
+`users` frame right after its `welcome` (CHAT-11). The frame is a JSON object with these
+fields:
 
-| Field   | JSON type        | Value |
-|---------|------------------|-------|
-| `type`  | string           | `users` |
-| `users` | array of strings | assigned nicknames of every registered client, including the newcomer |
-| `ts`    | number           | server time, integer Unix milliseconds |
+| Field     | JSON type        | Value |
+|-----------|------------------|-------|
+| `type`    | string           | `users` |
+| `users`   | array of strings | assigned nicknames of every registered client, including the newcomer |
+| `avatars` | object           | **optional**: maps the nickname of each registered client that has a profile picture (CHAT-28) to its URL; omitted when no registered client has one |
+| `ts`      | number           | server time, integer Unix milliseconds |
 
 `users` MUST be sorted case-insensitively and contain each registered client exactly once.
-After the snapshot, the list is kept current by `join` and `leave` envelopes (CHAT-02).
+Every key of `avatars` MUST appear in `users`. After the snapshot, the list is kept current by
+`join` and `leave` envelopes (CHAT-02).
 
 The chat page MUST show the number of connected users (`N en línea`) and, on request, the
-list of their nicknames, marking its own nickname with the same "vos" tag used for its own messages. It MUST replace its list with
-each `users` frame it receives, add a name on `join` and remove it on `leave`. Nicknames MUST
-be rendered as text.
+list of their nicknames, marking its own nickname with the same "vos" tag used for its own
+messages. It MUST replace its list with each `users` frame it receives, add a name on `join`
+and remove it on `leave`. Nicknames MUST be rendered as text.
 
 #### Scenario: Snapshot on join
 
@@ -590,6 +609,13 @@ be rendered as text.
 - WHEN `S` is dropped for a full outbound buffer
 - THEN `A` and `B` receive `type` = `leave`, `from` = `S`
 - AND `S` no longer appears in a later client's `users` snapshot
+
+#### Scenario: Snapshot includes avatars
+
+- GIVEN client `Ana` is connected with a valid avatar `U` and client `bob` without one
+- WHEN client `Carla` connects without an avatar
+- THEN `Carla` receives `type` = `users`, `users` = `["Ana", "bob", "Carla"]`,
+  `avatars` = `{"Ana": U}`
 
 ### Requirement: CHAT-18 Recent message history
 
@@ -798,13 +824,16 @@ inbound text frame as follows:
    typing signal** when `to` is a JSON string that is non-empty after nickname normalization
    steps 1–4 of CHAT-09, and **invalid** otherwise. An invalid typing signal MUST be discarded
    without any reply. The blank-text rule (CHAT-13) does not apply to typing signals.
+2a. Otherwise, if the frame decodes as a JSON object whose `type` is the string `music`, it is a
+   **music control** (CHAT-30). A music control MUST NEVER be treated as a room message: if it is
+   invalid, or the room has no shared player, it MUST be discarded without any reply.
 3. Otherwise, if the frame decodes as a JSON object whose `type` is the string `chat` and
    whose `text` is a JSON string, it is a **room message** with that `text`.
 4. Otherwise (not JSON, not an object, missing or unknown `type`, or a `chat` object whose
    `text` is not a string) it is a **room message** whose text is the whole frame, unchanged.
 
-Fields other than `type`, `to` and `text` MUST be ignored (`text` is also ignored in a typing
-signal). Room messages are relayed per CHAT-01. The blank-text rule (CHAT-13) applies to the
+Fields other than `type`, `to` and `text` (and `action`, `video` and `pos` in a music
+control) MUST be ignored (`text` is also ignored in a typing signal and a music control). Room messages are relayed per CHAT-01. The blank-text rule (CHAT-13) applies to the
 resulting `text` of room messages and direct messages.
 
 #### Scenario: Plain text stays room chat
@@ -854,6 +883,12 @@ resulting `text` of room messages and direct messages.
 - THEN `A` receives four `dm_error` frames with `reason` = `invalid` and `to` = `""`
 - AND `B` receives no frame
 - AND `A`'s connection remains open
+
+#### Scenario: Music control is never chat
+
+- GIVEN clients `A` and `B` are connected to a room **without** a shared player
+- WHEN `A` sends `{"type":"music","action":"play"}` and `{"type":"music","action":"bogus"}`
+- THEN neither `A` nor `B` receives any frame
 
 ### Requirement: CHAT-22 Direct message delivery
 
@@ -1158,3 +1193,245 @@ The chat page MUST show who is typing in the visible pane and signal its own typ
 - GIVEN the room pane shows typists `A` and `B`
 - WHEN a room `typing` from `C` arrives
 - THEN the indicator reads `Varias personas están escribiendo…`
+
+### Requirement: CHAT-28 Profile picture
+
+A client MAY request a profile picture with the `avatar` query parameter of `GET /ws`. The
+server MUST accept it only when it is an **allowed avatar URL**:
+
+- at most 512 bytes;
+- an absolute URL whose scheme is `https`;
+- whose host is exactly one of the hosts on the image allowlist (CHAT-15), with no port and no
+  user information;
+- with no fragment;
+- whose path ends in `.gif`, `.webp`, `.png`, `.jpg` or `.jpeg` (case-insensitive; a query
+  string is allowed).
+
+An absent, empty or not allowed value MUST be ignored: the client is registered normally,
+without a profile picture, and the connection MUST NOT be rejected because of it. The accepted
+URL MUST be relayed exactly as received.
+
+The profile picture belongs to the connection: it MUST be fixed from registration until the
+connection ends and MUST NOT be changed by any inbound frame. The server MUST include it as
+`avatar` in that client's `welcome`, `join` and `chat` envelopes (CHAT-10) and in `users`
+snapshots (CHAT-17). A `chat` envelope kept in history (CHAT-18) MUST keep the `avatar` it
+was relayed with.
+
+#### Scenario: Valid avatar is announced
+
+- GIVEN client `A` is connected
+- WHEN client `B` connects with `?nickname=B&avatar=https://i.imgur.com/abc.png`
+- THEN `B`'s `welcome` has `avatar` = `https://i.imgur.com/abc.png`
+- AND `A` receives `type` = `join`, `from` = `B`, `avatar` = `https://i.imgur.com/abc.png`
+
+#### Scenario: Invalid avatar is ignored
+
+- GIVEN the server is running
+- WHEN a client connects with an `avatar` of `http://i.imgur.com/a.png`,
+  `https://evil.example/a.png`, `https://i.imgur.com.evil.example/a.png`,
+  `https://i.imgur.com:8443/a.png`, `https://u@i.imgur.com/a.png`,
+  `https://i.imgur.com/a.png#x`, `https://i.imgur.com/a.svg`, `javascript:alert(1)` or a
+  513-byte allowlisted URL
+- THEN the upgrade succeeds
+- AND its `welcome`, the `join` others receive and its `chat` envelopes carry no `avatar`
+
+#### Scenario: History keeps the avatar
+
+- GIVEN client `A` with avatar `U` sends `hola` and disconnects
+- WHEN client `C` connects
+- THEN the `history` entry for `hola` has `from` = `A` and `avatar` = `U`
+
+### Requirement: CHAT-29 Chat page profile pictures
+
+The join form MUST offer an optional profile-picture URL field. The page MUST check it with
+the same rule as inline images (CHAT-15) before joining; if it is not empty and fails the
+check, the page MUST show an error and MUST NOT join. A valid value MUST be sent as `avatar`
+on every room connection and reconnection. The page MAY remember the last value in browser
+storage.
+
+The page MUST show a user's profile picture, when known, in place of the initial-letter avatar
+next to that user's messages (rooms, history and direct messages) and next to the user's name
+in the online list, and MUST show its own picture in the profile area. The page MUST learn
+pictures from `welcome`, `users`, `join` and `chat` frames, MUST forget a user's picture on
+`leave`, and MUST use for a direct-message peer the picture from the room's online list.
+
+Before rendering any picture URL received from the server, the page MUST check it with the
+CHAT-15 rule and MUST NOT request it if the check fails. Pictures MUST be loaded only by
+setting an image's source (never as markup or CSS), with no referrer, and MUST be decorative
+(empty alternative text). If a picture fails to load, the page MUST show the initial-letter
+avatar instead.
+
+#### Scenario: Avatar next to messages and in the list
+
+- GIVEN the page is connected and `Ana` (avatar `U`) is online
+- WHEN `Ana` sends `hola`
+- THEN the message shows an image loaded from `U` instead of the letter `A`
+- AND the online list shows the same image before `Ana`
+
+#### Scenario: Invalid field blocks joining
+
+- GIVEN the join form
+- WHEN the user types a nickname and the picture URL `https://evil.example/a.png` and submits
+- THEN the page shows an error and opens no connection
+
+#### Scenario: Broken picture falls back
+
+- GIVEN `Ana`'s picture URL returns 404
+- WHEN her message is rendered
+- THEN the initial-letter avatar `A` is shown
+
+#### Scenario: Server value failing the page check is not requested
+
+- GIVEN the page receives a `chat` envelope with `avatar` = `https://evil.example/a.png`
+- WHEN it renders the message
+- THEN it shows the initial-letter avatar and requests nothing from `evil.example`
+
+### Requirement: CHAT-30 Shared music player
+
+A room MAY have a **shared player** (only `musica` does; SRV-06). In a room with a shared
+player, the server MUST keep the **music state**, owned by the room:
+
+| Field     | Meaning |
+|-----------|---------|
+| `video`   | the loaded YouTube video id, or none |
+| `playing` | whether playback is running |
+| position  | milliseconds into the video; while `playing` it advances with server time |
+| `by`      | nickname of the client whose control produced the current state |
+
+Initially no video is loaded. A **music control** (CHAT-21) is a JSON object
+`{"type":"music","action":A,…}` and is **valid** only when:
+
+| `action` | Other fields | Effect on the state |
+|----------|--------------|---------------------|
+| `load`   | `video`: a string matching `^[A-Za-z0-9_-]{11}$` | `video` = it, position 0, `playing` = true |
+| `play`   | — | `playing` = true from the current position (requires a loaded video) |
+| `pause`  | — | `playing` = false at the current position (requires a loaded video) |
+| `seek`   | `pos`: an integer, 0 ≤ `pos` ≤ 86 400 000 | position = `pos`, `playing` unchanged (requires a loaded video) |
+
+Any other control — unknown or missing `action`, wrong field types, an invalid `video`, `pos`
+out of range or not an integer, or `play`/`pause`/`seek` with no video loaded — MUST be
+discarded without any reply. Each connection MAY have at most 4 music controls accepted per
+second; the server MUST discard the excess without any reply.
+
+After each accepted control, `by` becomes the sender's nickname and the server MUST send every
+registered client of the room (including the sender) a `music` frame, a JSON object with exactly
+these fields:
+
+| Field     | JSON type | Value |
+|-----------|-----------|-------|
+| `type`    | string    | `music` |
+| `video`   | string    | the loaded video id |
+| `playing` | boolean   | the state's `playing` |
+| `pos`     | number    | the position, in integer milliseconds, at the moment the frame is produced |
+| `by`      | string    | the state's `by` |
+| `ts`      | number    | server time, integer Unix milliseconds |
+
+A client that registers while a video is loaded MUST receive one `music` frame with the current
+state right after its `history` frame (CHAT-11 order: `welcome`, `users`, `history`, `music`).
+No `music` frame is sent while no video is loaded. `music` frames MUST NOT be kept in history
+(CHAT-18), and a client that is too slow to receive one is handled like any other must-have
+frame (CHAT-03).
+
+When the last client leaves a room while `playing` is true, the server MUST set `playing` to
+false at the current position. In a room without a shared player no `music` frame is ever sent.
+
+#### Scenario: Load is broadcast
+
+- GIVEN clients `A` and `B` are in `musica`
+- WHEN `A` sends `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`
+- THEN `A` and `B` receive `type` = `music`, `video` = `dQw4w9WgXcQ`, `playing` = true,
+  `by` = `A`, and `pos` between 0 and the elapsed time
+
+#### Scenario: Pause and seek keep the position
+
+- GIVEN a video loaded and playing in `musica`
+- WHEN `B` sends `pause`, then `seek` with `pos` = 60000
+- THEN every client receives `playing` = false, `by` = `B`, and then `playing` = false,
+  `pos` = 60000
+
+#### Scenario: Newcomer gets the state
+
+- GIVEN a video playing in `musica` for about 5 s
+- WHEN `C` joins `musica`
+- THEN its fourth data frame is `type` = `music` with that `video`, `playing` = true and `pos`
+  of about 5000
+
+#### Scenario: Invalid controls are discarded
+
+- GIVEN clients `A` and `B` in `musica`, no video loaded
+- WHEN `A` sends `play`, `seek` with `pos` = 5, `load` with `video` = `abc`, `load` with
+  `video` = `https://youtu.be/dQw4w9WgXcQ`, `seek` with `pos` = -1 or 1.5, and
+  `{"type":"music"}`
+- THEN no client receives any frame
+
+#### Scenario: Flood is limited
+
+- GIVEN a video loaded in `musica`
+- WHEN `A` sends 20 `play` controls within 100 ms
+- THEN clients receive at most 4 `music` frames caused by them
+
+#### Scenario: Empty room pauses
+
+- GIVEN a video playing in `musica` and `A` is the only client
+- WHEN `A` leaves and `B` joins 10 s later
+- THEN `B` receives `playing` = false with `pos` about the position at the time `A` left
+
+### Requirement: CHAT-31 Chat page shared player
+
+The chat page MUST show the shared player only while the active pane belongs to `musica` (the
+room or one of its direct-message conversations). The player MUST let the user paste a YouTube
+or YouTube Music link and put it on for everyone, play/pause for everyone, and seek for everyone;
+it MUST show the current position, who made the last change (`by`, as text), and offer local
+volume/mute (not shared).
+
+The page MUST accept links of the forms `https://www.youtube.com/watch?v=ID`,
+`https://youtube.com/watch?v=ID`, `https://m.youtube.com/watch?v=ID`,
+`https://music.youtube.com/watch?v=ID`, `https://youtu.be/ID`,
+`https://www.youtube.com/shorts/ID`, `https://youtube.com/shorts/ID` and
+`https://m.youtube.com/shorts/ID` (extra query parameters allowed), where `ID` matches
+`^[A-Za-z0-9_-]{11}$`, and MUST send only the id (`load`). Anything else MUST show an error and
+send nothing.
+
+The video MUST play in an embedded `https://www.youtube-nocookie.com/embed/ID` frame with
+YouTube's own controls disabled, controlled only through cross-document messages; the page MUST
+NOT load any YouTube script. Messages from the frame MUST be accepted only when they come from
+the `https://www.youtube-nocookie.com` origin and from that frame. The page MUST NOT create the
+frame (nor contact YouTube) until the user presses an explicit **"Escuchar"** control.
+
+On each `music` frame the page MUST follow the state: load the video if it changed, play or
+pause, and seek when its local position differs from the expected one by more than 2 seconds
+(expected = `pos` plus the time since the frame arrived while `playing`). Local player events
+MUST NOT be sent back as controls. Leaving `musica` MUST pause local playback without sending a
+control; returning MUST re-sync. If the video cannot be embedded or played, the page MUST show a
+short message.
+
+#### Scenario: Everyone hears the same
+
+- GIVEN two browsers in `musica` that pressed "Escuchar"
+- WHEN one pastes `https://music.youtube.com/watch?v=dQw4w9WgXcQ&si=x` and presses "Poner"
+- THEN both play that video from the start, and both show the first user as the author of the
+  last change
+
+#### Scenario: Global pause
+
+- GIVEN both browsers are playing
+- WHEN one presses pause
+- THEN both pause within a second, at about the same position
+
+#### Scenario: Late joiner syncs
+
+- GIVEN a video has been playing for 1 minute
+- WHEN a third browser opens `musica` and presses "Escuchar"
+- THEN it starts at about 1:00
+
+#### Scenario: Invalid link
+
+- GIVEN the player
+- WHEN the user pastes `https://evil.example/watch?v=dQw4w9WgXcQ` and presses "Poner"
+- THEN the page shows an error and sends nothing
+
+#### Scenario: No YouTube before consent
+
+- GIVEN a video is playing in `musica`
+- WHEN a user opens `musica` and does not press "Escuchar"
+- THEN the page makes no request to any YouTube host
