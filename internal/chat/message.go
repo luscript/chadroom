@@ -23,21 +23,24 @@ const (
 	reasonOffline = "offline"
 )
 
-// message is the outbound JSON envelope. Field order is the JSON order and
-// there is no omitempty: every chat/join/leave/welcome frame carries all four
-// fields. users and history frames have their own shapes below.
+// message is the outbound JSON envelope. Field order is the JSON order. type, from,
+// text and ts are always present; avatar only when the sender has one (welcome, join,
+// chat and history entries, never leave), so frames without a picture are unchanged
+// (CHAT-28). users and history frames have their own shapes below.
 type message struct {
-	Type string `json:"type"` // chat | join | leave | welcome
-	From string `json:"from"`
-	Text string `json:"text"` // "" for everything but chat
-	TS   int64  `json:"ts"`   // unix milliseconds
+	Type   string `json:"type"` // chat | join | leave | welcome
+	From   string `json:"from"`
+	Text   string `json:"text"` // "" for everything but chat
+	TS     int64  `json:"ts"`   // unix milliseconds
+	Avatar string `json:"avatar,omitempty"`
 }
 
 // usersFrame is the private snapshot of connected nicknames sent on join.
 type usersFrame struct {
-	Type  string   `json:"type"`  // always "users"
-	Users []string `json:"users"` // never nil: [] when empty (unreachable: includes the newcomer)
-	TS    int64    `json:"ts"`
+	Type    string            `json:"type"`              // always "users"
+	Users   []string          `json:"users"`             // never nil: [] when empty (unreachable: includes the newcomer)
+	Avatars map[string]string `json:"avatars,omitempty"` // nick -> url, only members with one (CHAT-28)
+	TS      int64             `json:"ts"`
 }
 
 // historyFrame is the private replay of recent chat messages sent on join.

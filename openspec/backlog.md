@@ -60,17 +60,20 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       hosts, no inline code); same Go/`app.js` host-list coherence test as `imageHosts`;
       external media leaks viewers' IPs, same as images.
 
-## `profile-picture`
-- [ ] Let each user set a profile picture, shown next to their messages and in the online
-      user list.
-- [ ] Open decisions for the design phase: source (image URL from the allowlisted hosts,
-      or file upload); whether it persists (no accounts today, so likely per session /
-      per connection); how other clients learn it (new field in the join/`users`/chat
-      envelopes, handled by `Room.Run`).
-- [ ] Constraints to respect: reuse `imageHosts` / `IMAGE_HOSTS` allowlist and CSP `img-src`
-      (URLs leak viewers' IPs); uploads would need size/type validation, storage and
-      rate limiting (pairs with `rate-limiting`); render with `textContent`/`img.src`,
-      never inline code.
+## `profile-picture` — done, archived 2026-10-23 (manual UI check pending)
+- [x] Profile picture next to messages and in the online list (allowlisted image URL at join,
+      per connection; `avatar` / `avatars` fields).
+
+## `profile-picture-polish` (deferred from `profile-picture` verify — low priority)
+- [ ] Manual UI checklist from `changes/archive/2026-10-23-profile-picture/design.md`.
+- [ ] Avatar URL repeated in every chat/history frame and per member in `users` (≤512 B each):
+      output amplification with no client cap. Belongs with `rate-limiting` (max-clients cap);
+      optionally drop it from chat frames and resolve from `users`.
+- [ ] Copying someone's picture + look-alike nickname = cosmetic impersonation (same class as
+      `nickname-polish` M1).
+- [ ] gin access log records the `/ws` query (nickname + avatar); strip the query in the logger
+      (same fix as `gif-picker-polish`).
+- [ ] Change the picture mid-session (today: leave and join again); avatars on DM tabs.
 
 ## `deps-cleanup`
 - [ ] #17 `go mod tidy` (gin and gorilla are marked `// indirect`).

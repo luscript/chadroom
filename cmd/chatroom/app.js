@@ -1,6 +1,8 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const MAX_MESSAGE_BYTES = 4096; // defaultMaxMessageSize in internal/chat/room.go
+  const MAX_AVATAR_BYTES = 512; // mirrors maxAvatarBytes in cmd/chatroom/main.go
+  const AVATAR_KEY = 'chadroom.avatar'; // localStorage; best effort
 
   const CATS = [
     { name: 'Caras', icon: '😀', list: '😀 😃 😄 😁 😆 😅 😂 🤣 🙂 😉 😊 😇 🥰 😍 🤩 😘 😋 😛 😜 🤪 🤔 🤨 😐 😑 😶 🙄 😏 😴 😮 😲 😢 😭 😤 😡 🥳 😎 🤓 🥺 😱 🤯 😬 🫠 🤗 🫡' },
@@ -25,6 +27,8 @@
   const rooms = new Map(); // id -> room, in /rooms order
   let active = null; // the room whose pane and header are shown
   let requestedNick = ''; // what the user typed; re-sent by every room's socket
+  let requestedAvatar = ''; // validated join value ('' = none); re-sent by every room's socket
+  let profileUrl = ''; // what #profile-avatar currently shows
 
   // Direct messages. A conversation rides its room's socket; the page is the only place
   // its transcript lives. Nicknames go into the DOM only as text, never into ids or classes.
@@ -47,6 +51,50 @@
       url.port === '' && url.username === '' && url.password === '' &&
       url.hash === '' && IMAGE_PATH.test(url.pathname);
   }
+
+  // '' (no picture) or an allowed image URL that fits the server's byte limit.
+  // The server compares the host exactly (CHAT-28) while new URL() normalizes case, default port
+  // and IDN, so the raw text must also start with the URL's own https://hostname/.
+  function validAvatarInput(v) {
+    if (v === '') return true;
+    if (!isAllowedImage(v) || new TextEncoder().encode(v).length > MAX_AVATAR_BYTES) return false;
+    return v.startsWith('https://' + new URL(v).hostname + '/');
+  }
+
+  function letterAvatar(name) {
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.setAttribute('aria-hidden', 'true');
+    avatar.textContent = (Array.from(name)[0] || '?').toUpperCase();
+    return avatar;
+  }
+
+  // The picture when url is an allowed image, else the letter. The server validates too, but the
+  // page never requests a URL it has not checked itself.
+  function avatarEl(name, url) {
+    if (typeof url !== 'string' || !isAllowedImage(url)) return letterAvatar(name);
+    const img = document.createElement('img');
+    img.className = 'avatar';
+    img.alt = '';
+    img.setAttribute('aria-hidden', 'true');
+    img.referrerPolicy = 'no-referrer';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.addEventListener('error', () => img.replaceWith(letterAvatar(name)));
+    img.src = url;
+    return img;
+  }
+
+  // The "MI PERFIL" card shows the active room's own picture; on error or none, the placeholder stays.
+  function renderProfile() {
+    const url = (active && active.avatars.get(active.myName)) || '';
+    if (url === profileUrl) return;
+    profileUrl = url;
+    const img = $('profile-avatar');
+    img.hidden = !url;
+    if (url) img.src = url; else img.removeAttribute('src');
+  }
+  $('profile-avatar').addEventListener('error', () => { $('profile-avatar').hidden = true; });
 
   // — rooms —
   // The server's room list is the single source of truth. Ids end up in element ids and
@@ -90,6 +138,7 @@
       id, tab, unreadEl, list,
       joined: false, ws: null, retryTimer: null, attempt: 0, outage: false,
       status: 'connecting', myName: '', users: new Set(), lastAuthor: null, unread: 0,
+      avatars: new Map(), // nick -> image url, only for members with a picture
       typing: new Map(), // nick -> timeout id of who is typing here now
     };
     tab.addEventListener('click', () => {
@@ -225,6 +274,7 @@
     room.joined = true;
     room.list.replaceChildren();
     room.users = new Set();
+    room.avatars = new Map();
     room.myName = '';
     room.lastAuthor = null;
     room.attempt = 0;
@@ -255,6 +305,7 @@
     shown.unread = 0;
     renderPaneTab(shown);
     renderUsers();
+    renderProfile();
     scrollToBottom();
     updateLeaveBtn();
     renderTyping();
@@ -269,6 +320,7 @@
     removeConversations(room);
     room.list.replaceChildren();
     room.users = new Set();
+    room.avatars = new Map();
     room.myName = '';
     room.lastAuthor = null;
     room.unread = 0;
@@ -278,14 +330,31 @@
 
   // — join —
   const nickInput = $('nick');
+  const avatarInput = $('avatar-url');
+  try {
+    const saved = localStorage.getItem(AVATAR_KEY);
+    if (typeof saved === 'string') avatarInput.value = saved;
+  } catch { /* storage blocked: start empty */ }
   const roomsReady = loadRooms();
   roomsReady.catch(() => {}); // handled on submit; avoids an unhandled rejection
   let joining = false;
   nickInput.addEventListener('input', () => { $('join-btn').disabled = !nickInput.value.trim(); });
+  avatarInput.addEventListener('input', () => {
+    avatarInput.removeAttribute('aria-invalid');
+    $('join-error').hidden = true;
+  });
   $('join-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const nick = nickInput.value.trim();
     if (!nick || joining) return;
+    const avatar = avatarInput.value.trim();
+    if (!validAvatarInput(avatar)) {
+      $('join-error').textContent = 'La foto tiene que ser un link https a una imagen (.gif, .png, .jpg o .webp) de Giphy, Tenor o Imgur.';
+      $('join-error').hidden = false;
+      avatarInput.setAttribute('aria-invalid', 'true');
+      avatarInput.focus();
+      return;
+    }
     joining = true;
     try {
       if (rooms.size === 0) {
@@ -303,11 +372,15 @@
       joining = false;
     }
     $('join-error').hidden = true;
-    enterChat(nick);
+    try {
+      if (avatar) localStorage.setItem(AVATAR_KEY, avatar); else localStorage.removeItem(AVATAR_KEY);
+    } catch { /* storage blocked: the picture just isn't remembered */ }
+    enterChat(nick, avatar);
   });
 
-  function enterChat(nick) {
+  function enterChat(nick, avatar) {
     requestedNick = nick;
+    requestedAvatar = avatar;
     const first = rooms.values().next().value;
     $('join-view').hidden = true;
     $('chat-view').hidden = false;
@@ -321,7 +394,8 @@
     room.retryTimer = null;
     const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
     const socket = new WebSocket(scheme + location.host + '/ws?room=' + encodeURIComponent(room.id) +
-      '&nickname=' + encodeURIComponent(requestedNick));
+      '&nickname=' + encodeURIComponent(requestedNick) +
+      (requestedAvatar ? '&avatar=' + encodeURIComponent(requestedAvatar) : ''));
     room.ws = socket;
     socket.onmessage = (e) => {
       if (room.ws !== socket) return; // late frame from a socket the user already left
@@ -403,7 +477,13 @@
     if (msg.type === 'users') {
       if (Array.isArray(msg.users)) {
         room.users = new Set(msg.users.filter((n) => typeof n === 'string'));
-        if (room === active) renderUsers();
+        room.avatars = new Map();
+        if (msg.avatars && typeof msg.avatars === 'object' && !Array.isArray(msg.avatars)) {
+          for (const [nick, url] of Object.entries(msg.avatars)) {
+            if (room.users.has(nick) && typeof url === 'string' && isAllowedImage(url)) room.avatars.set(nick, url);
+          }
+        }
+        if (room === active) { renderUsers(); renderProfile(); }
       }
       return;
     }
@@ -421,11 +501,14 @@
     switch (msg.type) {
       case 'welcome':
         room.myName = msg.from;
+        if (typeof msg.avatar === 'string' && isAllowedImage(msg.avatar)) room.avatars.set(msg.from, msg.avatar);
+        else room.avatars.delete(msg.from);
         if (room === active) {
           $('me').textContent = room.myName;
           $('profile-nick').textContent = room.myName;
           $('me').title = room.myName;
           renderUsers();
+          renderProfile();
         }
         room.attempt = 0;
         setStatus(room, 'online');
@@ -433,7 +516,7 @@
       case 'chat':
         if (typeof msg.text === 'string') {
           clearTyping(room, msg.from);
-          addChat(room, msg.from, msg.text, msg.ts);
+          addChat(room, msg.from, msg.text, msg.ts, msg.avatar);
           if (room !== current() && msg.from !== room.myName) bumpUnread(room);
         }
         break;
@@ -445,7 +528,7 @@
         const conv = conversations.get(convKey(room, peer)) || createConversation(room, peer);
         if (!conv.open) reopenConversation(conv);
         if (!own) clearTyping(conv, msg.from);
-        addChat(conv, msg.from, msg.text, msg.ts);
+        addChat(conv, msg.from, msg.text, msg.ts, room.avatars.get(msg.from));
         if (conv !== current() && !own) bumpUnread(conv);
         break;
       }
@@ -463,11 +546,15 @@
       }
       case 'join':
         room.users.add(msg.from);
+        // A reused nickname must not inherit the previous owner's picture.
+        if (typeof msg.avatar === 'string' && isAllowedImage(msg.avatar)) room.avatars.set(msg.from, msg.avatar);
+        else room.avatars.delete(msg.from);
         if (room === active) renderUsers();
         addSystem(room, msg.from + ' se unió 🎉');
         break;
       case 'leave':
         room.users.delete(msg.from);
+        room.avatars.delete(msg.from);
         clearTyping(room, msg.from);
         if (room === active) renderUsers();
         addSystem(room, msg.from + ' salió 👋');
@@ -534,7 +621,7 @@
       room.lastAuthor = null;
       for (const m of messages) {
         if (m && m.type === 'chat' && typeof m.from === 'string' && typeof m.text === 'string') {
-          addChat(room, m.from, m.text, m.ts);
+          addChat(room, m.from, m.text, m.ts, m.avatar);
         }
       }
     } finally {
@@ -556,7 +643,7 @@
       const li = document.createElement('li');
       const label = document.createElement('span');
       label.textContent = name;
-      li.append(label);
+      li.append(avatarEl(name, room.avatars.get(name)), label);
       if (name === room.myName) {
         const tag = document.createElement('span');
         tag.className = 'tag tag-accent';
@@ -584,7 +671,7 @@
     append(pane, li);
   }
 
-  function addChat(pane, author, text, ts) {
+  function addChat(pane, author, text, ts, avatarUrl) {
     const own = author === ownerRoom(pane).myName;
     const showHead = author !== pane.lastAuthor;
     pane.lastAuthor = author;
@@ -598,11 +685,7 @@
     body.className = 'msg-body';
 
     if (showHead) {
-      const avatar = document.createElement('div');
-      avatar.className = 'avatar';
-      avatar.setAttribute('aria-hidden', 'true');
-      avatar.textContent = (Array.from(author)[0] || '?').toUpperCase();
-      slot.append(avatar);
+      slot.append(avatarEl(author, avatarUrl));
 
       const head = document.createElement('div');
       head.className = 'msg-head';

@@ -7,8 +7,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -449,5 +451,95 @@ func TestIndexHasGifPicker(t *testing.T) {
 	paste := strings.Index(html, `id="gif-url"`)
 	if box < 0 || paste < 0 || box >= paste {
 		t.Errorf(`id="gif-search-box" must come before id="gif-url" (box=%d url=%d)`, box, paste)
+	}
+}
+
+// CHAT-28: validAvatar gives the same verdict as the page's isAllowedImage.
+func TestValidAvatar(t *testing.T) {
+	var accept []string
+	for _, h := range imageHosts {
+		for _, ext := range []string{".png", ".JPG", ".jpeg", ".webp", ".gif"} {
+			accept = append(accept, "https://"+h+"/a/b"+ext)
+		}
+		accept = append(accept, "https://"+h+"/a.png?x=1&y=2")
+	}
+	pad := func(n int) string { // an imgur URL of exactly n bytes
+		const base = "https://i.imgur.com/"
+		return base + strings.Repeat("a", n-len(base)-len(".png")) + ".png"
+	}
+	accept = append(accept, pad(maxAvatarBytes))
+	for _, u := range accept {
+		if !validAvatar(u) {
+			t.Errorf("validAvatar(%q) = false, want true", u)
+		}
+	}
+
+	reject := []string{
+		"", "http://i.imgur.com/a.png", "/a.png", "https://i.imgur.com:443/a.png", "https://i.imgur.com:/a.png",
+		"https://I.IMGUR.COM/a.png", "https://user@i.imgur.com/a.png", `https://evil.com\@i.imgur.com/a.png`,
+		"https://evil.com/a.png", "https://i.imgur.com/a.mp4", "https://i.imgur.com/a.png#x",
+		"https://i.imgur.com/a.png#", "https://i.imgur.com/a b.png", "https://i.imgur.com/a\t.png",
+		"https://i.imgur.com/a%2Epng", "javascript:alert(1)", "https:i.imgur.com/a.png",
+		"https://i.imgur.com/\xff.png", "https://i.imgur.com.evil.example/a.png",
+		pad(maxAvatarBytes + 1),
+	}
+	for _, u := range reject {
+		if validAvatar(u) {
+			t.Errorf("validAvatar(%q) = true, want false", u)
+		}
+	}
+}
+
+// avatarWelcome dials /ws with ?avatar and returns the raw welcome frame's fields.
+func avatarWelcome(t *testing.T, ts *httptest.Server, avatar string) map[string]json.RawMessage {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?nickname=A&avatar=" + url.QueryEscape(avatar)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{ts.URL}})
+	if err != nil {
+		t.Fatalf("dial: %v (resp %v)", err, resp)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("welcome %q: %v", data, err)
+	}
+	return fields
+}
+
+// CHAT-28: newChatServer injects validAvatar into the chat server.
+func TestWebSocketAvatarWiring(t *testing.T) {
+	ts := newTestServer(t)
+	const good = "https://i.imgur.com/a.png"
+	var got string
+	if err := json.Unmarshal(avatarWelcome(t, ts, good)["avatar"], &got); err != nil || got != good {
+		t.Fatalf("welcome avatar = %q (err %v), want %q", got, err, good)
+	}
+	if _, ok := avatarWelcome(t, ts, "https://evil.com/a.png")["avatar"]; ok {
+		t.Fatal("welcome carries an avatar for a host outside imageHosts")
+	}
+}
+
+// The join form must offer the avatar field (mirrors maxAvatarBytes) and the profile card its image.
+func TestIndexHasAvatarField(t *testing.T) {
+	html := string(indexHTML)
+	nick := strings.Index(html, `id="nick"`)
+	avatar := strings.Index(html, `id="avatar-url"`)
+	if nick < 0 || avatar < 0 || nick >= avatar {
+		t.Fatalf(`id="avatar-url" must come after id="nick" (nick=%d avatar=%d)`, nick, avatar)
+	}
+	start := strings.LastIndex(html[:avatar], "<")
+	tag := html[start : avatar+strings.Index(html[avatar:], ">")]
+	for _, want := range []string{`type="url"`, `maxlength="` + strconv.Itoa(maxAvatarBytes) + `"`} {
+		if !strings.Contains(tag, want) {
+			t.Errorf("#avatar-url start tag missing %s: %s", want, tag)
+		}
+	}
+	if !strings.Contains(html, `id="profile-avatar"`) {
+		t.Error(`index.html missing id="profile-avatar"`)
 	}
 }

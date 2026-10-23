@@ -7,11 +7,16 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"chatroom/internal/chat"
 
@@ -35,6 +40,24 @@ var imageHosts = []string{
 	"media.giphy.com", "media0.giphy.com", "media1.giphy.com", "media2.giphy.com",
 	"media3.giphy.com", "media4.giphy.com", "i.giphy.com",
 	"media.tenor.com", "i.imgur.com",
+}
+
+const maxAvatarBytes = 512 // mirrored by MAX_AVATAR_BYTES in app.js
+
+// avatarPath mirrors IMAGE_PATH in app.js.
+var avatarPath = regexp.MustCompile(`(?i)\.(gif|webp|png|jpe?g)$`)
+
+// validAvatar accepts the same URLs the page renders inline (isAllowedImage): https, an exact
+// imageHosts host (so no port), no userinfo, no fragment, an image extension, at most
+// maxAvatarBytes (CHAT-28). The URL is relayed exactly as given; it is never rewritten.
+func validAvatar(raw string) bool {
+	if raw == "" || len(raw) > maxAvatarBytes || !utf8.ValidString(raw) || strings.Contains(raw, "#") ||
+		strings.ContainsFunc(raw, unicode.IsSpace) {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Opaque == "" && u.User == nil &&
+		slices.Contains(imageHosts, u.Host) && avatarPath.MatchString(u.EscapedPath())
 }
 
 // roomIDs is the fixed room set, in display order; the first is the default room.
@@ -90,7 +113,7 @@ func newChatServer(allowedOrigins []string) *chat.Server {
 	for i, id := range roomIDs {
 		rooms[i] = chat.NewRoom(id)
 	}
-	return chat.NewServer(allowedOrigins, rooms...)
+	return chat.NewServer(allowedOrigins, validAvatar, rooms...)
 }
 
 // serveRooms returns the room list as {"rooms":[...]}.

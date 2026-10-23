@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -1409,4 +1410,179 @@ func TestTypingNotLogged(t *testing.T) {
 	if buf.String() != "" {
 		t.Fatalf("typing logged: %s", buf.String())
 	}
+}
+
+// avatarClient is newTestClient with an avatar; the hub treats it as an opaque string.
+func avatarClient(nick, avatar string) *Client {
+	c := newTestClient(nick, 16)
+	c.avatar = avatar
+	return c
+}
+
+// expectAvatarFrame requires the next frame on c to carry exactly keys and returns the raw fields.
+func expectAvatarFrame(t *testing.T, c *Client, keys ...string) map[string]json.RawMessage {
+	t.Helper()
+	return exactFields(t, nextRaw(t, c), keys...)
+}
+
+// CHAT-28: welcome and join carry the avatar only when the client has one.
+func TestAvatarOnWelcomeAndJoin(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs := newTestClient("obs", 16)
+	joinAll(t, cr, obs)
+
+	a := avatarClient("a", "pic-a")
+	register(t, cr, a)
+	w := expectAvatarFrame(t, a, "type", "from", "text", "ts", "avatar")
+	if string(w["avatar"]) != `"pic-a"` {
+		t.Fatalf("welcome avatar = %s", w["avatar"])
+	}
+	exactFields(t, nextRaw(t, a), "type", "users", "avatars", "ts")
+	decodeHistory(t, nextRaw(t, a))
+	j := exactFields(t, nextRaw(t, a), "type", "from", "text", "ts", "avatar")
+	if string(j["avatar"]) != `"pic-a"` || string(j["type"]) != `"join"` {
+		t.Fatalf("own join = %v", j)
+	}
+	j = exactFields(t, nextRaw(t, obs), "type", "from", "text", "ts", "avatar")
+	if string(j["avatar"]) != `"pic-a"` || string(j["type"]) != `"join"` {
+		t.Fatalf("join seen by obs = %v", j)
+	}
+
+	b := newTestClient("b", 16)
+	register(t, cr, b)
+	if w := next(t, b); w.Type != typeWelcome || w.From != "b" { // decode: exactly 4 fields, no avatar
+		t.Fatalf("got %+v, want welcome b", w)
+	}
+	skip(t, b, 2) // users (lists a's avatar) and history
+	expect(t, b, typeJoin, "b", "")
+}
+
+// CHAT-28: the users frame maps only members that have an avatar and is omitted when nobody has one.
+func TestUsersFrameAvatars(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := avatarClient("a", "pic-a"), newTestClient("b", 16)
+	register(t, cr, a)
+	register(t, cr, b)
+	skip(t, a, privateFrames+2) // private frames, own join, b's join
+
+	c := avatarClient("c", "pic-c")
+	register(t, cr, c)
+	nextRaw(t, c) // welcome
+	f := exactFields(t, nextRaw(t, c), "type", "users", "avatars", "ts")
+	var got map[string]string
+	if err := json.Unmarshal(f["avatars"], &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"a": "pic-a", "c": "pic-c"}; !maps.Equal(got, want) {
+		t.Fatalf("avatars = %v, want %v", got, want)
+	}
+
+	// A newcomer without a picture still receives the avatars of the members that have one.
+	cr3, _ := startRoom(t)
+	register(t, cr3, avatarClient("p", "pic-p"))
+	q := newTestClient("q", 16)
+	register(t, cr3, q)
+	nextRaw(t, q) // welcome
+	f = exactFields(t, nextRaw(t, q), "type", "users", "avatars", "ts")
+	got = nil
+	if err := json.Unmarshal(f["avatars"], &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"p": "pic-p"}; !maps.Equal(got, want) {
+		t.Fatalf("avatars for a newcomer without one = %v, want %v", got, want)
+	}
+
+	cr2, _ := startRoom(t)
+	x, y := newTestClient("x", 16), newTestClient("y", 16)
+	joinAll(t, cr2, x, y) // expectWelcome -> decodeUsers: exactly type, users, ts
+}
+
+// skip discards the next n frames queued on c.
+func skip(t *testing.T, c *Client, n int) {
+	t.Helper()
+	for range n {
+		nextRaw(t, c)
+	}
+}
+
+// CHAT-28: chat frames and their history entries keep the sender's avatar, even after it leaves.
+func TestChatAndHistoryKeepAvatar(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := avatarClient("a", "pic-a"), newTestClient("b", 16)
+	register(t, cr, a)
+	register(t, cr, b)
+	skip(t, a, privateFrames+2) // private frames, own join, b's join
+	skip(t, b, privateFrames+1) // private frames, own join
+
+	broadcast(t, cr, a, "from a")
+	for _, c := range []*Client{a, b} {
+		f := expectAvatarFrame(t, c, "type", "from", "text", "ts", "avatar")
+		if string(f["avatar"]) != `"pic-a"` {
+			t.Fatalf("chat avatar = %s", f["avatar"])
+		}
+	}
+	broadcast(t, cr, b, "from b")
+	expect(t, a, typeChat, "b", "from b") // decode: no avatar field
+	expect(t, b, typeChat, "b", "from b")
+
+	unregister(t, cr, a)
+	expect(t, b, typeLeave, "a", "")
+
+	late := newTestClient("late", 16)
+	register(t, cr, late)
+	nextRaw(t, late) // welcome
+	nextRaw(t, late) // users
+	var hist struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(nextRaw(t, late), &hist); err != nil || len(hist.Messages) != 2 {
+		t.Fatalf("history = %+v, err %v", hist, err)
+	}
+	f := exactFields(t, hist.Messages[0], "type", "from", "text", "ts", "avatar")
+	if string(f["avatar"]) != `"pic-a"` {
+		t.Fatalf("history avatar = %s", f["avatar"])
+	}
+	decode(t, hist.Messages[1]) // b has none: exactly four fields
+}
+
+// CHAT-28: leave, dm, dm_error and typing frames never carry an avatar.
+func TestAvatarNotOnLeaveDMTyping(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := avatarClient("a", "pic-a"), newTestClient("b", 16)
+	register(t, cr, a)
+	register(t, cr, b)
+	skip(t, a, privateFrames+2)
+	skip(t, b, privateFrames+1)
+
+	dm(t, cr, a, "b", "psst")
+	expectDM(t, b, "a", "b", "psst")
+	expectDM(t, a, "a", "b", "psst")
+	dm(t, cr, a, "nobody", "x")
+	expectDMError(t, a, "nobody", reasonOffline)
+	typingSignal(t, cr, a, "")
+	expectTyping(t, b, "a", "")
+	typingSignal(t, cr, a, "b")
+	expectTyping(t, b, "a", "b")
+
+	unregister(t, cr, a)
+	if m := next(t, b); m.Type != typeLeave || m.From != "a" { // decode: exactly four fields
+		t.Fatalf("got %+v, want leave a", m)
+	}
+}
+
+// CHAT-28: a nickname reused after its owner left inherits no avatar.
+func TestReusedNicknameNoStaleAvatar(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs, bob := newTestClient("obs", 16), avatarClient("bob", "pic-bob")
+	joinAll(t, cr, obs)
+	register(t, cr, bob)
+	skip(t, obs, 1) // bob's join
+	unregister(t, cr, bob)
+	expect(t, obs, typeLeave, "bob", "")
+
+	bob2 := newTestClient("bob", 16)
+	register(t, cr, bob2)
+	expectWelcome(t, bob2, "bob") // users frame passes decodeUsers: no avatars key
+	expect(t, bob2, typeJoin, "bob", "")
+	expect(t, obs, typeJoin, "bob", "")
 }

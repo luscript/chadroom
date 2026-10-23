@@ -32,6 +32,7 @@ type Client struct {
 	send       chan []byte
 	registered chan struct{} // closed by Run once nickname is final
 	nickname   string        // requested until registered is closed, final after
+	avatar     string        // validated URL or ""; set before register and never changed (CHAT-28)
 }
 
 // logError logs abnormal connection errors with the room and nickname, skipping the

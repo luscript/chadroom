@@ -60,7 +60,7 @@ todas las conexiones.
 | `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). |
 | `GET /rooms` | Lista de salas: `{"rooms":["general","juegos","musica"]}` (`application/json`, `nosniff`, `Cache-Control: no-cache`). |
 | `GET /gifs?q=<texto>` | Búsqueda de GIFs en Giphy (solo con `GIPHY_API_KEY`). Sin `q` devuelve los trending. `200` `{"gifs":[{"url":"…","preview":"…"}]}` (hasta 24, solo URLs `https` de la lista permitida, sin query), `400` `{"error":"query_too_long"}` si `q` pasa de 50 caracteres, `404` si no hay clave, `502` `{"error":"unavailable"}` si Giphy falla o tarda más de 5 s. Resultados en caché 10 min. |
-| `GET /ws?nickname=<nombre>&room=<sala>` | Upgrade a WebSocket a una sala. Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
+| `GET /ws?nickname=<nombre>&room=<sala>&avatar=<url>` | Upgrade a WebSocket a una sala. `avatar` es opcional (foto de perfil, ver abajo). Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
 
 <details>
 <summary><b>♡ Protocolo WebSocket completo</b> (salas, entrada, salida, mensajes privados, nicknames)</summary>
@@ -106,6 +106,14 @@ respuesta, también en un `dm`.
 
 `ts` es el momento del evento en Unix milisegundos.
 
+**Foto de perfil:** `avatar` es opcional y se fija al conectarse; nunca se toma de un frame de
+entrada. Debe ser una URL `https` de un host de imágenes permitido (Giphy, Tenor o Imgur, sin
+puerto ni usuario ni `#`), terminar en `.gif`, `.webp`, `.png`, `.jpg` o `.jpeg` y pesar hasta
+512 bytes. Si no cumple, se ignora en silencio: la conexión se acepta igual, sin foto. Los
+sobres `welcome`, `join` y `chat` (y sus entradas en `history`) llevan `"avatar":"<url>"` solo
+cuando quien los origina tiene foto; sin foto el frame no cambia. `leave`, `dm`, `dm_error` y
+`typing` nunca lo llevan.
+
 **Mensajes privados:** un `dm` válido llega solo al destinatario y se devuelve como eco al
 remitente (mismo frame, mismo `ts`); nadie más de la sala lo recibe. El destinatario se busca por
 el nickname **asignado** en la sala, sin distinguir mayúsculas (`" bob "` encuentra a `Bob`;
@@ -148,6 +156,8 @@ Además hay dos frames privados que solo recibe quien se conecta y que no llevan
 ```
 
 - `users`: los nicknames conectados (incluido el propio), ordenados sin distinguir mayúsculas.
+  Si alguien tiene foto suma `"avatars":{"<nickname>":"<url>"}` solo con quienes la tienen; sin
+  fotos el campo no aparece.
 - `history`: los últimos 50 mensajes `chat`, del más viejo al más nuevo (`[]` si no hay). Vive solo
   en memoria: se pierde al reiniciar el servidor.
 

@@ -2,10 +2,12 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,7 +43,7 @@ func TestNewServerPanics(t *testing.T) {
 					t.Fatal("expected panic")
 				}
 			}()
-			NewServer(nil, tt.rooms...)
+			NewServer(nil, nil, tt.rooms...)
 		})
 	}
 }
@@ -88,11 +90,11 @@ func TestRoomsIsolated(t *testing.T) {
 
 	_, users, history := joinRoom(t, srv, "juegos", "C")
 	expectUsers(t, users, "B", "C")
-	expectHistory(t, history, message{typeChat, "B", "x", 0})
+	expectHistory(t, history, message{Type: typeChat, From: "B", Text: "x"})
 
 	_, users, history = joinRoom(t, srv, "general", "D")
 	expectUsers(t, users, "A", "D")
-	expectHistory(t, history, message{typeChat, "A", "hola", 0})
+	expectHistory(t, history, message{Type: typeChat, From: "A", Text: "hola"})
 }
 
 func TestNicknameUniquePerRoom(t *testing.T) {
@@ -155,7 +157,7 @@ func dialOriginRoom(srv *httptest.Server, nick, room, origin string) (*websocket
 // SRV-03: Run returns only after every room has stopped.
 func TestServerRunWaitsForAllRooms(t *testing.T) {
 	r1, r2 := NewRoom("one"), NewRoom("two")
-	s := NewServer(nil, r1, r2)
+	s := NewServer(nil, nil, r1, r2)
 	ctx, cancel := context.WithCancel(context.Background())
 	returned := make(chan struct{})
 	go func() {
@@ -206,7 +208,7 @@ func TestCheckOrigin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := NewServer(tt.allowed, NewRoom("general"))
+			s := NewServer(tt.allowed, nil, NewRoom("general"))
 			r := httptest.NewRequest("GET", "http://example.com/ws", nil)
 			if tt.origin != "" {
 				r.Header.Set("Origin", tt.origin)
@@ -240,5 +242,94 @@ func TestDMRoomScoped(t *testing.T) {
 	send(t, z, "sync") // Zoe's room never saw a dm; B in juegos gets only this chat
 	if m := nextChat(t, bJuegos, ""); m.From != "Zoe" || m.Text != "sync" {
 		t.Fatalf("juegos B got %+v", m)
+	}
+}
+
+// dialAvatar connects with a same-host Origin and the given ?avatar, returning without reading.
+func dialAvatar(t *testing.T, srv *httptest.Server, nick, avatar string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?nickname=" + nick + "&avatar=" + url.QueryEscape(avatar)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{srv.URL}})
+	if err != nil {
+		t.Fatalf("dial %s with avatar: %v", nick, err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+// CHAT-28: ?avatar is checked by the injected validator; an invalid one never rejects the connection.
+func TestAvatarQueryParam(t *testing.T) {
+	const good = "https://i.imgur.com/a.png?x=1&y=%41"
+	var mu sync.Mutex
+	var calls []string
+	valid := func(s string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, s)
+		return s == good
+	}
+	srv, _ := startAvatarRooms(t, valid, nil, NewRoom("general"))
+
+	conn := dialAvatar(t, srv, "A", good)
+	raw := readRaw(t, conn)
+	exactFields(t, raw, "type", "from", "text", "ts", "avatar")
+	var w message
+	if err := json.Unmarshal(raw, &w); err != nil || w.Avatar != good {
+		t.Fatalf("welcome avatar = %q (err %v), want %q", w.Avatar, err, good)
+	}
+
+	conn = dialAvatar(t, srv, "B", "bad")
+	decode(t, readRaw(t, conn)) // welcome without avatar: exactly four fields
+
+	mu.Lock()
+	calls = nil
+	mu.Unlock()
+	readMsg(t, dialRaw(t, srv, "C")) // no param at all; welcome only (users lists A's avatar)
+	conn = dialAvatar(t, srv, "D", "")
+	decode(t, readRaw(t, conn))
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 0 {
+		t.Fatalf("validator called for a missing or empty avatar: %q", calls)
+	}
+}
+
+// CHAT-28: a valid avatar is announced in the join frame other members receive.
+func TestAvatarAnnouncedInJoin(t *testing.T) {
+	const good = "https://i.imgur.com/a.png"
+	srv, _ := startAvatarRooms(t, func(s string) bool { return s == good }, nil, NewRoom("general"))
+	a := dialRaw(t, srv, "A") // no avatar
+	dialAvatar(t, srv, "B", good)
+	for {
+		raw := readRaw(t, a)
+		var m message
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("invalid JSON %q: %v", raw, err)
+		}
+		if m.Type == "join" && m.From == "B" {
+			exactFields(t, raw, "type", "from", "text", "ts", "avatar")
+			if m.Avatar != good {
+				t.Fatalf("join avatar = %q, want %q", m.Avatar, good)
+			}
+			return
+		}
+	}
+}
+
+// CHAT-28: without a validator every ?avatar is dropped.
+func TestAvatarDisabledWithoutValidator(t *testing.T) {
+	srv, _ := startRooms(t, nil, NewRoom("general"))
+	conn := dialAvatar(t, srv, "A", "https://i.imgur.com/a.png")
+	decode(t, readRaw(t, conn))
+}
+
+// CHAT-28: the avatar is fixed at connection time; an avatar inside an inbound frame is ignored.
+func TestForgedInboundAvatarIgnored(t *testing.T) {
+	srv, _ := startRooms(t, nil, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	send(t, a, `{"type":"chat","text":"hi","avatar":"https://i.imgur.com/x.png"}`)
+	m := nextChat(t, a, "")
+	if m.Text != "hi" || m.Avatar != "" {
+		t.Fatalf("chat = %+v, want text hi without avatar", m)
 	}
 }
