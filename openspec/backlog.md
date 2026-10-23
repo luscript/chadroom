@@ -70,6 +70,17 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Undocumented `postMessage` protocol: if YouTube changes it, sync breaks (chat unaffected).
 - [ ] Queue / playlists, titles/thumbnails, DJ role (out of scope today).
 
+## `music-queue` — done, archived 2026-10-23 (manual UI check pending)
+- [x] Shared queue in `musica`: anyone adds (paste-while-playing appends) / removes / skips, cap 30,
+      auto-advance on end (client reports `ended`, server dedupes by `seq`), separate `ended` gate.
+- [x] Auto-start on opening the pane ("Escuchar" is the blocked-audio fallback); re-sync on return;
+      end detection independent of a known duration; finished track latched so it never auto-replays.
+- [ ] Manual two-browser checklist from `changes/archive/2026-10-23-music-queue/design.md`
+      (steps 3/4/6/8: auto-advance, ↺ replay, re-sync on return, repeated-id reload).
+- [ ] `ended` plateau heuristic can false-trigger on a long network stall when the duration is
+      unknown (could skip a track). Tighten only if seen in practice.
+- [ ] Track titles/thumbnails via oEmbed (no API key) — candidate follow-up, needs a server fetch + cache.
+
 ## `profile-picture` — done, archived 2026-10-23 (manual UI check pending)
 - [x] Profile picture next to messages and in the online list (allowlisted image URL at join,
       per connection; `avatar` / `avatars` fields).

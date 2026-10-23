@@ -5,7 +5,7 @@
 > completion notification's `usage` block; the orchestrator total is parsed post-hoc from
 > the local session transcript JSONL (`[unavailable]` on failure).
 
-**Status**: partial (through verify; T905 bug-fix pending user re-test)
+**Status**: complete
 **Generated**: 2026-10-23
 
 ## Per-agent / per-phase
@@ -28,9 +28,9 @@
 
 ## Orchestrator
 
-| Scope         | Model / Tier | Tokens (in / out) | Notes                  |
-|---------------|--------------|-------------------|------------------------|
-| whole feature | opus         | [unavailable]     | captured at sdd-archive |
+| Scope         | Model / Tier           | Tokens (in / out) | Notes                                                                                     |
+|---------------|------------------------|-------------------|-------------------------------------------------------------------------------------------|
+| whole feature | claude-opus-4-8 / high | 338 / 251,698     | Parsed from the session transcript. Cache: creation 602,864, read 19,800,260 (excluded from totals). `input_tokens` is the non-cached input only and includes injected sub-agent results. |
 
 ## Aggregate
 
@@ -44,5 +44,5 @@
 | apply (fix batch)      | 22,969                                                |
 | apply (fix T905)       | 43,240                                                |
 | **Sub-agent total**    | 683,423                                               |
-| **Orchestrator total** | [unavailable]                                         |
-| **Grand total**        | 683,423 (sub-agents only; orchestrator [unavailable]) |
+| **Orchestrator total** | 252,036 (in 338 / out 251,698; cache excluded)        |
+| **Grand total**        | 935,459 (sub-agents + orchestrator in/out; cache excluded) |

@@ -66,4 +66,4 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - Sala con reproductor: `musicRoom` (main.go) y `MUSIC_ROOM` (app.js); un test falla si difieren.
 - Sin código inline en la página (CSP estricta).
 - La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`).
-- Cambios con diseño van por SDD en `openspec/changes/`. En curso: music-queue.
+- Cambios con diseño van por SDD en `openspec/changes/`. En curso: ninguno.
