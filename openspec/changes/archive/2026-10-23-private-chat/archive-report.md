@@ -25,5 +25,5 @@ exploration.md, proposal.md (with amendment), specs/chat/spec.md, design.md, tas
 
 ## Pending
 
-- Manual UI checklist in design.md (no JS harness).
+- Manual UI checklist in design.md: passed (user-verified 2026-10-23).
 - Follow-ups added to `openspec/backlog.md` under `private-chat-polish`.

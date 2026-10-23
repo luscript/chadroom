@@ -110,7 +110,7 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] S3 Recipient dropped as slow still gets the sender an echo (looks delivered); consider
       `dm_error offline` instead.
 - [ ] Per-tab close for DM tabs (today they go away only on "Dejar sala" / "Salir").
-- [ ] Manual UI checklist from `changes/archive/2026-10-23-private-chat/design.md`.
+- [x] Manual UI checklist from `changes/archive/2026-10-23-private-chat/design.md` (user-verified 2026-10-23).
 - [ ] Cross-room DMs / DM replay after reconnect (need a server-wide identity or session token).
 
 ## Housekeeping
