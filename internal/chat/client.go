@@ -10,6 +10,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// typingInterval is the minimum time between two typing signals forwarded from one connection (CHAT-26).
+const typingInterval = time.Second
+
+// typingGate admits at most one typing signal per typingInterval. It belongs to a single
+// readPump goroutine, so it needs no lock. A discarded signal does not move the window.
+type typingGate struct{ last time.Time }
+
+func (g *typingGate) allow(now time.Time) bool {
+	if !g.last.IsZero() && now.Sub(g.last) < typingInterval {
+		return false
+	}
+	g.last = now
+	return true
+}
+
 // Client is one connected websocket peer. send is closed only by Room.Run;
 // conn is nil in the hub unit tests, which never start the pumps.
 type Client struct {
@@ -78,6 +93,7 @@ func (c *Client) readPump(cr *Room) {
 	c.conn.SetPongHandler(func(string) error {
 		return c.conn.SetReadDeadline(time.Now().Add(cr.pongWait))
 	})
+	var gate typingGate
 	for {
 		mt, message, err := c.conn.ReadMessage()
 		if err != nil {
@@ -97,6 +113,9 @@ func (c *Client) readPump(cr *Room) {
 		in, ok := parseInbound(message)
 		if !ok {
 			continue // CHAT-13: blank text is ignored, connection stays open
+		}
+		if in.kind == inboundTyping && !gate.allow(time.Now()) {
+			continue // CHAT-26: over the per-connection budget; connection stays open
 		}
 		in.from = c
 		select {

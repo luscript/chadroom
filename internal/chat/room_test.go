@@ -1241,3 +1241,172 @@ func TestDMNotLogged(t *testing.T) {
 		}
 	}
 }
+
+// typingSignal queues a typing signal as if parseInbound had classified it from from's connection.
+func typingSignal(t *testing.T, cr *Room, from *Client, to string) {
+	t.Helper()
+	select {
+	case cr.broadcast <- inbound{from: from, kind: inboundTyping, to: cleanNickname(to)}:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout queueing typing signal")
+	}
+}
+
+// decodeTyping parses a typing frame: type, from, ts, plus to only for a DM signal.
+func decodeTyping(t *testing.T, b []byte) typingDMFrame {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("invalid JSON %q: %v", b, err)
+	}
+	if _, hasTo := fields["to"]; hasTo {
+		exactFields(t, b, "type", "from", "to", "ts")
+	} else {
+		exactFields(t, b, "type", "from", "ts")
+	}
+	var f typingDMFrame
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("frame %q: %v", b, err)
+	}
+	if f.Type != typeTyping {
+		t.Fatalf("frame %q: type %q, want typing", b, f.Type)
+	}
+	return f
+}
+
+// expectTyping waits for the next frame on c and requires it to be a typing signal;
+// to == "" means a room signal, which must not carry a to field.
+func expectTyping(t *testing.T, c *Client, from, to string) {
+	t.Helper()
+	got := decodeTyping(t, nextRaw(t, c))
+	if got.From != from || got.To != to {
+		t.Fatalf("typing = (%q, %q), want (%q, %q)", got.From, got.To, from, to)
+	}
+}
+
+// CHAT-26: a room signal reaches every member except its sender.
+func TestTypingRoomExcludesSender(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b, c := newTestClient("A", 16), newTestClient("B", 16), newTestClient("C", 16)
+	joinAll(t, cr, a, b, c)
+
+	typingSignal(t, cr, a, "")
+	expectTyping(t, b, "A", "")
+	expectTyping(t, c, "A", "")
+
+	broadcast(t, cr, a, "marker")
+	expect(t, a, typeChat, "A", "marker") // no echo of the typing signal
+}
+
+// CHAT-26: a DM signal reaches only the recipient, found case-insensitively, with the assigned name in to.
+func TestTypingDirectRecipientOnly(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, bob, c := newTestClient("A", 16), newTestClient("Bob", 16), newTestClient("C", 16)
+	joinAll(t, cr, a, bob, c)
+
+	typingSignal(t, cr, a, "  bob ")
+	expectTyping(t, bob, "A", "Bob")
+
+	broadcast(t, cr, c, "marker")
+	expect(t, a, typeChat, "C", "marker")
+	expect(t, c, typeChat, "C", "marker")
+}
+
+// CHAT-26: a signal to oneself or to an offline nickname produces no frame and no dm_error.
+func TestTypingSelfAndOfflineSilent(t *testing.T) {
+	cr, _ := startRoom(t)
+	ana, b := newTestClient("Ana", 16), newTestClient("B", 16)
+	joinAll(t, cr, ana, b)
+
+	typingSignal(t, cr, ana, "ANA")
+	typingSignal(t, cr, ana, "Zoe")
+	broadcast(t, cr, b, "marker")
+	expect(t, ana, typeChat, "B", "marker")
+	expect(t, b, typeChat, "B", "marker")
+}
+
+// CHAT-26: a signal from a client that was dropped is discarded.
+func TestTypingFromNonMemberDropped(t *testing.T) {
+	cr, _ := startRoom(t)
+	slow := newTestClient("slow", privateFrames+1)
+	ok := newTestClient("ok", 16)
+	register(t, cr, slow)
+	register(t, cr, ok)
+	expectWelcome(t, ok, "ok")
+	expect(t, ok, typeJoin, "ok", "")
+	expect(t, ok, typeLeave, "slow", "")
+	expectClosed(t, slow)
+
+	typingSignal(t, cr, slow, "")
+	typingSignal(t, cr, slow, "ok")
+	broadcast(t, cr, ok, "sync")
+	expect(t, ok, typeChat, "ok", "sync") // a typing frame would have come first
+}
+
+// CHAT-26, CHAT-18: typing signals never enter the history.
+func TestTypingNotInHistory(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 16), newTestClient("B", 16)
+	joinAll(t, cr, a, b)
+
+	typingSignal(t, cr, a, "")
+	broadcast(t, cr, a, "hola")
+	expectTyping(t, b, "A", "")
+	expect(t, b, typeChat, "A", "hola")
+
+	c := newTestClient("C", 8)
+	register(t, cr, c)
+	_, hist := expectWelcome(t, c, "C")
+	expectHistory(t, hist, message{Type: typeChat, From: "A", Text: "hola"})
+}
+
+// CHAT-26, CHAT-05: a full buffer skips the signal; the member is neither removed nor announced as left.
+func TestTypingFullBufferSkips(t *testing.T) {
+	cr := NewRoom("general")
+	o, a, b := newTestClient("o", 16), newTestClient("a", 16), newTestClient("b", 1)
+	for _, c := range []*Client{o, a, b} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+	b.send <- []byte("filler")
+
+	cr.dispatch(inbound{from: a, kind: inboundTyping})
+	cr.dispatch(inbound{from: a, kind: inboundTyping, to: "b"})
+
+	if _, ok := cr.clients[b]; !ok {
+		t.Fatal("b was removed from clients")
+	}
+	if _, ok := cr.taken[foldKey("b")]; !ok {
+		t.Fatal("b's nickname was released")
+	}
+	expectTyping(t, o, "a", "")
+	expectEmpty(t, o) // no leave for b
+	if got := nextRaw(t, b); string(got) != "filler" {
+		t.Fatalf("b got %q, want filler", got)
+	}
+	expectEmpty(t, b)
+	expectEmpty(t, a)
+}
+
+// CHAT-26: no log line carries a typing signal's recipient.
+func TestTypingNotLogged(t *testing.T) {
+	buf := &lockedBuffer{}
+	orig := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	cr := NewRoom("general")
+	a, b := newTestClient("Ana", 16), newTestClient("Bea", 16)
+	for _, c := range []*Client{a, b} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+	cr.dispatch(inbound{from: a, kind: inboundTyping})
+	cr.dispatch(inbound{from: a, kind: inboundTyping, to: "Bea"})
+	cr.dispatch(inbound{from: a, kind: inboundTyping, to: "Ana"})
+	cr.dispatch(inbound{from: a, kind: inboundTyping, to: "Zoe-offline"})
+
+	if buf.String() != "" {
+		t.Fatalf("typing logged: %s", buf.String())
+	}
+}

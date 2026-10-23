@@ -199,6 +199,24 @@ func TestIndexHasRoomTabs(t *testing.T) {
 	}
 }
 
+func TestIndexHasTypingLine(t *testing.T) {
+	html := string(indexHTML)
+	scroller := strings.Index(html, `id="scroller"`)
+	typing := strings.Index(html, `id="typing"`)
+	form := strings.Index(html, `id="send-form"`)
+	if scroller < 0 || typing < 0 || form < 0 || scroller >= typing || typing >= form {
+		t.Fatalf(`id="typing" must sit between #scroller and #send-form (scroller=%d typing=%d form=%d)`, scroller, typing, form)
+	}
+	// The line updates every few seconds while anyone types: it must not be a live region.
+	start := strings.LastIndex(html[:typing], "<")
+	tag := html[start : typing+strings.Index(html[typing:], ">")]
+	for _, banned := range []string{"aria-live", "role="} {
+		if strings.Contains(tag, banned) {
+			t.Errorf("#typing start tag must not have %s: %s", banned, tag)
+		}
+	}
+}
+
 func TestRoomsEndpoint(t *testing.T) {
 	ts := newTestServer(t)
 	resp, err := http.Get(ts.URL + "/rooms")

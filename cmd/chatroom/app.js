@@ -18,6 +18,8 @@
   const IMAGE_PATH = /\.(gif|webp|png|jpe?g)$/i;
   const RETRY_BASE_MS = 1000;
   const RETRY_MAX_MS = 30000;
+  const TYPING_SEND_MS = 3000; // at most one outgoing typing signal per pane
+  const TYPING_TTL_MS = 5000; // a typist disappears this long after their latest signal
   const EMOJI_ONLY = /^(\p{Extended_Pictographic}|️|‍|\s){1,12}$/u;
 
   const rooms = new Map(); // id -> room, in /rooms order
@@ -33,6 +35,8 @@
   const convKey = (room, nick) => room.id + '\n' + nick;
   const current = () => activeConv || active; // the pane on screen
   const ownerRoom = (pane) => pane.room || pane; // conversation -> its room; room -> itself
+  let typingPane = null; // pane our last typing signal was for; null = the next edit signals at once
+  let typingSentAt = 0; // performance.now() of that signal
 
   // True only when the whole message is one https image URL on an allowlisted host.
   function isAllowedImage(text) {
@@ -86,6 +90,7 @@
       id, tab, unreadEl, list,
       joined: false, ws: null, retryTimer: null, attempt: 0, outage: false,
       status: 'connecting', myName: '', users: new Set(), lastAuthor: null, unread: 0,
+      typing: new Map(), // nick -> timeout id of who is typing here now
     };
     tab.addEventListener('click', () => {
       if (room === active && !activeConv) return;
@@ -133,7 +138,7 @@
     list.setAttribute('aria-live', 'polite');
     list.hidden = true;
 
-    const conv = { room, peer, tab, unreadEl, list, open: true, unread: 0, lastAuthor: null };
+    const conv = { room, peer, tab, unreadEl, list, open: true, unread: 0, lastAuthor: null, typing: new Map() };
     tab.addEventListener('click', () => {
       if (conv !== activeConv) activate(room, conv);
     });
@@ -182,6 +187,7 @@
   function closeConversation(conv, notice) {
     if (!conv.open) return;
     conv.open = false;
+    clearAllTyping(conv);
     addSystem(conv, notice);
     renderConvTab(conv);
     if (conv === activeConv) updateSendState();
@@ -194,6 +200,7 @@
   function removeConversations(room) {
     for (const [key, conv] of conversations) {
       if (conv.room !== room) continue;
+      clearAllTyping(conv);
       conv.tab.remove();
       conv.list.remove();
       conversations.delete(key);
@@ -250,6 +257,7 @@
     renderUsers();
     scrollToBottom();
     updateLeaveBtn();
+    renderTyping();
   }
 
   function teardown(room) {
@@ -257,6 +265,7 @@
     room.retryTimer = null;
     if (room.ws) { const s = room.ws; room.ws = null; s.close(); } // ws = null makes its onclose a no-op
     room.joined = false;
+    clearAllTyping(room);
     removeConversations(room);
     room.list.replaceChildren();
     room.users = new Set();
@@ -327,6 +336,7 @@
   // Exponential backoff with equal jitter: 0.5-1 s, 1-2 s, 2-4 s ... 15-30 s.
   function scheduleReconnect(room) {
     room.ws = null;
+    clearAllTyping(room);
     setStatus(room, 'reconnecting');
     if (!room.outage) {
       room.outage = true;
@@ -422,6 +432,7 @@
         break;
       case 'chat':
         if (typeof msg.text === 'string') {
+          clearTyping(room, msg.from);
           addChat(room, msg.from, msg.text, msg.ts);
           if (room !== current() && msg.from !== room.myName) bumpUnread(room);
         }
@@ -433,8 +444,21 @@
         if (peer === null || peer === room.myName) break; // not ours: ignore
         const conv = conversations.get(convKey(room, peer)) || createConversation(room, peer);
         if (!conv.open) reopenConversation(conv);
+        if (!own) clearTyping(conv, msg.from);
         addChat(conv, msg.from, msg.text, msg.ts);
         if (conv !== current() && !own) bumpUnread(conv);
+        break;
+      }
+      case 'typing': {
+        if (msg.from === room.myName) break;
+        let pane = room;
+        if (msg.to !== undefined) {
+          // Never creates a tab: only a real dm does.
+          const conv = msg.to === room.myName ? conversations.get(convKey(room, msg.from)) : undefined;
+          if (!conv || !conv.open) break;
+          pane = conv;
+        }
+        setTyping(pane, msg.from);
         break;
       }
       case 'join':
@@ -444,6 +468,7 @@
         break;
       case 'leave':
         room.users.delete(msg.from);
+        clearTyping(room, msg.from);
         if (room === active) renderUsers();
         addSystem(room, msg.from + ' salió 👋');
         { // a no-op when there is no conversation with them, or it is already closed
@@ -453,6 +478,37 @@
         break;
       // Unknown types are ignored so newer servers don't break this page.
     }
+  }
+
+  // — typing indicator —
+  function setTyping(pane, nick) {
+    clearTimeout(pane.typing.get(nick));
+    pane.typing.set(nick, setTimeout(() => clearTyping(pane, nick), TYPING_TTL_MS));
+    if (pane === current()) renderTyping();
+  }
+
+  function clearTyping(pane, nick) {
+    if (!pane.typing.has(nick)) return;
+    clearTimeout(pane.typing.get(nick));
+    pane.typing.delete(nick);
+    if (pane === current()) renderTyping();
+  }
+
+  function clearAllTyping(pane) {
+    for (const id of pane.typing.values()) clearTimeout(id);
+    pane.typing.clear();
+    if (pane === current()) renderTyping();
+  }
+
+  function renderTyping() {
+    $('typing').textContent = typingText([...current().typing.keys()]);
+  }
+
+  function typingText(names) {
+    if (names.length === 0) return '';
+    if (names.length === 1) return names[0] + ' está escribiendo…';
+    if (names.length === 2) return names[0] + ' y ' + names[1] + ' están escribiendo…';
+    return 'Varias personas están escribiendo…';
   }
 
   function showDMError(room, to, reason) {
@@ -602,7 +658,7 @@
 
   // — sending —
   const draft = $('draft');
-  draft.addEventListener('input', updateSendState);
+  draft.addEventListener('input', () => { updateSendState(); notifyTyping(); });
 
   function updateSendState() {
     const online = !!active && active.status === 'online' && (!activeConv || activeConv.open);
@@ -612,10 +668,28 @@
     $('gif-send').disabled = !isAllowedImage($('gif-url').value.trim()) || !online;
   }
 
-  function sendText(text) {
+  // The room whose socket can carry what the composer sends now, or null.
+  function composerRoom() {
     const room = active;
-    if (!room || room.status !== 'online' || !room.ws || room.ws.readyState !== WebSocket.OPEN) return false;
-    if (activeConv && !activeConv.open) return false;
+    if (!room || room.status !== 'online' || !room.ws || room.ws.readyState !== WebSocket.OPEN) return null;
+    if (activeConv && !activeConv.open) return null;
+    return room;
+  }
+
+  function notifyTyping() {
+    if (draft.value.trim() === '') return;
+    const room = composerRoom();
+    if (!room) return;
+    const pane = current();
+    if (pane === typingPane && performance.now() - typingSentAt < TYPING_SEND_MS) return;
+    typingPane = pane;
+    typingSentAt = performance.now();
+    room.ws.send(JSON.stringify(activeConv ? { type: 'typing', to: activeConv.peer } : { type: 'typing' }));
+  }
+
+  function sendText(text) {
+    const room = composerRoom();
+    if (!room) return false;
     // Always an envelope, so text that merely looks like a DM envelope stays room chat.
     const frame = JSON.stringify(activeConv ? { type: 'dm', to: activeConv.peer, text } : { type: 'chat', text });
     // The server limit applies to the whole encoded frame. The echo renders the message.
@@ -624,6 +698,7 @@
       return false;
     }
     room.ws.send(frame);
+    typingPane = null; // receivers clear us on this message, so the next edit signals again
     return true;
   }
 
@@ -689,6 +764,7 @@
       b.addEventListener('click', () => {
         draft.value += ch;
         updateSendState();
+        notifyTyping();
       });
       return b;
     }));
