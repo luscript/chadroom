@@ -679,3 +679,54 @@ func TestNoYouTubeScript(t *testing.T) {
 		t.Error("app.js does not build the youtube-nocookie.com/embed/ URL")
 	}
 }
+
+// readMusicFrame reads frames until a music frame arrives and decodes it.
+func readMusicFrame(t *testing.T, conn *websocket.Conn) (frame struct {
+	Type    string `json:"type"`
+	Video   string `json:"video"`
+	Playing bool   `json:"playing"`
+	Pos     *int64 `json:"pos"`
+	By      string `json:"by"`
+}) {
+	t.Helper()
+	for {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("waiting for a music frame: %v", err)
+		}
+		if err := json.Unmarshal(data, &frame); err != nil {
+			t.Fatalf("invalid JSON %q: %v", data, err)
+		}
+		if frame.Type == "music" {
+			return frame
+		}
+	}
+}
+
+// CHAT-30: a load and a pause from one session reach the other, through the production wiring.
+func TestMusicSyncAcrossSessions(t *testing.T) {
+	ts := newTestServer(t)
+	a := dialRoomConn(t, ts, "musica", "A")
+	b := dialRoomConn(t, ts, "musica", "B")
+
+	send := func(frame string) {
+		t.Helper()
+		if err := a.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send(`{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	time.Sleep(300 * time.Millisecond) // past the per-connection music gate
+	send(`{"type":"music","action":"pause"}`)
+
+	for _, c := range []struct {
+		name    string
+		playing bool
+	}{{"load", true}, {"pause", false}} {
+		f := readMusicFrame(t, b)
+		if f.Video != "dQw4w9WgXcQ" || f.Playing != c.playing || f.Pos == nil || f.By != "A" {
+			t.Fatalf("B after %s: %+v, want video dQw4w9WgXcQ playing=%v pos set by A", c.name, f, c.playing)
+		}
+	}
+}

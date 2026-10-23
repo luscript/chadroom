@@ -986,6 +986,8 @@
   const MUSIC_SEND_GAP_MS = 300; // stays above the server's 260 ms gate (musicInterval)
   const MUSIC_WAIT_TEXT = 'Esperá un segundo…';
   const MUSIC_TICK_MS = 500;
+  const MUSIC_ASSERT_MS = 2000; // while the player has never reported a state: re-send the server's intent this often
+  const MUSIC_SEEK_FRAME_MS = 1000; // a frame this far from where we expected the track is a server seek
   // Fixed texts by error code: nothing from the iframe ever reaches the DOM.
   const MUSIC_ERRORS = {
     100: 'El video no existe o es privado.',
@@ -1002,6 +1004,8 @@
     awaitSnapshot: false, // between welcome and our own join: a snapshot may still arrive
     loaded: '', // video id handed to the player
     state: -1, time: 0, timeAt: 0, duration: 0, // what the player last reported (seconds)
+    reported: false, // the player has reported a playerState for the loaded video (the real widget may never)
+    assertAt: 0, // last blind play/pause while the state is unknown
     settleUntil: 0, playTries: 0,
     errored: false, // the embed reported an error for this video: no play retries, no "Escuchar" again
     seeking: false, tick: null, lastSend: -Infinity,
@@ -1064,12 +1068,14 @@
         !Number.isFinite(msg.pos) || msg.pos < 0 || typeof msg.by !== 'string') return;
     music.awaitSnapshot = false;
     if (!music.srv || music.srv.video !== msg.video) music.duration = 0;
+    // A frame far from where the track should be now is a server seek (or a new video).
+    const seek = !!music.srv && music.srv.video === msg.video && Math.abs(msg.pos - expectedMs()) > MUSIC_SEEK_FRAME_MS;
     music.srv = { video: msg.video, playing: msg.playing, pos: msg.pos, by: msg.by, at: performance.now() };
     music.settleUntil = 0; // a global action applies at once
     music.playTries = 0;
     createPlayer(); // a no-op without consent, while hidden, or with a player already
     renderMusic();
-    reconcile();
+    reconcile({ seek });
   }
 
   // Where the shared track is now, in ms.
@@ -1198,6 +1204,12 @@
     ping();
   }
 
+  function setYTState(v) {
+    if (!YT_STATES.has(v)) return;
+    music.state = v;
+    music.reported = true;
+  }
+
   function onYTMessage(e) {
     const frame = music.frame;
     if (!frame || e.source !== frame.contentWindow || e.origin !== YT_ORIGIN) return;
@@ -1222,7 +1234,7 @@
             music.time = info.currentTime;
             music.timeAt = performance.now();
           }
-          if (YT_STATES.has(info.playerState)) music.state = info.playerState;
+          setYTState(info.playerState);
           // Ignore a duration that may still belong to the previous video.
           if (Number.isFinite(info.duration) && info.duration > 0 && music.srv && music.loaded === music.srv.video) {
             music.duration = info.duration;
@@ -1230,7 +1242,8 @@
         }
         break;
       case 'onStateChange':
-        if (YT_STATES.has(info)) music.state = info;
+        // The widget has been seen sending a bare number and an {playerState} object.
+        setYTState(info && typeof info === 'object' && !Array.isArray(info) ? info.playerState : info);
         break;
       case 'onError':
         music.errored = true; // retrying play cannot fix an embed error
@@ -1247,7 +1260,10 @@
 
   // Makes the local player match the server state. Idempotent: safe to call from anywhere.
   // Local player events are never sent as controls; the server is the only authority.
-  function reconcile() {
+  // The real widget may not report playerState (or report it late), so decisions that depend on
+  // it are not enough: a server frame (`frame` given) always posts the matching command, and while
+  // no state has been reported the tick keeps re-sending the intent. Commands are idempotent.
+  function reconcile(frame) {
     if (!music.ready || !musicShown()) return;
     const s = music.srv;
     const now = performance.now();
@@ -1266,12 +1282,33 @@
       music.duration = 0;
       music.time = 0;
       music.state = -1;
+      music.reported = false;
+      music.assertAt = now;
       music.settleUntil = now + MUSIC_SETTLE_MS;
       music.errored = false; // a new video gets a fresh chance
       setMusicError('');
       return;
     }
     const ended = musicEnded();
+    if (frame) {
+      if (frame.seek) ytCommand('seekTo', [expectedMs() / 1000, true]);
+      if (!s.playing) ytCommand('pauseVideo');
+      else if (!ended && !music.errored) {
+        if (music.state === 0 && !frame.seek) ytCommand('seekTo', [expectedMs() / 1000, true]);
+        ytCommand('playVideo');
+      }
+      music.assertAt = now;
+      music.settleUntil = now + MUSIC_SETTLE_MS;
+      return;
+    }
+    if (!music.reported) {
+      if (now >= music.settleUntil && now >= music.assertAt + MUSIC_ASSERT_MS) {
+        music.assertAt = now;
+        if (!s.playing) ytCommand('pauseVideo');
+        else if (!ended && !music.blocked && !music.errored) ytCommand('playVideo');
+      }
+      return;
+    }
     if (s.playing && !ended && music.state !== 1 && music.state !== 3) {
       if (!music.blocked && !music.errored && now >= music.settleUntil) {
         if (music.playTries >= 2) {
@@ -1317,6 +1354,8 @@
     music.awaitSnapshot = false;
     music.loaded = '';
     music.state = -1;
+    music.reported = false;
+    music.assertAt = 0;
     music.time = 0;
     music.timeAt = 0;
     music.duration = 0;
