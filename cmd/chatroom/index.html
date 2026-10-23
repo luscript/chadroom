@@ -75,7 +75,13 @@
           <div id="emoji-grid" class="emoji-grid"></div>
         </div>
         <div id="gif-panel" class="popover gif" hidden>
-          <div class="gif-hint">Pegá la URL de un GIF de Giphy, Tenor o Imgur.</div>
+          <div id="gif-search-box" class="gif-search">
+            <input id="gif-search" class="input" type="search" placeholder="Buscá un GIF…" aria-label="Buscar GIF" maxlength="50">
+            <div id="gif-status" class="gif-status" role="status"></div>
+            <div id="gif-grid" class="gif-grid"></div>
+            <div class="gif-credit">Powered by GIPHY</div>
+          </div>
+          <div class="gif-hint">O pegá la URL de un GIF de Giphy, Tenor o Imgur.</div>
           <div class="gif-row">
             <input id="gif-url" class="input" type="url" placeholder="https://media.giphy.com/…/giphy.gif">
             <button id="gif-send" type="button" class="btn btn-primary" disabled>Enviar</button>

@@ -23,7 +23,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	chatSrv := newChatServer(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go chatSrv.Run(ctx)
-	ts := httptest.NewServer(newRouter(chatSrv))
+	ts := httptest.NewServer(newRouter(chatSrv, nil))
 	t.Cleanup(func() {
 		cancel()
 		ts.Close()
@@ -283,7 +283,7 @@ func TestRunShutdownClosesAllRooms(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	codeCh := make(chan int, 1)
-	go func() { codeCh <- run(ctx, ln, "") }()
+	go func() { codeCh <- run(ctx, ln, config{}) }()
 
 	addr := ln.Addr().String()
 	hdr := http.Header{"Origin": []string{"http://" + addr}}
@@ -332,7 +332,7 @@ func TestRunGracefulShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	codeCh := make(chan int, 1)
-	go func() { codeCh <- run(ctx, ln, "") }()
+	go func() { codeCh <- run(ctx, ln, config{}) }()
 
 	addr := ln.Addr().String()
 	hdr := http.Header{"Origin": []string{"http://" + addr}}
@@ -387,7 +387,7 @@ func TestServeListenError(t *testing.T) {
 	}
 	defer ln.Close()
 	codeCh := make(chan int, 1)
-	go func() { codeCh <- serve(context.Background(), ln.Addr().String(), "") }()
+	go func() { codeCh <- serve(context.Background(), ln.Addr().String(), config{}) }()
 	select {
 	case code := <-codeCh:
 		if code != 1 {
@@ -432,5 +432,22 @@ func TestImageHostsMirroredInJS(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("IMAGE_HOSTS = %v, want %v (imageHosts)", got, want)
+	}
+}
+
+func TestIndexHasGifPicker(t *testing.T) {
+	html := string(indexHTML)
+	for _, want := range []string{
+		`id="gif-search-box"`, `id="gif-search"`, `id="gif-grid"`, "Powered by GIPHY",
+		`id="gif-url"`, `id="gif-send"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %s", want)
+		}
+	}
+	box := strings.Index(html, `id="gif-search-box"`)
+	paste := strings.Index(html, `id="gif-url"`)
+	if box < 0 || paste < 0 || box >= paste {
+		t.Errorf(`id="gif-search-box" must come before id="gif-url" (box=%d url=%d)`, box, paste)
 	}
 }

@@ -102,7 +102,8 @@ func serveRooms(c *gin.Context) {
 }
 
 // newRouter registers the HTML page, its static assets, the room list and the WebSocket endpoint.
-func newRouter(chatSrv *chat.Server) *gin.Engine {
+// /gifs is registered only when gifs is non-nil, so without a key it is a plain 404.
+func newRouter(chatSrv *chat.Server, gifs *gifSearch) *gin.Engine {
 	r := gin.Default()
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("set trusted proxies: %v", err)
@@ -112,6 +113,9 @@ func newRouter(chatSrv *chat.Server) *gin.Engine {
 	r.GET("/app.css", serveAsset("text/css; charset=utf-8", appCSS))
 	r.GET("/rooms", serveRooms)
 	r.GET("/ws", chatSrv.HandleWebSocket)
+	if gifs != nil {
+		r.GET("/gifs", gifs.handle)
+	}
 	return r
 }
 
@@ -133,28 +137,43 @@ func parseAllowedOrigins(s string) []string {
 	return origins
 }
 
+// config is what main reads from the environment.
+type config struct {
+	allowedOrigins string // ALLOWED_ORIGINS, comma-separated
+	giphyKey       string // GIPHY_API_KEY; "" disables /gifs
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := serve(ctx, addr, os.Getenv("ALLOWED_ORIGINS"))
+	code := serve(ctx, addr, config{
+		allowedOrigins: os.Getenv("ALLOWED_ORIGINS"),
+		giphyKey:       strings.TrimSpace(os.Getenv("GIPHY_API_KEY")),
+	})
 	stop() // os.Exit skips defers.
 	os.Exit(code)
 }
 
 // serve binds addr and runs the server, returning the process exit code.
-func serve(ctx context.Context, addr, allowedOrigins string) int {
+func serve(ctx context.Context, addr string, cfg config) int {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Printf("listen error: %v", err)
 		return 1
 	}
-	return run(ctx, ln, allowedOrigins)
+	return run(ctx, ln, cfg)
 }
 
 // run serves on ln until ctx is cancelled and returns the process exit code.
-func run(ctx context.Context, ln net.Listener, allowedOrigins string) int {
+func run(ctx context.Context, ln net.Listener, cfg config) int {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	chatSrv := newChatServer(parseAllowedOrigins(allowedOrigins))
+	chatSrv := newChatServer(parseAllowedOrigins(cfg.allowedOrigins))
+	var gifs *gifSearch
+	if cfg.giphyKey != "" {
+		gifs = newGifSearch(giphyAPI, cfg.giphyKey)
+	} else {
+		log.Println("GIPHY_API_KEY not set: GIF search disabled")
+	}
 	roomsDone := make(chan struct{})
 	go func() {
 		chatSrv.Run(ctx)
@@ -162,7 +181,7 @@ func run(ctx context.Context, ln net.Listener, allowedOrigins string) int {
 	}()
 
 	srv := &http.Server{
-		Handler:           newRouter(chatSrv),
+		Handler:           newRouter(chatSrv, gifs),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    8 << 10,
