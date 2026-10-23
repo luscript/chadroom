@@ -197,7 +197,7 @@ p { margin: 0; }
   .rooms { gap: var(--space-3); }
 }
 
-/* PINKROOM — retro skin. Original hooks preserved. */
+/* CHADROOM — retro skin. Original hooks preserved. */
 :root{--color-bg:#f9d8e7;--color-surface:#fff8fc;--color-text:#4d2642;--color-accent:#b71967;--color-divider:#d5a3be;--color-neutral-400:#794d68;--color-neutral-500:#81566e;--color-neutral-600:#80506d;--color-neutral-800:#cf9bb7;--color-accent-100:#fff7fb;--color-accent-300:#b21b69;--color-accent-600:#c82579;--color-accent-700:#b62070;--color-accent-800:#9b215f;--color-accent-900:#fbd4e7;--font-heading:Tahoma,Verdana,sans-serif;--font-body:Tahoma,Verdana,sans-serif;--gutter:24px;--radius-md:2px;--radius-lg:3px;--shadow-md:inset 1px 1px #fff,2px 2px #c593b0;--shadow-lg:3px 3px 0 #b68ca8}
 body{height:auto;min-height:100vh;background-color:#f9dfeb;background-image:linear-gradient(#ffffff65 1px,transparent 1px),linear-gradient(90deg,#ffffff65 1px,transparent 1px),radial-gradient(ellipse at 90% 10%,#d6c9fa,transparent 65%);background-size:28px 28px,28px 28px,100% 100%;padding:32px 40px 18px;font-size:14px}
 .desktop-brand{max-width:1160px;margin:0 auto 25px;position:relative}.wordmark{font:bold italic 54px Georgia,serif;color:#b42672;letter-spacing:-3px;text-shadow:2px 2px #fff}.wordmark span{display:inline-block;color:#aa86d8;font-size:48px;margin-left:10px}.desktop-brand p{font:12px 'Courier New',monospace;letter-spacing:2px;margin:0 0 0 3px}.edition{position:absolute;right:0;bottom:8px;font:11px 'Courier New',monospace;letter-spacing:1px}

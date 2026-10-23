@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 260" width="840" height="260" role="img" aria-labelledby="t d">
+  <title id="t">chadroom — chat en tiempo real</title>
+  <desc id="d">Ventana retro rosa con el logo chadroom y una charla de ejemplo.</desc>
+  <style>
+    .sans{font-family:Tahoma,Verdana,sans-serif}
+    .serif{font-family:Georgia,'Times New Roman',serif}
+    .mono{font-family:'Courier New',monospace}
+    .b1,.b2,.b3{opacity:0;animation:pop 12s infinite}
+    .b2{animation-delay:1.6s}
+    .b3{animation-delay:3.4s}
+    @keyframes pop{0%{opacity:0;transform:translateY(8px)}6%,86%{opacity:1;transform:translateY(0)}95%,100%{opacity:0;transform:translateY(0)}}
+    .cur{animation:blink 1s steps(1) infinite}
+    @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
+    .tw{animation:tw 3s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
+    .tw2{animation-delay:.7s}.tw3{animation-delay:1.4s}.tw4{animation-delay:2.1s}
+    @keyframes tw{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}
+    .fl{animation:fl 5s ease-in-out infinite}
+    .fl2{animation-delay:1.8s}
+    @keyframes fl{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+    .spin{animation:spin 8s linear infinite;transform-box:fill-box;transform-origin:center}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @media (prefers-reduced-motion:reduce){
+      *{animation:none !important}
+      .b1,.b2,.b3{opacity:1}
+    }
+  </style>
+  <defs>
+    <linearGradient id="tb" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#af236a"/><stop offset=".7" stop-color="#df66a6"/><stop offset="1" stop-color="#e496ca"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f9d8e7"/><stop offset="1" stop-color="#d6c9fa"/>
+    </linearGradient>
+  </defs>
+  <rect width="840" height="260" fill="url(#bg)"/>
+  <!-- sombra y ventana -->
+  <rect x="26" y="22" width="800" height="226" fill="#bd88ac"/>
+  <rect x="20" y="16" width="800" height="226" fill="#f4d2e3" stroke="#8c5279" stroke-width="2"/>
+  <rect x="24" y="20" width="792" height="30" fill="url(#tb)"/>
+  <text x="34" y="40" class="sans" font-size="13" font-weight="bold" fill="#ffffff">▣  chadroom.exe — tu rincón de internet</text>
+  <rect x="728" y="24" width="82" height="22" fill="#fbd5e9" stroke="#ffffff" stroke-width="2"/>
+  <text x="769" y="41" text-anchor="middle" class="mono" font-size="15" font-weight="bold" fill="#70395c" xml:space="preserve">_  □  ×</text>
+  <rect x="24" y="50" width="792" height="188" fill="#fff8fc"/>
+  <line x1="24" y1="50" x2="816" y2="50" stroke="#c39bb5"/>
+  <!-- wordmark -->
+  <text x="48" y="130" class="serif" font-size="68" font-weight="bold" font-style="italic" letter-spacing="-3" fill="#ffffff" stroke="#ffffff" stroke-width="4">chadroom</text>
+  <text x="46" y="128" class="serif" font-size="68" font-weight="bold" font-style="italic" letter-spacing="-3" fill="#b42672">chadroom</text>
+  <text x="352" y="104" class="serif" font-size="46" fill="#aa86d8"><tspan class="spin">✳</tspan></text>
+  <text x="50" y="164" class="mono" font-size="16" letter-spacing="2" fill="#4d2642">menos vibecoding, más charla.<tspan class="cur" fill="#b71967">▌</tspan></text>
+  <text x="50" y="206" class="sans" font-size="12" fill="#794d68">Go · WebSockets · salas fijas · sin build</text>
+  <!-- mini chat -->
+  <rect x="470" y="64" width="330" height="162" fill="#fffafc" stroke="#bd8ba9"/>
+  <g class="b1">
+    <rect x="482" y="76" width="130" height="30" fill="#f1c7df"/>
+    <text x="492" y="96" class="sans" font-size="13" fill="#4d2642"><tspan font-weight="bold" fill="#b1286e">ana </tspan>holaaa!</text>
+  </g>
+  <g class="b2">
+    <rect x="482" y="114" width="304" height="30" fill="#e3dafa"/>
+    <text x="492" y="134" class="sans" font-size="13" fill="#4d2642"><tspan font-weight="bold" fill="#5b3f94">bob </tspan>¿charlar sin prompts? sí, por favor</text>
+  </g>
+  <g class="b3">
+    <rect x="590" y="152" width="196" height="30" fill="#fce4f1" stroke="#db75a8" stroke-width="0"/>
+    <rect x="590" y="152" width="3" height="30" fill="#db75a8"/>
+    <text x="602" y="172" class="sans" font-size="13" fill="#4d2642"><tspan font-weight="bold" fill="#b1286e">vos </tspan>yo, un montón ♡</text>
+  </g>
+  <rect x="482" y="196" width="304" height="22" fill="#fffafd" stroke="#eac9de" stroke-width="2"/>
+  <text x="490" y="212" class="mono" font-size="12" fill="#815a71">escribí algo…<tspan class="cur" fill="#b71967">|</tspan></text>
+  <!-- destellos -->
+  <g class="sans">
+    <text x="420" y="82" font-size="20" fill="#df66a6" class="tw">✦</text>
+    <text x="446" y="214" font-size="16" fill="#aa86d8" class="tw tw2">✧</text>
+    <text x="40" y="226" font-size="18" fill="#df66a6" class="tw tw3">✦</text>
+    <text x="300" y="214" font-size="18" fill="#aa86d8" class="tw tw4">✧</text>
+    <text x="405" y="170" font-size="22" fill="#c82579" class="fl">♡</text>
+    <text x="376" y="222" font-size="18" fill="#b8327b" class="fl fl2">✿</text>
+  </g>
+</svg>

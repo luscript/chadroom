@@ -48,8 +48,8 @@ func TestServeIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "pinkroom") {
-		t.Fatal("body missing \"pinkroom\"")
+	if !strings.Contains(string(body), "chadroom") {
+		t.Fatal("body missing \"chadroom\"")
 	}
 }
 

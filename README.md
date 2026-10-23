@@ -1,14 +1,31 @@
-# go-chatroom
+<p align="center"><img src="docs/readme/banner.svg" alt="chadroom — chat en tiempo real"></p>
+
+<p align="center">
+  <img src="docs/readme/badge-go.svg" alt="Go 1.27+">
+  <img src="docs/readme/badge-websocket.svg" alt="WebSockets">
+  <img src="docs/readme/badge-csp.svg" alt="CSP estricta">
+</p>
+
+<h1 align="center">✳ go-chatroom ✳</h1>
+
+<p align="center"><i>Tu gente está del otro lado.</i><br>menos vibecoding, más charla. ♡</p>
 
 Chat en tiempo real escrito en Go con WebSockets. Hay varias salas fijas (`general`, `juegos` y
 `musica`): cada mensaje se reenvía a todos los de la misma sala, y la sala avisa cuando alguien
 entra o sale.
 
-## Requisitos
+> [!TIP]
+> Un binario, cero build: el frontend va embebido, así que `go run ./cmd/chatroom` y listo. Abrí varias pestañas y charlá con vos mismx. ✿
+
+<p align="center"><img src="docs/readme/divider.svg" alt=""></p>
+
+## ✿ Requisitos
 
 - Go 1.27+
 
-## Uso
+<p align="center"><img src="docs/readme/divider.svg" alt=""></p>
+
+## ★ Uso
 
 ```bash
 go run ./cmd/chatroom
@@ -23,7 +40,7 @@ Si se corta la conexión (reinicio del servidor, Wi-Fi, notebook suspendida), la
 reconecta sola: reintenta con esperas crecientes de hasta 30 s y vuelve a pedir el mismo
 nickname. Los mensajes enviados por otros durante el corte no se recuperan.
 
-### Configuración
+### ✦ Configuración
 
 | Variable          | Default | Descripción |
 |-------------------|---------|-------------|
@@ -32,7 +49,9 @@ nickname. Los mensajes enviados por otros durante el corte no se recuperan.
 El servidor escucha en `:8080` y se apaga ordenadamente con `Ctrl+C` / `SIGTERM`, cerrando
 todas las conexiones.
 
-## API
+<p align="center"><img src="docs/readme/divider.svg" alt=""></p>
+
+## ♡ API
 
 | Ruta | Descripción |
 |------|-------------|
@@ -40,6 +59,9 @@ todas las conexiones.
 | `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). |
 | `GET /rooms` | Lista de salas: `{"rooms":["general","juegos","musica"]}` (`application/json`, `nosniff`, `Cache-Control: no-cache`). |
 | `GET /ws?nickname=<nombre>&room=<sala>` | Upgrade a WebSocket a una sala. Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
+
+<details>
+<summary><b>♡ Protocolo WebSocket completo</b> (salas, entrada, salida, mensajes privados, nicknames)</summary>
 
 **Salas:** `room` debe coincidir exactamente (distingue mayúsculas) con una de las de `/rooms`. Si
 falta o está vacío se usa la sala por defecto (`general`, la primera); si no existe, el servidor
@@ -124,17 +146,24 @@ su `leave`. Al apagar el servidor no se envía ningún `leave`.
 sufijo ` (n)` (por ejemplo `bob (2)`). Se quitan los caracteres de control y los de dirección
 bidi, se recorta a 32 caracteres y, si queda vacío, se usa `Anonymous`.
 
-**Imágenes y GIFs:** un mensaje que es solo una URL `https` de imagen (`.gif`, `.webp`, `.png`,
-`.jpg`) se muestra inline únicamente si el host está en la lista permitida (Giphy, Tenor e
-Imgur); cualquier otra URL se muestra como texto. Así nadie puede hacer que los navegadores de
-los demás pidan una imagen a un servidor propio y vean sus IPs. Para sumar un host, agregalo en
-`imageHosts` (`cmd/chatroom/main.go`, que arma el `img-src` de la CSP) y en `IMAGE_HOSTS`
-(`app.js`); un test falla si las dos listas no coinciden.
+</details>
+
+### ✦ Imágenes y CSP
+
+> [!NOTE]
+> **Imágenes y GIFs:** un mensaje que es solo una URL `https` de imagen (`.gif`, `.webp`, `.png`,
+> `.jpg`) se muestra inline únicamente si el host está en la lista permitida (Giphy, Tenor e
+> Imgur); cualquier otra URL se muestra como texto. Así nadie puede hacer que los navegadores de
+> los demás pidan una imagen a un servidor propio y vean sus IPs. Para sumar un host, agregalo en
+> `imageHosts` (`cmd/chatroom/main.go`, que arma el `img-src` de la CSP) y en `IMAGE_HOSTS`
+> (`app.js`); un test falla si las dos listas no coinciden.
 
 **CSP:** la página no tiene código inline; la política solo permite scripts y estilos del propio
 origen y las imágenes de la lista permitida.
 
-## Arquitectura
+<p align="center"><img src="docs/readme/divider.svg" alt=""></p>
+
+## ✿ Arquitectura
 
 ```
 cmd/chatroom/        main: router (gin), http.Server, señales, CSP y lista de hosts de imágenes
@@ -162,7 +191,9 @@ Se usa el **patrón hub**:
 Los detalles y las decisiones de diseño están en
 `openspec/changes/archive/2026-10-22-fix-channel-handling/design.md`.
 
-## Tests
+<p align="center"><img src="docs/readme/divider.svg" alt=""></p>
+
+## ★ Tests
 
 ```bash
 go test -race ./...
@@ -170,10 +201,16 @@ go test -race ./...
 
 Incluye tests unitarios del hub (sin red) y tests de integración WebSocket con `httptest`.
 
-## Desarrollo con SDD
+<p align="center"><img src="docs/readme/divider.svg" alt=""></p>
+
+## ✦ Desarrollo con SDD
 
 El proyecto usa Spec-Driven Development. Todo lo relacionado está en `openspec/`:
 
 - `openspec/specs/`: especificaciones vigentes (`chat`, `server`).
 - `openspec/changes/archive/`: historial de cambios (propuesta, diseño, tareas, verificación).
 - `openspec/backlog.md`: mejoras pendientes, agrupadas por cambio futuro.
+
+<p align="center"><img src="docs/readme/divider.svg" alt=""></p>
+
+<p align="center">✳ Hecho por luscript ♥ · quedate un ratito, estás en casa.</p>

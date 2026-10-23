@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 24" width="840" height="24" role="img" aria-label="separador">
+  <style>
+    text{font-family:Tahoma,Verdana,sans-serif;font-size:16px;text-anchor:middle}
+    .a{animation:tw 3s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
+    .d1{animation-delay:.5s}.d2{animation-delay:1s}.d3{animation-delay:1.5s}.d4{animation-delay:2s}
+    @keyframes tw{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
+    @media (prefers-reduced-motion:reduce){.a{animation:none !important;opacity:1}}
+  </style>
+  <line x1="40" y1="12" x2="330" y2="12" stroke="#d5a3be" stroke-dasharray="2 4"/>
+  <line x1="510" y1="12" x2="800" y2="12" stroke="#d5a3be" stroke-dasharray="2 4"/>
+  <text x="360" y="18" fill="#df66a6" class="a">✦</text>
+  <text x="390" y="18" fill="#aa86d8" class="a d1">✧</text>
+  <text x="420" y="18" fill="#c82579" class="a d2">♡</text>
+  <text x="450" y="18" fill="#aa86d8" class="a d3">✧</text>
+  <text x="480" y="18" fill="#df66a6" class="a d4">✦</text>
+</svg>
