@@ -100,6 +100,7 @@ func (c *Client) readPump(cr *Room) {
 	})
 	typing := rateGate{interval: typingInterval}
 	music := rateGate{interval: musicInterval}
+	ended := rateGate{interval: musicInterval} // CHAT-30: its own budget, so a click can't starve an end report
 	for {
 		mt, message, err := c.conn.ReadMessage()
 		if err != nil {
@@ -123,8 +124,14 @@ func (c *Client) readPump(cr *Room) {
 		if in.kind == inboundTyping && !typing.allow(time.Now()) {
 			continue // CHAT-26: over the per-connection budget; connection stays open
 		}
-		if in.kind == inboundMusic && !music.allow(time.Now()) {
-			continue // CHAT-30: over the per-connection budget; connection stays open
+		if in.kind == inboundMusic {
+			gate := &music
+			if in.music.action == musicEnded {
+				gate = &ended
+			}
+			if !gate.allow(time.Now()) {
+				continue // CHAT-30: over the per-connection budget; connection stays open
+			}
 		}
 		in.from = c
 		select {

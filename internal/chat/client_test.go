@@ -804,9 +804,9 @@ func TestParseInbound(t *testing.T) {
 		{"typing to only bidi", "{\"type\":\"typing\",\"to\":\"‮\"}", inbound{}, true},
 		{"typing key case sensitive", `{"TYPE":"typing"}`, inbound{text: `{"TYPE":"typing"}`}, false},
 		{"typing value case sensitive", `{"type":"Typing"}`, inbound{text: `{"type":"Typing"}`}, false},
-		{"music load", `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicLoad, video: "dQw4w9WgXcQ"}}, false},
-		{"music load dashes and underscores", `{"type":"music","action":"load","video":"a-_B1c2D3e4"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicLoad, video: "a-_B1c2D3e4"}}, false},
-		{"music load extra fields ignored", `{"type":"music","action":"load","video":"dQw4w9WgXcQ","pos":"x","text":"hola","by":"C"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicLoad, video: "dQw4w9WgXcQ"}}, false},
+		{"music add", `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicAdd, video: "dQw4w9WgXcQ"}}, false},
+		{"music add dashes and underscores", `{"type":"music","action":"add","video":"a-_B1c2D3e4"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicAdd, video: "a-_B1c2D3e4"}}, false},
+		{"music add extra fields ignored", `{"type":"music","action":"add","video":"dQw4w9WgXcQ","pos":"x","text":"hola","by":"C"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicAdd, video: "dQw4w9WgXcQ"}}, false},
 		{"music play", `{"type":"music","action":"play"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicPlay}}, false},
 		{"music pause", `{"type":"music","action":"pause","extra":1}`, inbound{kind: inboundMusic, music: musicCmd{action: musicPause}}, false},
 		{"music play with text is not chat", `{"type":"music","action":"play","text":"hola"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicPlay}}, false},
@@ -818,14 +818,14 @@ func TestParseInbound(t *testing.T) {
 		{"music action case sensitive", `{"type":"music","action":"PLAY"}`, inbound{}, true},
 		{"music action not a string", `{"type":"music","action":5}`, inbound{}, true},
 		{"music action null", `{"type":"music","action":null}`, inbound{}, true},
-		{"music load without video", `{"type":"music","action":"load"}`, inbound{}, true},
-		{"music load video 10 chars", `{"type":"music","action":"load","video":"dQw4w9WgXc"}`, inbound{}, true},
-		{"music load video 12 chars", `{"type":"music","action":"load","video":"dQw4w9WgXcQQ"}`, inbound{}, true},
-		{"music load video url", `{"type":"music","action":"load","video":"https://youtu.be/dQw4w9WgXcQ"}`, inbound{}, true},
-		{"music load video trailing newline", `{"type":"music","action":"load","video":"dQw4w9WgXcQ\n"}`, inbound{}, true},
-		{"music load video bad char", `{"type":"music","action":"load","video":"dQw4w9WgX!Q"}`, inbound{}, true},
-		{"music load video not a string", `{"type":"music","action":"load","video":12345678901}`, inbound{}, true},
-		{"music load video null", `{"type":"music","action":"load","video":null}`, inbound{}, true},
+		{"music add without video", `{"type":"music","action":"add"}`, inbound{}, true},
+		{"music add video 10 chars", `{"type":"music","action":"add","video":"dQw4w9WgXc"}`, inbound{}, true},
+		{"music add video 12 chars", `{"type":"music","action":"add","video":"dQw4w9WgXcQQ"}`, inbound{}, true},
+		{"music add video url", `{"type":"music","action":"add","video":"https://youtu.be/dQw4w9WgXcQ"}`, inbound{}, true},
+		{"music add video trailing newline", `{"type":"music","action":"add","video":"dQw4w9WgXcQ\n"}`, inbound{}, true},
+		{"music add video bad char", `{"type":"music","action":"add","video":"dQw4w9WgX!Q"}`, inbound{}, true},
+		{"music add video not a string", `{"type":"music","action":"add","video":12345678901}`, inbound{}, true},
+		{"music add video null", `{"type":"music","action":"add","video":null}`, inbound{}, true},
 		{"music seek without pos", `{"type":"music","action":"seek"}`, inbound{}, true},
 		{"music seek pos null", `{"type":"music","action":"seek","pos":null}`, inbound{}, true},
 		{"music seek pos string", `{"type":"music","action":"seek","pos":"5"}`, inbound{}, true},
@@ -835,6 +835,23 @@ func TestParseInbound(t *testing.T) {
 		{"music seek pos exponent", `{"type":"music","action":"seek","pos":1e3}`, inbound{}, true},
 		{"music seek pos over max", `{"type":"music","action":"seek","pos":86400001}`, inbound{}, true},
 		{"music seek pos beyond int64", `{"type":"music","action":"seek","pos":9223372036854775808}`, inbound{}, true},
+		{"music load is no longer an action", `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`, inbound{}, true},
+		{"music remove", `{"type":"music","action":"remove","id":1}`, inbound{kind: inboundMusic, music: musicCmd{action: musicRemove, id: 1}}, false},
+		{"music remove big id", `{"type":"music","action":"remove","id":4611686018427387904}`, inbound{kind: inboundMusic, music: musicCmd{action: musicRemove, id: 1 << 62}}, false},
+		{"music remove id zero", `{"type":"music","action":"remove","id":0}`, inbound{}, true},
+		{"music remove id negative", `{"type":"music","action":"remove","id":-1}`, inbound{}, true},
+		{"music remove id string", `{"type":"music","action":"remove","id":"1"}`, inbound{}, true},
+		{"music remove id fraction", `{"type":"music","action":"remove","id":1.5}`, inbound{}, true},
+		{"music remove id exponent", `{"type":"music","action":"remove","id":1e3}`, inbound{}, true},
+		{"music remove id null", `{"type":"music","action":"remove","id":null}`, inbound{}, true},
+		{"music remove without id", `{"type":"music","action":"remove"}`, inbound{}, true},
+		{"music remove id beyond int64", `{"type":"music","action":"remove","id":9223372036854775808}`, inbound{}, true},
+		{"music skip", `{"type":"music","action":"skip","id":7,"video":"x","text":"hola"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicSkip}}, false},
+		{"music ended", `{"type":"music","action":"ended","seq":1}`, inbound{kind: inboundMusic, music: musicCmd{action: musicEnded, seq: 1}}, false},
+		{"music ended seq zero", `{"type":"music","action":"ended","seq":0}`, inbound{}, true},
+		{"music ended seq string", `{"type":"music","action":"ended","seq":"1"}`, inbound{}, true},
+		{"music ended seq fraction", `{"type":"music","action":"ended","seq":1.5}`, inbound{}, true},
+		{"music ended without seq", `{"type":"music","action":"ended"}`, inbound{}, true},
 		{"music key case sensitive", `{"TYPE":"music","action":"play"}`, inbound{text: `{"TYPE":"music","action":"play"}`}, false},
 		{"music value case sensitive", `{"type":"MUSIC","action":"play"}`, inbound{text: `{"type":"MUSIC","action":"play"}`}, false},
 		{"empty frame", ``, inbound{}, true},
@@ -1117,7 +1134,7 @@ func TestMusicOverWebSocket(t *testing.T) {
 	a, _ := dialRoom(t, srv, "musica", "A")
 	b, _ := dialRoom(t, srv, "musica", "B")
 
-	send(t, a, `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	send(t, a, `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`)
 	for _, conn := range []*websocket.Conn{a, b} {
 		if f := readMusic(t, conn); f.Video != "dQw4w9WgXcQ" || !f.Playing || f.By != "A" {
 			t.Fatalf("music = %+v, want dQw4w9WgXcQ playing by A", f)
@@ -1126,7 +1143,7 @@ func TestMusicOverWebSocket(t *testing.T) {
 
 	c, _ := dialRoom(t, srv, "general", "C")
 	d, _ := dialRoom(t, srv, "general", "D")
-	send(t, c, `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	send(t, c, `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`)
 	send(t, c, `{"type":"music","action":"bogus"}`)
 	send(t, c, "hola")
 	for _, conn := range []*websocket.Conn{c, d} {
@@ -1143,7 +1160,7 @@ func TestInvalidMusicDiscarded(t *testing.T) {
 	b, _ := dial(t, srv, "B")
 
 	send(t, a, `{"type":"music"}`)
-	send(t, a, `{"type":"music","action":"load","video":"abc","text":"hola"}`)
+	send(t, a, `{"type":"music","action":"add","video":"abc","text":"hola"}`)
 	send(t, a, `{"type":"music","action":"seek","pos":1.5}`)
 	send(t, a, "hola")
 	for _, conn := range []*websocket.Conn{a, b} {
@@ -1157,7 +1174,7 @@ func TestInvalidMusicDiscarded(t *testing.T) {
 func TestMusicNewcomerOverWebSocket(t *testing.T) {
 	srv, _ := startServer(t, NewMusicRoom("musica"))
 	a, _ := dial(t, srv, "A")
-	send(t, a, `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	send(t, a, `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`)
 	readMusic(t, a)
 
 	conn := dialRaw(t, srv, "C")
@@ -1179,7 +1196,7 @@ func TestMusicThrottledOverWebSocket(t *testing.T) {
 	srv, _ := startServer(t, NewMusicRoom("musica"))
 	a, _ := dial(t, srv, "A")
 
-	send(t, a, `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	send(t, a, `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`)
 	for i := 0; i < 20; i++ {
 		send(t, a, `{"type":"music","action":"play"}`)
 	}
@@ -1209,5 +1226,36 @@ func TestMusicThrottledOverWebSocket(t *testing.T) {
 	send(t, a, "otra")
 	if m := nextChat(t, a, ""); m.Text != "otra" {
 		t.Fatalf("chat = %+v, want otra", m)
+	}
+}
+
+// CHAT-30: ended is the page's report, not a user control: it passes the throttle that drops
+// a play sent right after a pause.
+func TestMusicEndedNotThrottledOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewMusicRoom("musica"))
+	a, _ := dial(t, srv, "A")
+
+	send(t, a, `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`)
+	if f := readMusic(t, a); f.Seq != 1 {
+		t.Fatalf("first add = %+v, want seq 1", f)
+	}
+	time.Sleep(300 * time.Millisecond) // past the 260 ms gate
+	send(t, a, `{"type":"music","action":"add","video":"aaaaaaaaaaa"}`)
+	if f := readMusic(t, a); f.Seq != 1 || len(f.Queue) != 1 {
+		t.Fatalf("second add = %+v, want it queued", f)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	send(t, a, `{"type":"music","action":"pause"}`)
+	send(t, a, `{"type":"music","action":"play"}`)
+	send(t, a, `{"type":"music","action":"ended","seq":1}`)
+	for {
+		f := readMusic(t, a)
+		if f.Seq == 2 {
+			if f.Video != "aaaaaaaaaaa" {
+				t.Fatalf("frame = %+v, want video aaaaaaaaaaa", f)
+			}
+			return
+		}
 	}
 }

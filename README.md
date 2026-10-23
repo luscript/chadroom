@@ -83,7 +83,7 @@ Cada frame se interpreta así:
 | `{"type":"dm","to":"bob","text":"hola"}` | Mensaje privado a `bob` (ver abajo). |
 | `{"type":"typing"}` | "Escribiendo…" para toda la sala (ver abajo). |
 | `{"type":"typing","to":"bob"}` | "Escribiendo…" solo para `bob` (ver abajo). |
-| `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
+| `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`, `remove`, `skip`, `ended`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
 | Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido (`typing` y `music` ya no cuentan), `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
 
 Los campos extra se ignoran; `from` nunca se toma del cliente. Un texto en blanco se descarta sin
@@ -104,7 +104,7 @@ respuesta, también en un `dm`.
 | `dm`      | Mensaje privado de `from` para `to`: solo lo reciben ambos (ver Mensajes privados). | el mensaje |
 | `dm_error`| Un `dm` no se pudo entregar; solo lo recibe el remitente (ver Mensajes privados). | no lleva `text`; trae `to` y `reason` |
 | `typing`  | `from` está escribiendo: lo reciben todos menos `from`, o solo `to` si fue privado (ver Escribiendo…). | no lleva `text`; `to` solo en el privado |
-| `music`   | Estado del reproductor compartido de `musica`: lo reciben todos, incluido quien lo cambió (ver Música compartida). | no lleva `from` ni `text`; trae `video`, `playing`, `pos` y `by` |
+| `music`   | Estado del reproductor compartido de `musica`: lo reciben todos, incluido quien lo cambió (ver Música compartida). | no lleva `from` ni `text`; trae `video`, `playing`, `pos`, `by`, `seq` y `queue` |
 
 `ts` es el momento del evento en Unix milisegundos.
 
@@ -147,25 +147,34 @@ No se guarda, no entra al `history` ni se escribe en los logs.
 
 **Música compartida:** solo la sala `musica` tiene un reproductor de YouTube compartido; en las
 demás salas un frame `music` se descarta sin respuesta. El servidor guarda qué video suena, si
-está en reproducción, la posición y quién hizo el último cambio (`by`). Nunca toca YouTube: solo
-retransmite el estado y cada página sigue su propio reproductor.
+está en reproducción, la posición, quién hizo el último cambio (`by`) y una cola de videos
+pendientes (máximo 30, sin contar el que suena). Cualquiera puede agregar, quitar y saltar. Nunca
+toca YouTube: solo retransmite el estado y cada página sigue su propio reproductor.
 
 | `action` | Campos | Efecto |
 |----------|--------|--------|
-| `load`   | `video`: id de 11 caracteres `[A-Za-z0-9_-]` (solo el id, nunca una URL) | Carga ese video desde 0 y lo pone a sonar. |
+| `add`    | `video`: id de 11 caracteres `[A-Za-z0-9_-]` (solo el id, nunca una URL) | Sin video actual, o si el actual terminó y la cola está vacía, lo pone a sonar desde 0. Si no, lo agrega al final de la cola; con la cola llena (30) se descarta. |
+| `remove` | `id`: entero, el `id` de un elemento de la cola | Lo quita de la cola. Un `id` desconocido se descarta. |
+| `skip`   | no lleva | El primero de la cola pasa a sonar desde 0. Con la cola vacía se descarta. |
+| `ended`  | `seq`: entero, el `seq` del video que terminó | Si coincide con el actual, avanza como `skip`; con la cola vacía, el video queda terminado y en pausa. Un `seq` viejo o repetido se descarta (así se deduplican los avisos de varios clientes). |
 | `play`   | no lleva | Reanuda desde la posición actual (necesita un video cargado). |
 | `pause`  | no lleva | Pausa en la posición actual (necesita un video cargado). |
 | `seek`   | `pos`: entero en milisegundos, de 0 a 86 400 000 | Salta a esa posición sin cambiar si suena o no (necesita un video cargado). |
 
 Cualquier otro control (`action` faltante o desconocida, campos con tipo incorrecto, `pos`
 fraccionario, negativo o fuera de rango, `video` inválido, o `play`/`pause`/`seek` sin video
-cargado) se descarta sin respuesta y la conexión sigue abierta. Se aceptan hasta 4 controles por
-segundo por conexión; el resto se descarta. Cada control aceptado se difunde a toda la sala,
+cargado, `remove` con `id` desconocido, `skip` con la cola vacía o `ended` con `seq` que no
+coincide) se descarta sin respuesta y la conexión sigue abierta. Se aceptan hasta 4 controles por
+segundo por conexión; el resto se descarta. `ended` tiene su propio límite por conexión, aparte
+del de los demás controles, para que el aviso de quien escucha solo no se pierda tras un clic. Cada control aceptado se difunde a toda la sala,
 incluido quien lo envió, con exactamente estos campos (`pos` ya es la posición en ese instante):
 
 ```json
-{"type":"music","video":"dQw4w9WgXcQ","playing":true,"pos":12345,"by":"Alice","ts":1792684800123}
+{"type":"music","video":"dQw4w9WgXcQ","playing":true,"pos":12345,"by":"Alice","seq":3,"queue":[{"id":7,"video":"9bZkp7q19f0","by":"Bob"}],"ts":1792684800123}
 ```
+
+`seq` crece cada vez que un video pasa a ser el actual; `queue` es la lista de pendientes
+(`[]` si no hay), cada uno con su `id` asignado por el servidor, su `video` y quién lo agregó (`by`).
 
 Quien entra con un video cargado recibe ese frame justo después de `history` (`welcome` → `users`
 → `history` → `music` → `join`); sin video cargado no recibe ninguno. No entra al `history`. Si
@@ -218,10 +227,11 @@ origen, las imágenes de la lista permitida y, como único frame, `https://www.y
 (`frame-src`) para el reproductor de `musica`. No se carga ningún script de YouTube.
 
 > [!NOTE]
-> **Reproductor de `musica`:** la página arma el iframe de `youtube-nocookie.com` recién cuando
-> apretás **Escuchar**; antes no se hace ningún pedido a YouTube. Después de ese clic, YouTube
-> ve tu IP y el origen de la página (sin ruta ni query). "Poner", pausar y saltar funcionan sin
-> Escuchar porque solo viajan por el WebSocket. La sala con reproductor es `musicRoom`
+> **Reproductor de `musica`:** al mostrar el panel `musica` con un video actual, la página arma
+> el iframe de `youtube-nocookie.com` y arranca sola, sin un clic previo: YouTube ve tu IP y el
+> origen de la página (sin ruta ni query). **Escuchar** queda solo como respaldo, con un aviso,
+> cuando el navegador bloquea el audio. Mientras no abras `musica`, no se hace ningún pedido a
+> YouTube. La sala con reproductor es `musicRoom`
 > (`main.go`) y `MUSIC_ROOM` (`app.js`); un test falla si difieren.
 
 <p align="center"><img src="docs/readme/divider.svg" alt=""></p>

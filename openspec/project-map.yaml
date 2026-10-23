@@ -102,14 +102,18 @@ api_surface:
     description: "Embedded script and stylesheet (text/javascript, text/css; charset=utf-8) with nosniff and no-cache"
     auth: null
 staleness:
-  status: fresh
-  checked_at: 2026-10-23T14:48:45Z
+  status: stale
+  checked_at: 2026-10-23T17:50:39.286Z
   since_commit: bdfb1ed
-  head_commit: bdfb1ed
+  head_commit: dac9b6b
   threshold: 5
   drift:
     changed_files_in_modules: 0
     dependency_manifests_changed: false
-    modules_added: []
+    modules_added:
+      - cmd
+      - internal
+      - openspec
     modules_removed: []
-  invalidated_by: []
+  invalidated_by:
+    - modules

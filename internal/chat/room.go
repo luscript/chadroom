@@ -104,7 +104,7 @@ func (cr *Room) admit(c *Client) {
 		encode(historyFrame{typeHistory, cr.history, ts}),
 	}
 	if cr.player != nil && cr.player.video != "" {
-		private = append(private, encode(cr.player.frame(now))) // CHAT-30: state right after history
+		private = append(private, encode(cr.player.frame(now))) // CHAT-30: state (current track, seq and queue) right after history; no video yet means nothing to send
 	}
 	for _, f := range private {
 		if f == nil || !cr.deliver(c, f) {
@@ -254,7 +254,7 @@ func (cr *Room) music(in inbound) {
 	}
 	now := time.Now()
 	if !cr.player.apply(in.music, in.from.nickname, now) {
-		return // needs a loaded video
+		return // not applicable in the current state (CHAT-30)
 	}
 	if f := encode(cr.player.frame(now)); f != nil {
 		cr.publish(f)

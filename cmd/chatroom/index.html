@@ -76,16 +76,18 @@
       </form>
       <div class="music-controls">
         <button id="music-toggle" type="button" class="btn" aria-label="Reproducir para todos" disabled>▶</button>
+        <button id="music-skip" type="button" class="btn" aria-label="Saltar al siguiente" disabled>⏭</button>
         <input id="music-seek" type="range" min="0" max="0" step="1" value="0" aria-label="Posición" disabled>
         <span id="music-time" class="music-time">0:00</span>
         <button id="music-mute" type="button" class="btn btn-ghost" aria-label="Silenciar" aria-pressed="false">🔊</button>
         <input id="music-volume" type="range" min="0" max="100" value="100" aria-label="Volumen">
       </div>
       <div id="music-now" class="music-now">No suena nada. Pegá un link y tocá Poner.</div>
+      <ol id="music-queue" class="music-queue" aria-label="Cola" hidden></ol>
       <div id="music-error" class="music-error" role="alert" hidden></div>
-      <div id="music-consent" class="music-consent">
+      <div id="music-consent" class="music-consent" hidden>
         <button id="music-listen" type="button" class="btn btn-accent">Escuchar</button>
-        <span>Carga el reproductor de YouTube (youtube-nocookie.com) en esta página.</span>
+        <span>Tu navegador bloqueó el audio: apretá Escuchar.</span>
       </div>
       <div id="music-player" class="music-player" hidden></div>
     </section>

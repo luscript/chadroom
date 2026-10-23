@@ -310,7 +310,7 @@
     updateLeaveBtn();
     renderTyping();
     renderMusic();
-    if (musicShown()) { createPlayer(); reconcile(); } else pauseLocal(); // createPlayer: only if consent and a video
+    syncShown();
   }
 
   function teardown(room) {
@@ -565,6 +565,11 @@
         if (room.id === MUSIC_ROOM && msg.from === room.myName && music.awaitSnapshot) {
           music.awaitSnapshot = false;
           music.srv = null;
+          music.loadedSeq = 0;
+          music.endedSeq = 0;
+          music.finishedSeq = 0;
+          music.duration = 0;
+          renderQueue();
           renderMusic();
           reconcile();
         }
@@ -967,8 +972,9 @@
 
   // — shared music (CHAT-30, CHAT-31) —
   // Only the musica room has a player. The server holds its state; this page follows it.
-  // Nothing here contacts YouTube until the user presses "Escuchar", and no YouTube script is
-  // ever loaded: the iframe is driven with postMessage, the way YouTube's own widget does it.
+  // Nothing here contacts YouTube until the musica pane is shown while a video is current (other
+  // rooms never do), and no YouTube script is ever loaded: the iframe is driven with postMessage,
+  // the way YouTube's own widget does it. "Escuchar" only appears when the browser blocks audio.
   const MUSIC_ROOM = 'musica'; // mirrors musicRoom in cmd/chatroom/main.go
   const YT_ORIGIN = 'https://www.youtube-nocookie.com';
   const YT_EMBED = 'https://www.youtube-nocookie.com/embed/';
@@ -989,6 +995,11 @@
   const MUSIC_ASSERT_MS = 2000; // while the player has never reported a state: re-send the server's intent this often
   const MUSIC_STALE_MS = 1000; // after a load: ignore the widget's reports of the previous video this long
   const MUSIC_SEEK_FRAME_MS = 1000; // a frame this far from where we expected the track is a server seek
+  const MUSIC_QUEUE_MAX = 30; // mirrors maxMusicQueue in internal/chat/music.go
+  const MUSIC_END_GRACE_MS = 2000; // time-based end report: this long past the reported duration
+  const MUSIC_PLATEAU_MS = 2000; // the player's clock stood still this long while the room plays: the track ended
+  const MUSIC_PLATEAU_NEAR_END_MS = 3000; // with a known duration, a plateau only counts this close to the end
+  const MUSIC_END_RETRY_MS = 3000; // the server dropped an `ended` (gate): resend while the room still plays the same seq
   // Fixed texts by error code: nothing from the iframe ever reaches the DOM.
   const MUSIC_ERRORS = {
     100: 'El video no existe o es privado.',
@@ -998,12 +1009,17 @@
   };
 
   const music = {
-    consent: false, // "Escuchar" pressed: the iframe may exist (kept for the page's life)
+    shown: false, // the pane was visible at the last activate (see syncShown)
     blocked: false, // the browser refused to start playback: ask for a click again
     frame: null, ready: false, listenTimer: null,
-    srv: null, // {video, playing, pos, by, at}: the server's state, the only thing the UI shows
+    srv: null, // {video, playing, pos, by, seq, queue, at}: the server's state, the only thing the UI shows
     awaitSnapshot: false, // between welcome and our own join: a snapshot may still arrive
-    loaded: '', // video id handed to the player
+    loadedSeq: 0, // seq of the track handed to the player (0 = none); ids repeat, seq does not
+    endedSeq: 0, // seq whose end this page already reported
+    endedAt: 0, // when that report was sent
+    finishedSeq: 0, // seq that ended locally: never auto-replayed until a frame moves on (seek, resume, new seq)
+    timeMovedAt: 0, // last time the player's currentTime actually changed
+    staleEndUntil: 0, // until then a reported state 0 may belong to what the page just replaced
     state: -1, time: 0, timeAt: 0, duration: 0, // what the player last reported (seconds)
     reported: false, // the player has reported a playerState for the loaded video (the real widget may never)
     assertAt: 0, // last blind play/pause while the state is unknown
@@ -1064,23 +1080,56 @@
     if (extra) sendMusic('seek', extra); // goes through the gap check again
   }
 
+  // A fresh copy of the queue when every item is well formed and there are at most
+  // MUSIC_QUEUE_MAX of them, else null (the whole frame is then dropped).
+  function cleanQueue(queue) {
+    if (!Array.isArray(queue) || queue.length > MUSIC_QUEUE_MAX) return null;
+    const items = [];
+    for (const it of queue) {
+      if (!it || typeof it !== 'object' || Array.isArray(it) || !Number.isInteger(it.id) || it.id < 1 ||
+          typeof it.video !== 'string' || !YT_ID.test(it.video) || typeof it.by !== 'string') return null;
+      items.push({ id: it.id, video: it.video, by: it.by });
+    }
+    return items;
+  }
+
   function onMusicFrame(msg) {
     if (typeof msg.video !== 'string' || !YT_ID.test(msg.video) || typeof msg.playing !== 'boolean' ||
-        !Number.isFinite(msg.pos) || msg.pos < 0 || typeof msg.by !== 'string') return;
+        !Number.isFinite(msg.pos) || msg.pos < 0 || typeof msg.by !== 'string' ||
+        !Number.isInteger(msg.seq) || msg.seq < 1 || !Number.isFinite(msg.ts)) return;
+    const queue = cleanQueue(msg.queue);
+    if (queue === null) return;
     music.awaitSnapshot = false;
-    if (!music.srv || music.srv.video !== msg.video) {
+    const prev = music.srv;
+    const sameTrack = !!prev && prev.seq === msg.seq && prev.video === msg.video;
+    if (!sameTrack) {
+      // seq going backwards (or repeating with another video) means the server restarted: forget the old identity.
+      if (prev && msg.seq <= prev.seq) {
+        music.loadedSeq = 0;
+        music.endedSeq = 0;
+        music.finishedSeq = 0;
+      }
       music.duration = 0;
-      // A seek held for the previous video must not land on the new one.
+      // A seek held for the previous track must not land on the new one.
       clearTimeout(music.seekTimer);
       music.seekTimer = null;
       music.pendingSeek = null;
+    } else if (!prev.playing && msg.playing) {
+      music.endedSeq = 0; // any paused -> playing transition of the same seq re-arms the ended report
+      music.finishedSeq = 0;
+      music.timeMovedAt = performance.now();
     }
-    // A frame far from where the track should be now is a server seek (or a new video).
-    const seek = !!music.srv && music.srv.video === msg.video && Math.abs(msg.pos - expectedMs()) > MUSIC_SEEK_FRAME_MS;
-    music.srv = { video: msg.video, playing: msg.playing, pos: msg.pos, by: msg.by, at: performance.now() };
+    // A frame far from where the track should be now is a server seek (or a new track).
+    const seek = sameTrack && Math.abs(msg.pos - expectedMs()) > MUSIC_SEEK_FRAME_MS;
+    if (seek) {
+      music.finishedSeq = 0; // the room moved inside the track: it is playable again
+      music.endedSeq = 0;
+    }
+    music.srv = { video: msg.video, playing: msg.playing, pos: msg.pos, by: msg.by, seq: msg.seq, queue, at: performance.now() };
     music.settleUntil = 0; // a global action applies at once
     music.playTries = 0;
-    createPlayer(); // a no-op without consent, while hidden, or with a player already
+    createPlayer(); // a no-op without a video, while hidden, or with a player already
+    renderQueue();
     renderMusic();
     reconcile({ seek });
   }
@@ -1107,6 +1156,81 @@
   }
 
   const musicEnded = () => !!music.srv && music.duration > 0 && expectedMs() >= music.duration * 1000;
+
+  // The track is over for this page: by the clock, or latched by checkLocalEnd (state 0, plateau).
+  // The latch does not need a known duration, and is what keeps every play re-send away from a finished track.
+  const trackDone = () => musicEnded() || (!!music.srv && music.finishedSeq === music.srv.seq);
+
+  // Latches the end of the loaded track. Three signals, any of which is enough: the widget's state 0,
+  // the room clock past a known duration, or the widget's clock standing still while the room plays
+  // (a silent widget, or one whose duration never arrived: infoDelivery only carries changes).
+  function checkLocalEnd() {
+    const s = music.srv;
+    if (!s || music.loadedSeq !== s.seq || music.finishedSeq === s.seq) return;
+    const dur = music.duration;
+    const clockEnd = s.playing && dur > 0 && expectedMs() >= dur * 1000 + MUSIC_END_GRACE_MS;
+    const stalled = s.playing && music.time > 0 && !music.blocked && !music.errored &&
+      (music.state === -1 || music.state === 0 || music.state === 1) &&
+      (dur <= 0 || music.time * 1000 >= dur * 1000 - MUSIC_PLATEAU_NEAR_END_MS) &&
+      performance.now() - music.timeMovedAt >= MUSIC_PLATEAU_MS;
+    if (music.state === 0 || clockEnd || stalled) music.finishedSeq = s.seq;
+  }
+
+  // The seekTo every path uses. The player's own time is updated at once, so a stale pre-seek
+  // currentTime cannot trigger a second, wrong drift seek; a state 0 left over from the track
+  // that just ended is forgotten (the seek replaces it).
+  function seekLocal() {
+    const now = performance.now();
+    const t = seekSeconds();
+    ytCommand('seekTo', [t, true]);
+    music.time = t;
+    music.timeAt = now;
+    music.timeMovedAt = now;
+    music.staleEndUntil = now + MUSIC_STALE_MS;
+    if (music.state === 0) music.state = -1;
+  }
+
+  // Frames only (never the tick), so a remove button keeps focus. Texts reach the DOM via textContent.
+  function renderQueue() {
+    const list = $('music-queue');
+    const queue = music.srv ? music.srv.queue : [];
+    list.replaceChildren(...queue.map((item) => {
+      const li = document.createElement('li');
+      li.className = 'music-queue-item';
+      const label = document.createElement('span');
+      label.textContent = 'youtu.be/' + item.video + ' · agregado por ' + item.by;
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'btn btn-ghost';
+      rm.textContent = '✕';
+      rm.setAttribute('aria-label', 'Quitar de la cola');
+      rm.dataset.id = String(item.id);
+      li.append(label, rm);
+      return li;
+    }));
+    list.hidden = queue.length === 0;
+  }
+
+  // Reports the end of the loaded track once per play-through; the server dedupes across clients.
+  // See checkLocalEnd for what counts as an end: the real widget may never report a state or a
+  // duration, and the queue must not stall. An `ended` the server dropped is resent every few seconds.
+  function maybeReportEnded() {
+    const s = music.srv;
+    if (!s || music.loadedSeq !== s.seq) return;
+    checkLocalEnd();
+    if (music.finishedSeq !== s.seq) return;
+    const now = performance.now();
+    if (music.endedSeq === s.seq && !(s.playing && now - music.endedAt >= MUSIC_END_RETRY_MS)) return;
+    if (sendEnded(s.seq)) { music.endedSeq = s.seq; music.endedAt = now; }
+  }
+
+  // Not sendMusic: the server gates `ended` apart from the controls, so the 300 ms gap does not apply.
+  function sendEnded(seq) {
+    const room = musicRoom();
+    if (!room || room.status !== 'online' || !room.ws || room.ws.readyState !== WebSocket.OPEN) return false;
+    room.ws.send(JSON.stringify({ type: 'music', action: 'ended', seq }));
+    return true;
+  }
 
   function formatClock(ms) {
     const total = Math.max(0, Math.floor(ms / 1000));
@@ -1137,11 +1261,14 @@
     const room = musicRoom();
     const online = room.status === 'online';
     const s = music.srv;
-    const ended = musicEnded();
+    const ended = trackDone();
     $('music-load').disabled = !online;
     const toggle = $('music-toggle');
     toggle.disabled = !s || !online;
-    if (ended) { toggle.textContent = '↺'; toggle.setAttribute('aria-label', 'Repetir'); }
+    const skip = $('music-skip');
+    skip.disabled = !s || !online || s.queue.length === 0;
+    for (const b of $('music-queue').querySelectorAll('button')) b.disabled = !online;
+    if (ended && s && !s.playing) { toggle.textContent = '↺'; toggle.setAttribute('aria-label', 'Repetir'); }
     else if (s && s.playing) { toggle.textContent = '⏸'; toggle.setAttribute('aria-label', 'Pausar para todos'); }
     else { toggle.textContent = '▶'; toggle.setAttribute('aria-label', 'Reproducir para todos'); }
 
@@ -1156,7 +1283,7 @@
     else if (s) time = formatClock(dur > 0 ? Math.min(expectedMs(), dur * 1000) : expectedMs()) + (dur > 0 ? ' / ' + formatClock(dur * 1000) : '');
     $('music-time').textContent = time;
     $('music-now').textContent = s ? 'youtu.be/' + s.video + ' · último cambio: ' + s.by : 'No suena nada. Pegá un link y tocá Poner.';
-    $('music-consent').hidden = music.consent && (!music.blocked || music.errored);
+    $('music-consent').hidden = !music.blocked || music.errored;
     $('music-player').hidden = !music.frame;
   }
 
@@ -1165,14 +1292,15 @@
   function musicTick() {
     renderMusic();
     reconcile();
+    maybeReportEnded();
   }
 
   // — the YouTube iframe —
-  // Built only after "Escuchar", and only while the musica pane is on screen (never while the
+  // Built only while the musica pane is on screen with a video current (never while the
   // user is in another room). Every attribute is set before it is appended, so the very first
   // request already carries the referrer policy.
   function createPlayer() {
-    if (music.frame || !music.consent || !music.srv || !musicShown()) return;
+    if (music.frame || !music.srv || !musicShown()) return;
     const frame = document.createElement('iframe');
     frame.title = 'Reproductor de YouTube';
     frame.referrerPolicy = 'strict-origin-when-cross-origin'; // keeps error 153 away; sends only the origin
@@ -1209,7 +1337,7 @@
         music.listenTimer = null;
         if (music.frame) { music.frame.remove(); music.frame = null; }
         music.ready = false;
-        music.loaded = '';
+        music.loadedSeq = 0;
         music.blocked = true;
         setMusicError('No se pudo cargar el reproductor.');
         renderMusic();
@@ -1223,6 +1351,8 @@
 
   function setYTState(v) {
     if (!YT_STATES.has(v)) return;
+    // A 0 shortly after a load/cue/seek we posted is the previous track's end, not this one's.
+    if (v === 0 && performance.now() < music.staleEndUntil) return;
     music.state = v;
     music.reported = true;
   }
@@ -1251,12 +1381,13 @@
           // duration) for a moment; judging drift against that would seek the new video.
           if (performance.now() < music.ignoreInfoUntil) break;
           if (Number.isFinite(info.currentTime) && info.currentTime >= 0) {
+            if (Math.abs(info.currentTime - music.time) > 0.05) music.timeMovedAt = performance.now();
             music.time = info.currentTime;
             music.timeAt = performance.now();
           }
           setYTState(info.playerState);
           // Ignore a duration that may still belong to the previous video.
-          if (Number.isFinite(info.duration) && info.duration > 0 && music.srv && music.loaded === music.srv.video) {
+          if (Number.isFinite(info.duration) && info.duration > 0 && music.srv && music.loadedSeq === music.srv.seq) {
             music.duration = info.duration;
           }
         }
@@ -1275,6 +1406,7 @@
     }
     renderMusic();
     reconcile();
+    maybeReportEnded();
   }
   window.addEventListener('message', onYTMessage);
 
@@ -1296,12 +1428,14 @@
       if (music.state === 1 || music.state === 3) ytCommand('pauseVideo');
       return;
     }
-    if (s.video !== music.loaded) {
+    if (s.seq !== music.loadedSeq) {
       ytCommand(s.playing ? 'loadVideoById' : 'cueVideoById', [s.video, startSeconds()]);
-      music.loaded = s.video;
+      music.loadedSeq = s.seq;
       music.ignoreInfoUntil = now + MUSIC_STALE_MS;
+      music.staleEndUntil = now + MUSIC_STALE_MS;
       music.duration = 0;
       music.time = 0;
+      music.timeMovedAt = now;
       music.state = -1;
       music.reported = false;
       music.assertAt = now;
@@ -1310,14 +1444,13 @@
       setMusicError('');
       return;
     }
-    const ended = musicEnded();
+    checkLocalEnd();
+    const ended = trackDone();
     if (frame) {
-      if (frame.seek) ytCommand('seekTo', [seekSeconds(), true]);
+      if (frame.seek) seekLocal();
       if (!s.playing) ytCommand('pauseVideo');
-      else if (!ended && !music.errored) {
-        if (music.state === 0 && !frame.seek) ytCommand('seekTo', [seekSeconds(), true]);
-        ytCommand('playVideo');
-      }
+      else if (!ended && !music.errored && (frame.seek || music.state !== 0)) ytCommand('playVideo'); // an ended player waits for the next frame
+
       music.assertAt = now;
       music.settleUntil = now + MUSIC_SETTLE_MS;
       return;
@@ -1326,20 +1459,18 @@
       if (now >= music.settleUntil && now >= music.assertAt + MUSIC_ASSERT_MS) {
         music.assertAt = now;
         if (!s.playing) ytCommand('pauseVideo');
-        else if (!ended && !music.blocked && !music.errored) ytCommand('playVideo');
+        // a clock that moved lately means it is already playing: re-sending play could only restart a finished track
+        else if (!ended && !music.blocked && !music.errored && !(music.time > 0 && now - music.timeMovedAt < 3 * MUSIC_PLATEAU_MS)) ytCommand('playVideo');
       }
       return;
     }
-    if (s.playing && !ended && music.state !== 1 && music.state !== 3) {
+    if (s.playing && !ended && music.state !== 0 && music.state !== 1 && music.state !== 3) {
       if (!music.blocked && !music.errored && now >= music.settleUntil) {
         if (music.playTries >= 2) {
           music.blocked = true; // two tries went nowhere: ask for a click
           renderMusic();
         } else {
           music.playTries++;
-          // An ended player (state 0) would restart from 0 on playVideo, so move it to the
-          // server position first.
-          if (music.state === 0) ytCommand('seekTo', [seekSeconds(), true]);
           ytCommand('playVideo');
           music.settleUntil = now + MUSIC_SETTLE_MS;
         }
@@ -1347,9 +1478,9 @@
     } else if (!s.playing && (music.state === 1 || music.state === 3)) {
       ytCommand('pauseVideo');
     }
-    if (!ended && music.state !== -1 && now >= music.settleUntil &&
+    if (!ended && music.state !== -1 && music.state !== 0 && now >= music.settleUntil &&
         Math.abs(localMs() - expectedMs()) > MUSIC_DRIFT_MS) {
-      ytCommand('seekTo', [seekSeconds(), true]);
+      seekLocal();
       if (!s.playing) ytCommand('pauseVideo'); // a cued or unstarted video may start playing on seek
       music.settleUntil = now + MUSIC_SETTLE_MS;
     }
@@ -1360,7 +1491,21 @@
     ytCommand('pauseVideo');
   }
 
-  // The room's socket is gone for good (leave): back to the state before any frame. Consent stays.
+  // Called by activate. On hidden -> shown the player is forced to the room's position: the
+  // local one froze at the pause, and no frame says the room moved on. reconcile({seek:true}) seeks
+  // then plays/pauses whatever was reported, or loads when the track changed meanwhile.
+  function syncShown() {
+    const was = music.shown;
+    music.shown = musicShown();
+    if (!music.shown) { if (was) pauseLocal(); return; }
+    createPlayer(); // a no-op without a video or with a frame already
+    if (was) { reconcile(); return; } // still shown (e.g. a repeated activate): no audible seek
+    music.settleUntil = 0;
+    music.playTries = 0;
+    reconcile({ seek: true });
+  }
+
+  // The room's socket is gone for good (leave): back to the state before any frame.
   function resetMusic() {
     clearInterval(music.listenTimer);
     music.listenTimer = null;
@@ -1373,7 +1518,13 @@
     music.pendingSeek = null;
     music.srv = null;
     music.awaitSnapshot = false;
-    music.loaded = '';
+    music.loadedSeq = 0;
+    music.endedSeq = 0;
+    music.endedAt = 0;
+    music.finishedSeq = 0;
+    music.timeMovedAt = 0;
+    music.staleEndUntil = 0;
+    music.shown = false;
     music.state = -1;
     music.reported = false;
     music.assertAt = 0;
@@ -1385,6 +1536,7 @@
     music.ignoreInfoUntil = 0;
     music.seeking = false;
     setMusicError('');
+    renderQueue();
     renderMusic();
   }
 
@@ -1396,7 +1548,11 @@
       setMusicError('Ese link no es de YouTube.');
       return;
     }
-    if (sendMusic('load', { video: id })) {
+    if (music.srv && music.srv.queue.length >= MUSIC_QUEUE_MAX) {
+      setMusicError('La cola está llena');
+      return;
+    }
+    if (sendMusic('add', { video: id })) {
       $('music-url').value = '';
       setMusicError('');
     }
@@ -1406,8 +1562,19 @@
   $('music-toggle').addEventListener('click', () => {
     const s = music.srv;
     if (!s) return;
-    if (musicEnded()) sendMusic('seek', { pos: 0 });
-    else sendMusic(s.playing ? 'pause' : 'play');
+    if (trackDone() && !s.playing) {
+      // play on a finished track would resume at its end, so rewind first
+      if (sendMusic('seek', { pos: 0 })) setTimeout(() => sendMusic('play'), MUSIC_SEND_GAP_MS + 20);
+    } else {
+      sendMusic(s.playing ? 'pause' : 'play');
+    }
+  });
+
+  $('music-skip').addEventListener('click', () => { sendMusic('skip'); });
+
+  $('music-queue').addEventListener('click', (e) => {
+    const b = e.target instanceof Element ? e.target.closest('button[data-id]') : null;
+    if (b) sendMusic('remove', { id: Number(b.dataset.id) });
   });
 
   $('music-seek').addEventListener('input', () => { music.seeking = true; });
@@ -1426,14 +1593,14 @@
     ytCommand('setVolume', [Number($('music-volume').value)]);
   });
 
-  // The one consent point: the first request to YouTube happens here.
+  // The fallback when the browser blocked audio: the click is the user activation that lets play
+  // start, and it re-syncs to the room first (same forced path as returning to the pane).
   $('music-listen').addEventListener('click', () => {
-    music.consent = true;
     music.blocked = false;
     music.playTries = 0;
     music.settleUntil = 0;
     if (music.srv && !music.frame) { setMusicError(''); createPlayer(); } // a retry after a failed handshake starts clean
-    else if (music.srv && music.srv.playing) ytCommand('playVideo');
+    else if (music.srv) reconcile({ seek: true });
     renderMusic();
   });
 })();

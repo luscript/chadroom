@@ -86,12 +86,14 @@ type typingDMFrame struct {
 // musicFrame is a room's shared player state (CHAT-30). pos is computed when the frame is
 // built, so receivers treat it as "now" and server/client clock skew doesn't matter. Never stored.
 type musicFrame struct {
-	Type    string `json:"type"` // always "music"
-	Video   string `json:"video"`
-	Playing bool   `json:"playing"`
-	Pos     int64  `json:"pos"` // ms
-	By      string `json:"by"`
-	TS      int64  `json:"ts"`
+	Type    string      `json:"type"` // always "music"
+	Video   string      `json:"video"`
+	Playing bool        `json:"playing"`
+	Pos     int64       `json:"pos"` // ms
+	By      string      `json:"by"`
+	Seq     int64       `json:"seq"`   // tracks that have become current; the page reports ended per seq
+	Queue   []queueItem `json:"queue"` // never nil: [] when empty
+	TS      int64       `json:"ts"`
 }
 
 type inboundKind uint8
@@ -162,26 +164,32 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 	return inbound{text: whole}, strings.TrimSpace(whole) != ""
 }
 
-// parseMusic validates a music control's fields (CHAT-30). Whether a video is loaded is
-// the hub's business.
+// parseMusic validates a music control's fields (CHAT-30). Whether it applies to the
+// current state is the hub's business.
 func parseMusic(env map[string]json.RawMessage) (musicCmd, bool) {
 	action, _ := jsonString(env["action"])
 	switch action {
-	case musicLoad:
+	case musicAdd:
 		video, ok := jsonString(env["video"])
 		return musicCmd{action: action, video: video}, ok && videoID.MatchString(video)
-	case musicPlay, musicPause:
+	case musicRemove:
+		id, ok := jsonInt(env["id"])
+		return musicCmd{action: action, id: id}, ok && id >= 1
+	case musicSkip, musicPlay, musicPause:
 		return musicCmd{action: action}, true
+	case musicEnded:
+		seq, ok := jsonInt(env["seq"])
+		return musicCmd{action: action, seq: seq}, ok && seq >= 1
 	case musicSeek:
-		pos, ok := jsonMillis(env["pos"])
+		pos, ok := jsonInt(env["pos"])
 		return musicCmd{action: action, pos: pos}, ok && pos >= 0 && pos <= maxMusicPos
 	}
 	return musicCmd{}, false
 }
 
-// jsonMillis decodes a JSON integer. "null" (which Unmarshal would read as 0), strings,
+// jsonInt decodes a JSON integer. "null" (which Unmarshal would read as 0), strings,
 // booleans, objects, fractions and exponents are all rejected.
-func jsonMillis(raw json.RawMessage) (int64, bool) {
+func jsonInt(raw json.RawMessage) (int64, bool) {
 	if len(raw) == 0 || (raw[0] != '-' && (raw[0] < '0' || raw[0] > '9')) {
 		return 0, false
 	}

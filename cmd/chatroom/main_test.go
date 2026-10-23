@@ -602,7 +602,7 @@ func readFrameType(t *testing.T, conn *websocket.Conn) string {
 // SRV-06: only the musica room has a shared player; a control in any other room is dropped, never chat.
 func TestMusicOnlyInMusica(t *testing.T) {
 	ts := newTestServer(t)
-	const load = `{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`
+	const load = `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`
 
 	m := dialRoomConn(t, ts, "musica", "A")
 	if err := m.WriteMessage(websocket.TextMessage, []byte(load)); err != nil {
@@ -630,6 +630,7 @@ func TestIndexHasMusicPlayer(t *testing.T) {
 		`id="music-url"`, `id="music-load"`, `id="music-toggle"`, `id="music-seek"`,
 		`id="music-time"`, `id="music-volume"`, `id="music-mute"`, `id="music-now"`,
 		`id="music-error"`, `id="music-listen"`, `id="music-player"`,
+		`id="music-skip"`, `id="music-queue"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("index.html missing %s", want)
@@ -651,11 +652,17 @@ func TestIndexHasMusicPlayer(t *testing.T) {
 	if !regexp.MustCompile(`(?s)id="music-listen"[^>]*>\s*Escuchar\s*<`).MatchString(html) {
 		t.Error(`#music-listen must be the "Escuchar" button`)
 	}
+	if !regexp.MustCompile(`\shidden[\s>]`).MatchString(startTag("music-consent") + ">") {
+		t.Errorf("#music-consent must start hidden: %s", startTag("music-consent"))
+	}
+	if !strings.Contains(html, "Tu navegador bloqueó el audio: apretá Escuchar.") {
+		t.Error("index.html missing the blocked-audio warning text")
+	}
 	tabs, music, rule := strings.Index(html, `id="room-tabs"`), strings.Index(html, `id="music"`), strings.Index(html, `class="rule"`)
 	if tabs < 0 || music < 0 || rule < 0 || tabs >= music || music >= rule {
 		t.Fatalf(`id="music" must sit between id="room-tabs" and class="rule" (tabs=%d music=%d rule=%d)`, tabs, music, rule)
 	}
-	// The page must not contact YouTube before "Escuchar" (CHAT-31): the frame is built by app.js only.
+	// The page must not contact YouTube on its own (CHAT-31): the frame is built by app.js only, once the musica pane is shown.
 	if strings.Contains(strings.ToLower(html), "<iframe") {
 		t.Error("index.html contains an <iframe>")
 	}
@@ -687,6 +694,7 @@ func readMusicFrame(t *testing.T, conn *websocket.Conn) (frame struct {
 	Playing bool   `json:"playing"`
 	Pos     *int64 `json:"pos"`
 	By      string `json:"by"`
+	Seq     *int64 `json:"seq"`
 }) {
 	t.Helper()
 	for {
@@ -704,7 +712,7 @@ func readMusicFrame(t *testing.T, conn *websocket.Conn) (frame struct {
 	}
 }
 
-// CHAT-30: a load and a pause from one session reach the other, through the production wiring.
+// CHAT-30: an add and a pause from one session reach the other, through the production wiring.
 func TestMusicSyncAcrossSessions(t *testing.T) {
 	ts := newTestServer(t)
 	a := dialRoomConn(t, ts, "musica", "A")
@@ -716,17 +724,17 @@ func TestMusicSyncAcrossSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	send(`{"type":"music","action":"load","video":"dQw4w9WgXcQ"}`)
+	send(`{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`)
 	time.Sleep(300 * time.Millisecond) // past the per-connection music gate
 	send(`{"type":"music","action":"pause"}`)
 
 	for _, c := range []struct {
 		name    string
 		playing bool
-	}{{"load", true}, {"pause", false}} {
+	}{{"add", true}, {"pause", false}} {
 		f := readMusicFrame(t, b)
-		if f.Video != "dQw4w9WgXcQ" || f.Playing != c.playing || f.Pos == nil || f.By != "A" {
-			t.Fatalf("B after %s: %+v, want video dQw4w9WgXcQ playing=%v pos set by A", c.name, f, c.playing)
+		if f.Video != "dQw4w9WgXcQ" || f.Playing != c.playing || f.Pos == nil || f.Seq == nil || *f.Seq != 1 || f.By != "A" {
+			t.Fatalf("B after %s: %+v, want video dQw4w9WgXcQ playing=%v pos and seq 1 set by A", c.name, f, c.playing)
 		}
 	}
 }

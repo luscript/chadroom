@@ -46,7 +46,7 @@ internal/chat/
   room.go            Room: hub por sala (única goroutine dueña del registro de clientes)
   client.go          Client: readPump / writePump por conexión
   message.go         Sobre JSON (type, from, text, ts)
-  music.go           Reproductor compartido de `musica` (estado, posición, controles)
+  music.go           Reproductor compartido de `musica` (estado, posición, controles, cola compartida)
   nickname.go        Normalización y unicidad de nicknames
   *_test.go          tests unitarios del hub y de integración WebSocket (httptest)
 openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archive/, backlog.md
@@ -66,4 +66,4 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - Sala con reproductor: `musicRoom` (main.go) y `MUSIC_ROOM` (app.js); un test falla si difieren.
 - Sin código inline en la página (CSP estricta).
 - La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`).
-- Cambios con diseño van por SDD en `openspec/changes/`. En curso: ninguno.
+- Cambios con diseño van por SDD en `openspec/changes/`. En curso: music-queue.
