@@ -759,7 +759,7 @@ func TestParseInbound(t *testing.T) {
 		{"chat blank", `{"type":"chat","text":"  "}`, inbound{}, true},
 		{"chat text not a string", `{"type":"chat","text":5}`, inbound{text: `{"type":"chat","text":5}`}, false},
 		{"chat without text", `{"type":"chat"}`, inbound{text: `{"type":"chat"}`}, false},
-		{"unknown type", `{"type":"typing"}`, inbound{text: `{"type":"typing"}`}, false},
+		{"unknown type", `{"type":"poke"}`, inbound{text: `{"type":"poke"}`}, false},
 		{"missing type", `{"text":"x"}`, inbound{text: `{"text":"x"}`}, false},
 		{"array", `[1,2]`, inbound{text: `[1,2]`}, false},
 		{"json string", `"dm"`, inbound{text: `"dm"`}, false},
@@ -782,6 +782,22 @@ func TestParseInbound(t *testing.T) {
 		{"dm text null", `{"type":"dm","to":"B","text":null}`, inbound{kind: inboundBadDM}, false},
 		{"invalid wins over blank", `{"type":"dm","to":7,"text":" "}`, inbound{kind: inboundBadDM}, false},
 		{"dm blank text", `{"type":"dm","to":"B","text":"\n"}`, inbound{}, true},
+		{"typing room", `{"type":"typing"}`, inbound{kind: inboundTyping}, false},
+		{"typing blank text ignored", `{"type":"typing","text":"  "}`, inbound{kind: inboundTyping}, false},
+		{"typing text ignored", `{"type":"typing","text":"hola"}`, inbound{kind: inboundTyping}, false},
+		{"typing from ignored", `{"type":"typing","from":"C"}`, inbound{kind: inboundTyping}, false},
+		{"typing extra field ignored", `{"type":"typing","extra":1}`, inbound{kind: inboundTyping}, false},
+		{"typing dm", `{"type":"typing","to":"B"}`, inbound{kind: inboundTyping, to: "B"}, false},
+		{"typing to is cleaned", "{\"type\":\"typing\",\"to\":\"  bob‮ \"}", inbound{kind: inboundTyping, to: "bob"}, false},
+		{"typing to truncated", `{"type":"typing","to":"` + long + `"}`, inbound{kind: inboundTyping, to: strings.Repeat("ñ", 32)}, false},
+		{"typing to number", `{"type":"typing","to":7}`, inbound{}, true},
+		{"typing to null", `{"type":"typing","to":null}`, inbound{}, true},
+		{"typing to object", `{"type":"typing","to":{}}`, inbound{}, true},
+		{"typing empty to", `{"type":"typing","to":""}`, inbound{}, true},
+		{"typing blank to", `{"type":"typing","to":"   "}`, inbound{}, true},
+		{"typing to only bidi", "{\"type\":\"typing\",\"to\":\"‮\"}", inbound{}, true},
+		{"typing key case sensitive", `{"TYPE":"typing"}`, inbound{text: `{"TYPE":"typing"}`}, false},
+		{"typing value case sensitive", `{"type":"Typing"}`, inbound{text: `{"type":"Typing"}`}, false},
 		{"empty frame", ``, inbound{}, true},
 		{"spaces frame", `  `, inbound{}, true},
 	}
@@ -839,7 +855,7 @@ func TestChatEnvelopeAndForgery(t *testing.T) {
 	if m := nextChat(t, b, ""); m.From != "A" || m.Text != "hi" {
 		t.Fatalf("chat = %+v, want A hi", m)
 	}
-	for _, frame := range []string{`{"type":"typing"}`, `[1,2]`, `{"text":"x"}`, `{"type":"chat","text":5}`} {
+	for _, frame := range []string{`{"type":"poke"}`, `[1,2]`, `{"text":"x"}`, `{"type":"chat","text":5}`} {
 		send(t, a, frame)
 		if m := nextChat(t, b, ""); m.From != "A" || m.Text != frame {
 			t.Fatalf("chat = %+v, want A with the whole frame %q", m, frame)
@@ -902,4 +918,124 @@ func TestOversizedDMClosesSender(t *testing.T) {
 	send(t, a, frame)
 	expectReadError(t, a)
 	expectLeaveWithoutBroadcast(t, b, "A") // a dm would fail decode first
+}
+
+// readTyping reads the next frame (skipping joins) and requires it to be a typing signal.
+func readTyping(t *testing.T, conn *websocket.Conn) typingDMFrame {
+	t.Helper()
+	return decodeTyping(t, nextNonJoin(t, conn))
+}
+
+// CHAT-26: the gate admits one signal per interval and a discarded one does not move the window.
+func TestTypingGate(t *testing.T) {
+	base := time.Unix(1000, 0)
+	var g typingGate
+	steps := []struct {
+		at   time.Duration
+		want bool
+	}{
+		{0, true},
+		{999 * time.Millisecond, false},
+		{time.Second, true}, // boundary: exactly one interval later
+		{1500 * time.Millisecond, false},
+		{2 * time.Second, true}, // the discarded 1.5 s did not reset the window
+	}
+	for _, s := range steps {
+		if got := g.allow(base.Add(s.at)); got != s.want {
+			t.Fatalf("allow(+%v) = %v, want %v", s.at, got, s.want)
+		}
+	}
+}
+
+// CHAT-21, CHAT-26: room signals skip the sender, DM signals reach only the recipient, from is server-assigned.
+func TestTypingOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+	c, _ := dial(t, srv, "C")
+
+	send(t, a, `{"type":"typing","from":"C"}`)
+	for _, conn := range []*websocket.Conn{b, c} {
+		if f := readTyping(t, conn); f.From != "A" || f.To != "" {
+			t.Fatalf("typing = %+v, want from A without to", f)
+		}
+	}
+
+	send(t, b, `{"type":"typing","to":"a"}`)
+	if f := readTyping(t, a); f.From != "B" || f.To != "A" {
+		t.Fatalf("dm typing = %+v, want B -> A", f)
+	}
+
+	send(t, c, "sync")
+	for _, conn := range []*websocket.Conn{a, b, c} {
+		if m := nextChat(t, conn, ""); m.Text != "sync" { // a stray typing frame would fail decode
+			t.Fatalf("got %+v, want sync", m)
+		}
+	}
+}
+
+// CHAT-26: a second signal within the interval is dropped and the connection stays usable.
+func TestTypingThrottledOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, `{"type":"typing"}`)
+	send(t, a, `{"type":"typing"}`)
+	send(t, a, "hola")
+	if f := readTyping(t, b); f.From != "A" {
+		t.Fatalf("typing = %+v, want from A", f)
+	}
+	if m := nextChat(t, b, ""); m.Text != "hola" { // a second typing frame would fail decode
+		t.Fatalf("B got %+v, want hola", m)
+	}
+	if m := nextChat(t, a, ""); m.Text != "hola" {
+		t.Fatalf("A got %+v, want hola", m)
+	}
+}
+
+// CHAT-21: invalid typing frames are discarded without a reply and the connection stays open.
+func TestInvalidTypingDiscarded(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, `{"type":"typing","to":7}`)
+	send(t, a, `{"type":"typing","to":"   "}`)
+	send(t, a, "hola")
+	for _, conn := range []*websocket.Conn{a, b} {
+		if m := nextChat(t, conn, ""); m.Text != "hola" {
+			t.Fatalf("first chat = %+v, want hola", m)
+		}
+	}
+	// Invalid frames must not have consumed the throttle budget.
+	send(t, a, `{"type":"typing"}`)
+	if f := readTyping(t, b); f.From != "A" {
+		t.Fatalf("typing = %+v, want from A", f)
+	}
+}
+
+// CHAT-26: typing frames dropped by the throttle still extend the read deadline.
+// A never reads (so never answers pings) and sends typing frames for longer than
+// pongWait; all but the first per typingInterval are throttled.
+func TestThrottledTypingExtendsReadDeadline(t *testing.T) {
+	room := NewRoom("general")
+	shortPings(room)
+	srv, _ := startServer(t, room)
+
+	bMsgs := startReader(t, dialRaw(t, srv, "B"))
+	recvUntil(t, bMsgs, typeJoin, "B", "")
+	a := dialRaw(t, srv, "A")
+
+	interval := room.pongWait / 3 // 8 frames span about 2.7x pongWait
+	for i := 0; i < 8; i++ {
+		if err := a.WriteMessage(websocket.TextMessage, []byte(`{"type":"typing"}`)); err != nil {
+			t.Fatalf("frame %d: write failed, connection dropped: %v", i, err)
+		}
+		time.Sleep(interval) // pacing only
+	}
+	if err := a.WriteMessage(websocket.TextMessage, []byte("alive")); err != nil {
+		t.Fatal(err)
+	}
+	recvUntil(t, bMsgs, typeChat, "A", "alive")
 }

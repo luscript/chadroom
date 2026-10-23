@@ -27,7 +27,7 @@ type Room struct {
 	taken      map[string]struct{} // foldKey(nickname) of every registered client
 	history    []message           // last historySize chat messages, oldest first
 	dropped    []*Client           // slow clients removed by a fan-out, not yet announced
-	broadcast  chan inbound        // every inbound kind (chat and direct), so a client's frames stay ordered
+	broadcast  chan inbound        // every inbound kind (chat, direct and typing), so a client's frames stay ordered
 	register   chan *Client
 	unregister chan *Client
 	done       chan struct{} // closed by Run when it exits
@@ -164,6 +164,8 @@ func (cr *Room) dispatch(in inbound) {
 		cr.direct(in)
 	case inboundBadDM:
 		cr.dmError(in.from, "", reasonInvalid)
+	case inboundTyping:
+		cr.typing(in)
 	default:
 		cr.relay(in)
 	}
@@ -183,6 +185,44 @@ func (cr *Room) direct(in inbound) {
 	}
 	if f := encode(dmFrame{typeDM, in.from.nickname, to.nickname, in.text, time.Now().UnixMilli()}); f != nil {
 		cr.deliverPrivate(f, to, in.from)
+	}
+}
+
+// typing relays an ephemeral typing signal: to the room except the sender, or to one
+// recipient. Best effort; never stored, logged, answered or echoed. Run-only.
+func (cr *Room) typing(in inbound) {
+	ts := time.Now().UnixMilli()
+	if in.to == "" {
+		f := encode(typingFrame{typeTyping, in.from.nickname, ts})
+		if f == nil {
+			return
+		}
+		for c := range cr.clients {
+			if c != in.from {
+				cr.offer(c, f)
+			}
+		}
+		return
+	}
+	key := foldKey(in.to)
+	if key == foldKey(in.from.nickname) {
+		return // self: silent (no dm_error)
+	}
+	to := cr.memberByKey(key)
+	if to == nil {
+		return // offline: silent
+	}
+	if f := encode(typingDMFrame{typeTyping, in.from.nickname, to.nickname, ts}); f != nil {
+		cr.offer(to, f)
+	}
+}
+
+// offer queues msg for member c if its buffer has room and silently skips it otherwise.
+// Unlike deliver it never removes c: a skipped typing frame is not a slow client. Run-only.
+func (cr *Room) offer(c *Client, msg []byte) {
+	select {
+	case c.send <- msg:
+	default:
 	}
 }
 

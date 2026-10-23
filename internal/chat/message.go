@@ -15,6 +15,7 @@ const (
 	typeHistory = "history"
 	typeDM      = "dm"
 	typeDMError = "dm_error"
+	typeTyping  = "typing"
 	historySize = 50 // chat messages kept for newcomers
 
 	reasonInvalid = "invalid"
@@ -63,12 +64,28 @@ type dmErrorFrame struct {
 	TS     int64  `json:"ts"`
 }
 
+// typingFrame tells room members that from is typing (CHAT-26). Never stored.
+type typingFrame struct {
+	Type string `json:"type"` // always "typing"
+	From string `json:"from"`
+	TS   int64  `json:"ts"`
+}
+
+// typingDMFrame tells only the recipient that from is typing to them (CHAT-26).
+type typingDMFrame struct {
+	Type string `json:"type"` // always "typing"
+	From string `json:"from"`
+	To   string `json:"to"` // recipient's assigned nickname
+	TS   int64  `json:"ts"`
+}
+
 type inboundKind uint8
 
 const (
-	inboundChat  inboundKind = iota // zero value: inbound{from, text} literals stay room chat
-	inboundDM                       // to and text set
-	inboundBadDM                    // dm envelope with a bad to/text; answered with dm_error invalid
+	inboundChat   inboundKind = iota // zero value: inbound{from, text} literals stay room chat
+	inboundDM                        // to and text set
+	inboundBadDM                     // dm envelope with a bad to/text; answered with dm_error invalid
+	inboundTyping                    // typing signal; to == "" is a room signal
 )
 
 // inbound is a classified client text frame on its way to the hub. It travels on
@@ -76,7 +93,7 @@ const (
 type inbound struct {
 	from *Client
 	kind inboundKind
-	to   string // inboundDM only: cleanNickname(to), never ""
+	to   string // inboundDM: cleanNickname(to), never "". inboundTyping: "" for a room signal
 	text string
 }
 
@@ -100,6 +117,15 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 				return inbound{}, false
 			}
 			return inbound{kind: inboundDM, to: to, text: text}, true
+		case typeTyping:
+			// CHAT-21 rule 2: text is ignored and the blank rule does not apply.
+			raw, hasTo := env["to"]
+			if !hasTo {
+				return inbound{kind: inboundTyping}, true // room signal
+			}
+			to, toOK := jsonString(raw)
+			to = cleanNickname(to)
+			return inbound{kind: inboundTyping, to: to}, toOK && to != "" // invalid: silent discard
 		case typeChat:
 			// A non-string text intentionally falls through to the plain-text rule (CHAT-21).
 			if textOK {

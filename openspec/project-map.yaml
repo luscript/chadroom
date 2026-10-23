@@ -88,15 +88,16 @@ api_surface:
     auth: null
 staleness:
   status: stale
-  checked_at: 2026-10-23T12:47:58.372Z
+  checked_at: 2026-10-23T13:27:21.823Z
   since_commit: 0cdca6a
-  head_commit: f28ad27
+  head_commit: 624a2f2
   threshold: 5
   drift:
     changed_files_in_modules: 0
     dependency_manifests_changed: false
     modules_added:
       - cmd
+      - docs
       - internal
       - openspec
     modules_removed: []

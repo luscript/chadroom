@@ -79,7 +79,9 @@ Cada frame se interpreta así:
 |-------|--------|
 | `{"type":"chat","text":"hola"}` | Mensaje a la sala con ese `text`. |
 | `{"type":"dm","to":"bob","text":"hola"}` | Mensaje privado a `bob` (ver abajo). |
-| Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido, `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
+| `{"type":"typing"}` | "Escribiendo…" para toda la sala (ver abajo). |
+| `{"type":"typing","to":"bob"}` | "Escribiendo…" solo para `bob` (ver abajo). |
+| Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido (`typing` ya no cuenta), `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
 
 Los campos extra se ignoran; `from` nunca se toma del cliente. Un texto en blanco se descarta sin
 respuesta, también en un `dm`.
@@ -98,6 +100,7 @@ respuesta, también en un `dm`.
 | `chat`    | Mensaje de `from`, reenviado a todos. | el mensaje |
 | `dm`      | Mensaje privado de `from` para `to`: solo lo reciben ambos (ver Mensajes privados). | el mensaje |
 | `dm_error`| Un `dm` no se pudo entregar; solo lo recibe el remitente (ver Mensajes privados). | no lleva `text`; trae `to` y `reason` |
+| `typing`  | `from` está escribiendo: lo reciben todos menos `from`, o solo `to` si fue privado (ver Escribiendo…). | no lleva `text`; `to` solo en el privado |
 
 `ts` es el momento del evento en Unix milisegundos.
 
@@ -118,6 +121,17 @@ Si no se puede entregar, solo el remitente recibe un `dm_error` y la conexión s
 | `invalid` | Falta `to` o `text`, no son strings, o `to` queda vacío tras normalizarlo. | `""` |
 | `self`    | El destinatario es el propio remitente. | el `to` normalizado |
 | `offline` | Nadie en la sala tiene ese nickname. | el `to` normalizado |
+
+**Escribiendo…:** `typing` avisa que alguien empezó a escribir. El servidor reenvía como máximo
+uno por segundo por conexión (el resto se descarta sin cerrar nada), a todos menos al remitente
+o solo al `to` indicado. Es de mejor esfuerzo: un `to` inválido, el propio o de alguien que no
+está conectado se ignora sin respuesta, y un cliente con el buffer lleno simplemente no lo recibe.
+No se guarda, no entra al `history` ni se escribe en los logs.
+
+```json
+{"type":"typing","from":"Alice","ts":1792684800123}
+{"type":"typing","from":"Alice","to":"Bob","ts":1792684800123}
+```
 
 **Privacidad:** los mensajes privados no se guardan: no entran al `history`, el servidor no los
 reenvía ni los reintenta y no escribe su texto ni su destinatario en los logs. Quien se conecta
@@ -172,7 +186,7 @@ internal/chat/
   server.go          Server: elige la sala (`room`), hace el upgrade y aplica la política de orígenes
   room.go            Room: hub que registra clientes y difunde mensajes (uno por sala)
   client.go          Client: readPump / writePump por conexión
-  message.go         Mensajes JSON (type, from, text, ts), `dm`/`dm_error` y la clasificación de la entrada
+  message.go         Mensajes JSON (type, from, text, ts), `dm`/`dm_error`/`typing` y la clasificación de la entrada
   nickname.go        Normalización y unicidad de apodos
 ```
 

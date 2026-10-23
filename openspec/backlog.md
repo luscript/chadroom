@@ -44,6 +44,27 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] HTTP client with timeout, response trimmed to the fields the page needs; "Powered by
       GIPHY" attribution. Images come only from the allowlisted Giphy hosts.
 
+## `music-player` (room `musica`)
+- [ ] Web music player in the `musica` room only (hidden in `general` / `juegos`).
+- [ ] Open decisions for the design phase: audio source (embedded/self-hosted files, allowlisted
+      external hosts, or a third-party embed), and whether playback is local per user or
+      synced for the whole room (sync needs new envelope types handled by `Room.Run`).
+- [ ] Constraints to respect: strict CSP (add `media-src`/`frame-src` only for allowlisted
+      hosts, no inline code); same Go/`app.js` host-list coherence test as `imageHosts`;
+      external media leaks viewers' IPs, same as images.
+
+## `profile-picture`
+- [ ] Let each user set a profile picture, shown next to their messages and in the online
+      user list.
+- [ ] Open decisions for the design phase: source (image URL from the allowlisted hosts,
+      or file upload); whether it persists (no accounts today, so likely per session /
+      per connection); how other clients learn it (new field in the join/`users`/chat
+      envelopes, handled by `Room.Run`).
+- [ ] Constraints to respect: reuse `imageHosts` / `IMAGE_HOSTS` allowlist and CSP `img-src`
+      (URLs leak viewers' IPs); uploads would need size/type validation, storage and
+      rate limiting (pairs with `rate-limiting`); render with `textContent`/`img.src`,
+      never inline code.
+
 ## `deps-cleanup`
 - [ ] #17 `go mod tidy` (gin and gorilla are marked `// indirect`).
 - [ ] #18 Consider replacing gin with `net/http` `ServeMux` (only two routes).
@@ -65,6 +86,15 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] N6 Log 1003/1007 rejections with nickname.
 - [ ] N7 Assert CHAT-07 write deadline.
 
+## `typing-indicator-polish` (deferred from `typing-indicator` verify — low priority)
+- [x] Manual UI checklist from `changes/archive/2026-10-23-typing-indicator/design.md` (user-verified 2026-10-23).
+- [ ] Typing frames use send-buffer slots: an already-stuck client is evicted slightly sooner;
+      optional `offer` skip when the buffer is ¾ full.
+- [ ] Room and DM typing share one 1/s server budget: a pane switch within 1 s delays the first
+      DM indicator by up to 3 s (accepted, cosmetic).
+- [ ] Throttle is per connection, not per user/IP; invalid frames and malformed `dm` frames
+      (→ `dm_error`) are not rate-limited. Belongs with `rate-limiting` (connection cap).
+
 ## `nickname-polish` (deferred from `structured-messages` verify — low priority, friends-only chat)
 - [ ] M1 Invisible/format chars survive nickname cleanup (U+200B, U+FEFF, U+00AD, interior
       NBSP/U+2028, fillers U+3164/U+2800) → look-alike `Bob​` or blank names. Same class as
@@ -83,7 +113,7 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [x] Multiple rooms — done in `multiple-rooms` (2026-10-22).
 - [x] Private chat (1-to-1 DMs per room) — done in `private-chat` (2026-10-23).
 - [x] Last-N message history on join — done in `online-users-and-history` (2026-10-22).
-- [ ] Typing indicator.
+- [x] Typing indicator — done in `typing-indicator` (2026-10-23).
 
 ## `presence-history-polish` (deferred from `online-users-and-history` verify — low priority)
 - [ ] Own "X se unió" notice lands after "Reconectado" on reconnect; consider skipping the
