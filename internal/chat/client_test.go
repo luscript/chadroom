@@ -18,16 +18,23 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// startServer runs room.Run and an httptest server exposing GET /ws.
-// Timeout fields must be overridden on room BEFORE calling it.
+// startServer runs one room behind a Server with no extra allowed origins.
 func startServer(t *testing.T, room *Room) (srv *httptest.Server, cancel context.CancelFunc) {
 	t.Helper()
+	return startRooms(t, nil, room)
+}
+
+// startRooms runs a Server over rooms and an httptest server exposing GET /ws.
+// Timeout fields must be overridden on every room BEFORE calling it.
+func startRooms(t *testing.T, allowed []string, rooms ...*Room) (srv *httptest.Server, cancel context.CancelFunc) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
+	s := NewServer(allowed, rooms...)
 	engine := gin.New()
-	engine.GET("/ws", room.HandleWebSocket)
+	engine.GET("/ws", s.HandleWebSocket)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go room.Run(ctx)
+	go s.Run(ctx)
 	srv = httptest.NewServer(engine)
 	t.Cleanup(func() {
 		cancel()
@@ -40,6 +47,32 @@ func startServer(t *testing.T, room *Room) (srv *httptest.Server, cancel context
 func dialOrigin(srv *httptest.Server, nick, origin string) (*websocket.Conn, *http.Response, error) {
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?nickname=" + nick
 	return websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{origin}})
+}
+
+// dialRoomRaw connects to the named room with a same-host Origin and returns
+// without reading anything.
+func dialRoomRaw(t *testing.T, srv *httptest.Server, room, nick string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?nickname=" + nick + "&room=" + url.QueryEscape(room)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{srv.URL}})
+	if err != nil {
+		t.Fatalf("dial %s in %s: %v", nick, room, err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+// dialRoom is dial for a named room.
+func dialRoom(t *testing.T, srv *httptest.Server, room, nick string) (*websocket.Conn, string) {
+	t.Helper()
+	conn := dialRoomRaw(t, srv, room, nick)
+	m := readMsg(t, conn)
+	if m.Type != typeWelcome {
+		t.Fatalf("first frame = %+v, want welcome", m)
+	}
+	decodeUsers(t, readRaw(t, conn))
+	decodeHistory(t, readRaw(t, conn))
+	return conn, m.From
 }
 
 // dialRaw connects with a same-host Origin and returns without reading anything.
@@ -188,7 +221,7 @@ func recvUntil(t *testing.T, ch <-chan message, typ, from, text string) {
 
 // CHAT-01: a message from one client reaches every client as a chat envelope.
 func TestBroadcastReachesAllClients(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	a, _ := dial(t, srv, "A")
 	b, _ := dial(t, srv, "B")
 
@@ -214,7 +247,7 @@ func TestWebSocketOriginCheck(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, _ := startServer(t, NewRoom(tt.allowed))
+			srv, _ := startRooms(t, tt.allowed, NewRoom("general"))
 			conn, resp, err := dialOrigin(srv, "A", tt.origin(srv))
 			if tt.wantOK {
 				if err != nil {
@@ -236,7 +269,7 @@ func TestWebSocketOriginCheck(t *testing.T) {
 
 // CHAT-06: oversized frames close the sender; frames at the limit pass.
 func TestOversizedMessageClosesSender(t *testing.T) {
-	room := NewRoom(nil)
+	room := NewRoom("general")
 	room.maxMessageSize = 16
 	srv, _ := startServer(t, room)
 	a, _ := dial(t, srv, "A")
@@ -254,7 +287,7 @@ func TestOversizedMessageClosesSender(t *testing.T) {
 // CHAT-06: a frame of exactly the default limit, made of characters that need
 // JSON escaping, is accepted and its decoded text equals the frame.
 func TestMessageAtSizeLimitIsBroadcast(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	a, _ := dial(t, srv, "A")
 	b, _ := dial(t, srv, "B")
 
@@ -273,7 +306,7 @@ func shortPings(room *Room) {
 
 // CHAT-07: a client that never reads never answers pings and gets dropped.
 func TestUnresponsiveClientIsDropped(t *testing.T) {
-	room := NewRoom(nil)
+	room := NewRoom("general")
 	shortPings(room)
 	srv, _ := startServer(t, room)
 
@@ -286,7 +319,7 @@ func TestUnresponsiveClientIsDropped(t *testing.T) {
 
 // CHAT-07: a client that keeps reading answers pings and stays connected.
 func TestResponsiveClientSurvivesPingPeriods(t *testing.T) {
-	room := NewRoom(nil)
+	room := NewRoom("general")
 	shortPings(room)
 	srv, _ := startServer(t, room)
 
@@ -310,7 +343,7 @@ func TestResponsiveClientSurvivesPingPeriods(t *testing.T) {
 // A never reads, so it never answers pings, but it keeps sending text frames
 // for longer than pongWait and must stay connected.
 func TestAnyFrameExtendsReadDeadline(t *testing.T) {
-	room := NewRoom(nil)
+	room := NewRoom("general")
 	shortPings(room)
 	srv, _ := startServer(t, room)
 
@@ -333,7 +366,7 @@ func TestAnyFrameExtendsReadDeadline(t *testing.T) {
 
 // CHAT-09: binary frames close the sender with 1003 and are not broadcast.
 func TestBinaryFrameClosesSender(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	a, _ := dial(t, srv, "A")
 	b, _ := dial(t, srv, "B")
 
@@ -346,7 +379,7 @@ func TestBinaryFrameClosesSender(t *testing.T) {
 
 // CHAT-09: invalid UTF-8 text closes the sender with 1007 and is not broadcast.
 func TestInvalidUTF8ClosesSender(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	a, _ := dial(t, srv, "A")
 	b, _ := dial(t, srv, "B")
 
@@ -371,7 +404,7 @@ func TestNicknameNormalization(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, _ := startServer(t, NewRoom(nil))
+			srv, _ := startServer(t, NewRoom("general"))
 			conn := dialRaw(t, srv, tt.query)
 			if m := readMsg(t, conn); m.Type != typeWelcome || m.From != tt.want {
 				t.Fatalf("first frame = %+v, want welcome from %q", m, tt.want)
@@ -388,13 +421,14 @@ func TestNicknameNormalization(t *testing.T) {
 // the join of another client overflows it, and the hub drops it. Only then are
 // the pumps started: writePump must see the closed channel and close the connection.
 func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
-	room := NewRoom(nil)
+	room := NewRoom("general")
+	s := NewServer(nil, room)
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.GET("/ws", room.HandleWebSocket)
+	engine.GET("/ws", s.HandleWebSocket)
 	slowCh := make(chan *Client, 1)
 	engine.GET("/slow", func(c *gin.Context) {
-		conn, err := room.upgrader.Upgrade(c.Writer, c.Request, nil)
+		conn, err := s.upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			return
 		}
@@ -437,7 +471,7 @@ func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 // CHAT-17/18: a newcomer over a real socket gets welcome, users and the
 // history before anything else.
 func TestJoinReceivesUsersAndHistory(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	a, _ := dial(t, srv, "A")
 	send(t, a, "hola")
 	readUntil(t, a, typeChat, "A", "hola")
@@ -472,7 +506,7 @@ func countPumps() int {
 
 // CHAT-08: cancelling the context closes connected clients and the room.
 func TestShutdownClosesClients(t *testing.T) {
-	room := NewRoom(nil)
+	room := NewRoom("general")
 	srv, cancel := startServer(t, room)
 	a, _ := dial(t, srv, "A")
 
@@ -487,7 +521,7 @@ func TestShutdownClosesClients(t *testing.T) {
 
 // CHAT-08: connecting after shutdown must not hang and must end up closed.
 func TestDialAfterShutdownDoesNotHang(t *testing.T) {
-	room := NewRoom(nil)
+	room := NewRoom("general")
 	srv, cancel := startServer(t, room)
 	cancel()
 	select {
@@ -506,7 +540,7 @@ func TestDialAfterShutdownDoesNotHang(t *testing.T) {
 
 // CHAT-05: connecting and disconnecting clients must not leak pump goroutines.
 func TestNoGoroutineLeakAfterDisconnect(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 
 	for i := 0; i < 20; i++ {
 		conn, _ := dial(t, srv, "c")
@@ -549,7 +583,7 @@ func send(t *testing.T, conn *websocket.Conn, text string) {
 
 // CHAT-12: concurrent clients asking for the same nickname get distinct names.
 func TestConcurrentSameNickname(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	const n = 20
 
 	type result struct {
@@ -606,7 +640,7 @@ func TestConcurrentSameNickname(t *testing.T) {
 
 // CHAT-12: collisions ignore case, and a freed name can be reused.
 func TestCaseInsensitiveCollision(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	a, na := dial(t, srv, "Bob")
 	b, nb := dial(t, srv, "bob")
 	c, nc := dial(t, srv, "BOB")
@@ -626,7 +660,7 @@ func TestCaseInsensitiveCollision(t *testing.T) {
 
 // CHAT-13: whitespace-only messages are dropped silently; others are untouched.
 func TestEmptyMessagesDropped(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	a, _ := dial(t, srv, "A")
 	b, _ := dial(t, srv, "B")
 
@@ -648,7 +682,7 @@ func TestEmptyMessagesDropped(t *testing.T) {
 
 // CHAT-10: text that imitates a system notice is just chat; JSON escaping round-trips.
 func TestForgedNoticeIsChat(t *testing.T) {
-	srv, _ := startServer(t, NewRoom(nil))
+	srv, _ := startServer(t, NewRoom("general"))
 	a, _ := dial(t, srv, "A")
 	b, _ := dial(t, srv, "B")
 
@@ -672,11 +706,200 @@ func TestNicknameControlAndBidiStripped(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, _ := startServer(t, NewRoom(nil))
+			srv, _ := startServer(t, NewRoom("general"))
 			_, got := dial(t, srv, url.QueryEscape(tt.nick))
 			if got != tt.want {
 				t.Fatalf("nickname = %q, want %q", got, tt.want)
 			}
 		})
 	}
+}
+
+// nextNonJoin reads frames, skipping join notices, and returns the first other one.
+func nextNonJoin(t *testing.T, conn *websocket.Conn) []byte {
+	t.Helper()
+	for {
+		raw := readRaw(t, conn)
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			t.Fatalf("invalid JSON %q: %v", raw, err)
+		}
+		if head.Type != typeJoin {
+			return raw
+		}
+	}
+}
+
+// readDM reads the next frame (skipping joins) and requires it to be a dm.
+func readDM(t *testing.T, conn *websocket.Conn) dmFrame {
+	t.Helper()
+	return decodeDM(t, nextNonJoin(t, conn))
+}
+
+// readDMError reads the next frame (skipping joins) and requires it to be a dm_error.
+func readDMError(t *testing.T, conn *websocket.Conn) dmErrorFrame {
+	t.Helper()
+	return decodeDMError(t, nextNonJoin(t, conn))
+}
+
+// CHAT-21, CHAT-13: classification of inbound frames.
+func TestParseInbound(t *testing.T) {
+	long := strings.Repeat("ñ", 40)
+	tests := []struct {
+		name    string
+		frame   string
+		want    inbound
+		discard bool
+	}{
+		{"plain text", "hola", inbound{text: "hola"}, false},
+		{"chat envelope", `{"type":"chat","text":"hi"}`, inbound{text: "hi"}, false},
+		{"chat envelope keeps whitespace", `{"type":"chat","text":"  hi  "}`, inbound{text: "  hi  "}, false},
+		{"chat blank", `{"type":"chat","text":"  "}`, inbound{}, true},
+		{"chat text not a string", `{"type":"chat","text":5}`, inbound{text: `{"type":"chat","text":5}`}, false},
+		{"chat without text", `{"type":"chat"}`, inbound{text: `{"type":"chat"}`}, false},
+		{"unknown type", `{"type":"typing"}`, inbound{text: `{"type":"typing"}`}, false},
+		{"missing type", `{"text":"x"}`, inbound{text: `{"text":"x"}`}, false},
+		{"array", `[1,2]`, inbound{text: `[1,2]`}, false},
+		{"json string", `"dm"`, inbound{text: `"dm"`}, false},
+		{"number", `42`, inbound{text: `42`}, false},
+		{"null", `null`, inbound{text: `null`}, false},
+		{"malformed", `{"type":"dm"`, inbound{text: `{"type":"dm"`}, false},
+		{"type is case sensitive", `{"TYPE":"dm","to":"B","text":"x"}`, inbound{text: `{"TYPE":"dm","to":"B","text":"x"}`}, false},
+		{"dm", `{"type":"dm","to":"B","text":"x"}`, inbound{kind: inboundDM, to: "B", text: "x"}, false},
+		{"dm to is cleaned", "{\"type\":\"dm\",\"to\":\"  bob‮ \",\"text\":\"x\"}", inbound{kind: inboundDM, to: "bob", text: "x"}, false},
+		{"dm to truncated", `{"type":"dm","to":"` + long + `","text":"x"}`, inbound{kind: inboundDM, to: strings.Repeat("ñ", 32), text: "x"}, false},
+		{"dm extra field ignored", `{"type":"dm","to":"B","text":"x","extra":1}`, inbound{kind: inboundDM, to: "B", text: "x"}, false},
+		{"dm from ignored", `{"type":"dm","from":"C","to":"B","text":"x"}`, inbound{kind: inboundDM, to: "B", text: "x"}, false},
+		{"dm without to", `{"type":"dm","text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm empty to", `{"type":"dm","to":"","text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm blank to", `{"type":"dm","to":"   ","text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm to only bidi", "{\"type\":\"dm\",\"to\":\"‮\",\"text\":\"x\"}", inbound{kind: inboundBadDM}, false},
+		{"dm to number", `{"type":"dm","to":7,"text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm to null", `{"type":"dm","to":null,"text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm without text", `{"type":"dm","to":"B"}`, inbound{kind: inboundBadDM}, false},
+		{"dm text null", `{"type":"dm","to":"B","text":null}`, inbound{kind: inboundBadDM}, false},
+		{"invalid wins over blank", `{"type":"dm","to":7,"text":" "}`, inbound{kind: inboundBadDM}, false},
+		{"dm blank text", `{"type":"dm","to":"B","text":"\n"}`, inbound{}, true},
+		{"empty frame", ``, inbound{}, true},
+		{"spaces frame", `  `, inbound{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseInbound([]byte(tt.frame))
+			if ok == tt.discard {
+				t.Fatalf("ok = %v, want %v", ok, !tt.discard)
+			}
+			if !tt.discard && got != tt.want {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// CHAT-21, CHAT-22: a dm reaches only its recipient and its sender, with the same ts.
+func TestDMOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+	c, _ := dial(t, srv, "C")
+
+	send(t, a, `{"type":"dm","to":"B","text":"secreto"}`)
+	toB, toA := readDM(t, b), readDM(t, a)
+	for _, f := range []dmFrame{toB, toA} {
+		if f.From != "A" || f.To != "B" || f.Text != "secreto" {
+			t.Fatalf("dm = %+v, want A -> B secreto", f)
+		}
+	}
+	if toB.TS != toA.TS {
+		t.Fatalf("ts differ: %d vs %d", toB.TS, toA.TS)
+	}
+
+	// CHAT-22: a forged "from" in the envelope is ignored.
+	send(t, a, `{"type":"dm","from":"C","to":"B","text":"hi"}`)
+	if f := readDM(t, b); f.From != "A" || f.To != "B" || f.Text != "hi" {
+		t.Fatalf("forged dm = %+v, want from A", f)
+	}
+	readDM(t, a)
+
+	send(t, c, "sync")
+	if m := nextChat(t, c, ""); m.Text != "sync" { // a dm would fail decode first
+		t.Fatalf("C got %+v, want sync", m)
+	}
+}
+
+// CHAT-21: the envelope never sets the sender, and non-envelope JSON stays room chat.
+func TestChatEnvelopeAndForgery(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, `{"type":"chat","from":"Bob","text":"hi"}`)
+	if m := nextChat(t, b, ""); m.From != "A" || m.Text != "hi" {
+		t.Fatalf("chat = %+v, want A hi", m)
+	}
+	for _, frame := range []string{`{"type":"typing"}`, `[1,2]`, `{"text":"x"}`, `{"type":"chat","text":5}`} {
+		send(t, a, frame)
+		if m := nextChat(t, b, ""); m.From != "A" || m.Text != frame {
+			t.Fatalf("chat = %+v, want A with the whole frame %q", m, frame)
+		}
+	}
+}
+
+// CHAT-13: blank envelope text is discarded without any frame.
+func TestDMWhitespaceDiscarded(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, `{"type":"chat","text":"  "}`)
+	send(t, a, `{"type":"dm","to":"B","text":"\n"}`)
+	send(t, a, "hi")
+	for _, conn := range []*websocket.Conn{a, b} {
+		if m := nextChat(t, conn, ""); m.Text != "hi" {
+			t.Fatalf("first chat = %+v, want hi", m)
+		}
+	}
+}
+
+// CHAT-23: invalid dms are answered to the sender and never close the connection.
+func TestInvalidDMKeepsConnection(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	for _, frame := range []string{
+		`{"type":"dm","text":"x"}`,
+		`{"type":"dm","to":"   ","text":"x"}`,
+		`{"type":"dm","to":7,"text":"x"}`,
+		`{"type":"dm","to":"B","text":null}`,
+	} {
+		send(t, a, frame)
+		if e := readDMError(t, a); e.To != "" || e.Reason != reasonInvalid {
+			t.Fatalf("%s: dm_error = %+v, want invalid with empty to", frame, e)
+		}
+	}
+	send(t, a, "still open")
+	if m := nextChat(t, b, ""); m.Text != "still open" { // B saw no dm or dm_error
+		t.Fatalf("B got %+v", m)
+	}
+}
+
+// CHAT-06: the size limit covers the whole dm envelope.
+func TestOversizedDMClosesSender(t *testing.T) {
+	room := NewRoom("general")
+	room.maxMessageSize = 64
+	srv, _ := startServer(t, room)
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	const prefix = `{"type":"dm","to":"B","text":"`
+	frame := prefix + strings.Repeat("x", 65-len(prefix)-2) + `"}`
+	if len(frame) != 65 {
+		t.Fatalf("frame is %d bytes, want 65", len(frame))
+	}
+	send(t, a, frame)
+	expectReadError(t, a)
+	expectLeaveWithoutBroadcast(t, b, "A") // a dm would fail decode first
 }

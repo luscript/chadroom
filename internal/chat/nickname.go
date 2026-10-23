@@ -7,10 +7,10 @@ import (
 	"unicode/utf8"
 )
 
-// normalizeNickname makes an untrusted nickname safe to display: valid UTF-8,
+// cleanNickname makes an untrusted nickname safe to display: valid UTF-8,
 // control and bidi-control characters removed, trimmed, at most
-// maxNicknameRunes runes, "Anonymous" if empty.
-func normalizeNickname(s string) string {
+// maxNicknameRunes runes. It may return "".
+func cleanNickname(s string) string {
 	s = strings.ToValidUTF8(s, "�")
 	s = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
@@ -18,8 +18,12 @@ func normalizeNickname(s string) string {
 		}
 		return r
 	}, s)
-	s = truncateRunes(strings.TrimSpace(s), maxNicknameRunes)
-	if s == "" {
+	return truncateRunes(strings.TrimSpace(s), maxNicknameRunes)
+}
+
+// normalizeNickname is cleanNickname with "Anonymous" for an empty result.
+func normalizeNickname(s string) string {
+	if s = cleanNickname(s); s == "" {
 		return "Anonymous"
 	}
 	return s

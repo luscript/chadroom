@@ -37,6 +37,9 @@ var imageHosts = []string{
 	"media.tenor.com", "i.imgur.com",
 }
 
+// roomIDs is the fixed room set, in display order; the first is the default room.
+var roomIDs = []string{"general", "juegos", "musica"}
+
 var contentSecurityPolicy = buildCSP(imageHosts)
 
 // buildCSP renders the page's Content-Security-Policy: everything is same-origin
@@ -82,8 +85,25 @@ func serveAsset(contentType string, body []byte) gin.HandlerFunc {
 	}
 }
 
-// newRouter registers the HTML page, its static assets and the WebSocket endpoint.
-func newRouter(room *chat.Room) *gin.Engine {
+// newChatServer builds one Room per roomIDs entry behind a shared origin policy.
+func newChatServer(allowedOrigins []string) *chat.Server {
+	rooms := make([]*chat.Room, len(roomIDs))
+	for i, id := range roomIDs {
+		rooms[i] = chat.NewRoom(id)
+	}
+	return chat.NewServer(allowedOrigins, rooms...)
+}
+
+// serveRooms returns the room list as {"rooms":[...]}.
+func serveRooms(c *gin.Context) {
+	setStaticHeaders(c)
+	c.JSON(http.StatusOK, struct {
+		Rooms []string `json:"rooms"`
+	}{roomIDs})
+}
+
+// newRouter registers the HTML page, its static assets, the room list and the WebSocket endpoint.
+func newRouter(chatSrv *chat.Server) *gin.Engine {
 	r := gin.Default()
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("set trusted proxies: %v", err)
@@ -91,7 +111,8 @@ func newRouter(room *chat.Room) *gin.Engine {
 	r.GET("/", servePage)
 	r.GET("/app.js", serveAsset("text/javascript; charset=utf-8", appJS))
 	r.GET("/app.css", serveAsset("text/css; charset=utf-8", appCSS))
-	r.GET("/ws", room.HandleWebSocket)
+	r.GET("/rooms", serveRooms)
+	r.GET("/ws", chatSrv.HandleWebSocket)
 	return r
 }
 
@@ -134,15 +155,15 @@ func serve(ctx context.Context, addr, allowedOrigins string) int {
 func run(ctx context.Context, ln net.Listener, allowedOrigins string) int {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	room := chat.NewRoom(parseAllowedOrigins(allowedOrigins))
-	roomDone := make(chan struct{})
+	chatSrv := newChatServer(parseAllowedOrigins(allowedOrigins))
+	roomsDone := make(chan struct{})
 	go func() {
-		room.Run(ctx)
-		close(roomDone)
+		chatSrv.Run(ctx)
+		close(roomsDone)
 	}()
 
 	srv := &http.Server{
-		Handler:           newRouter(room),
+		Handler:           newRouter(chatSrv),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    8 << 10,
@@ -160,8 +181,8 @@ func run(ctx context.Context, ln net.Listener, allowedOrigins string) int {
 	case <-ctx.Done():
 	}
 
-	cancel()   // stop the room on the server-error path too.
-	<-roomDone // room closes WebSocket connections; Shutdown does not.
+	cancel()    // stop the rooms on the server-error path too.
+	<-roomsDone // every room closes its WebSocket connections; Shutdown does not.
 	shCtx, shCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shCancel()
 	if err := srv.Shutdown(shCtx); err != nil {

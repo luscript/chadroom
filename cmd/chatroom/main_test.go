@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"chatroom/internal/chat"
-
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
@@ -22,10 +20,10 @@ import (
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	room := chat.NewRoom(nil)
+	chatSrv := newChatServer(nil)
 	ctx, cancel := context.WithCancel(context.Background())
-	go room.Run(ctx)
-	ts := httptest.NewServer(newRouter(room))
+	go chatSrv.Run(ctx)
+	ts := httptest.NewServer(newRouter(chatSrv))
 	t.Cleanup(func() {
 		cancel()
 		ts.Close()
@@ -183,6 +181,127 @@ func TestIndexHasOnlineList(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Errorf("index.html missing %s", want)
 		}
+	}
+}
+
+func TestIndexHasRoomTabs(t *testing.T) {
+	html := string(indexHTML)
+	for _, want := range []string{
+		`id="room-tabs"`, `role="tablist"`, `id="room-leave-btn"`, `id="room-name"`,
+		`id="join-error"`, `role="tabpanel"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %s", want)
+		}
+	}
+	if strings.Contains(html, `id="messages"`) {
+		t.Error(`index.html still has the static id="messages" list`)
+	}
+}
+
+func TestRoomsEndpoint(t *testing.T) {
+	ts := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/rooms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	for k, want := range map[string]string{
+		"Content-Type":           "application/json; charset=utf-8",
+		"X-Content-Type-Options": "nosniff",
+		"Cache-Control":          "no-cache",
+	} {
+		if got := resp.Header.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"rooms":["general","juegos","musica"]}`; string(body) != want {
+		t.Fatalf("body = %s, want %s", body, want)
+	}
+}
+
+func TestWebSocketRoomParam(t *testing.T) {
+	ts := newTestServer(t)
+	hdr := http.Header{"Origin": []string{ts.URL}}
+	base := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?room="
+
+	conn, resp, err := websocket.DefaultDialer.Dial(base+"juegos", hdr)
+	if err != nil {
+		t.Fatalf("dial juegos: %v (resp %v)", err, resp)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"type":"welcome"`) {
+		t.Fatalf("first frame = %s, want welcome", data)
+	}
+
+	conn2, resp, err := websocket.DefaultDialer.Dial(base+"nope", hdr)
+	if err == nil {
+		conn2.Close()
+		t.Fatal("expected dial to unknown room to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got resp=%v err=%v", resp, err)
+	}
+}
+
+func TestRunShutdownClosesAllRooms(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(ctx, ln, "") }()
+
+	addr := ln.Addr().String()
+	hdr := http.Header{"Origin": []string{"http://" + addr}}
+	var conns []*websocket.Conn
+	for _, room := range []string{"general", "musica"} {
+		conn, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws?room="+room, hdr)
+		if err != nil {
+			t.Fatalf("dial %s: %v (resp %v)", room, err, resp)
+		}
+		defer conn.Close()
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, _, err := conn.ReadMessage(); err != nil { // welcome: registered
+			t.Fatalf("read welcome in %s: %v", room, err)
+		}
+		conns = append(conns, conn)
+	}
+
+	cancel()
+	for _, conn := range conns {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					t.Fatal("expected client read error after shutdown, got timeout")
+				}
+				break
+			}
+		}
+	}
+	select {
+	case code := <-codeCh:
+		if code != 0 {
+			t.Fatalf("run returned %d, want 0", code)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("run did not return in time")
 	}
 }
 

@@ -1,9 +1,10 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"net/http/httptest"
+	"log"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,7 +18,7 @@ const testDeadline = 2 * time.Second
 
 func startRoom(t *testing.T) (*Room, context.CancelFunc) {
 	t.Helper()
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	ctx, cancel := context.WithCancel(context.Background())
 	go cr.Run(ctx)
 	t.Cleanup(cancel)
@@ -365,7 +366,7 @@ func TestSlowClientDroppedOthersReceive(t *testing.T) {
 }
 
 func TestSaturationNoDeadlock(t *testing.T) {
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	listener := newTestClient("l", sendBufferSize)
 	// Fill the broadcast queue before Run starts so it is full when traffic begins.
 	for i := 0; i < cap(cr.broadcast); i++ {
@@ -535,7 +536,7 @@ func TestBroadcastFromNonMemberDropped(t *testing.T) {
 func TestChatBeforeLeaveOnDisconnect(t *testing.T) {
 	// Drive the hub's handlers directly (no Run goroutine) so the "broadcast
 	// queued, then unregister" interleaving is deterministic.
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	a := newTestClient("a", 8)
 	b := newTestClient("b", 8)
 	for _, c := range []*Client{a, b} {
@@ -553,7 +554,7 @@ func TestChatBeforeLeaveOnDisconnect(t *testing.T) {
 // The drain before a leave can itself slow-drop the leaving client; it must
 // not be removed (and its send closed) a second time, nor announced twice.
 func TestLeaveAfterDrainDroppedClient(t *testing.T) {
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	a := newTestClient("a", 0) // any delivery to a overflows
 	b := newTestClient("b", 8)
 	for _, c := range []*Client{a, b} {
@@ -750,7 +751,7 @@ func TestHistoryKeepsLast50(t *testing.T) {
 // CHAT-02/05: a slow client dropped by a fan-out is announced after the
 // triggering event, and the leaves it causes are announced too.
 func TestSlowDropCascadeAnnounced(t *testing.T) {
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
 	o := newTestClient("o", 16)
 	x := newTestClient("x", 0) // dropped by the chat
 	y := newTestClient("y", 1) // takes the chat, dropped by x's leave
@@ -793,40 +794,11 @@ func TestNewcomerDroppedDuringJoinIsSilent(t *testing.T) {
 	expectUsers(t, users, "n", "obs") // the dropped newcomer appears once, as the new "n"
 }
 
-func TestCheckOrigin(t *testing.T) {
-	tests := []struct {
-		name    string
-		origin  string
-		allowed []string
-		want    bool
-	}{
-		{"no origin", "", nil, true},
-		{"same host", "http://example.com", nil, true},
-		{"same host case-insensitive", "http://EXAMPLE.com", nil, true},
-		{"other host", "http://evil.com", nil, false},
-		{"null", "null", nil, false},
-		{"null allowlisted", "null", []string{"null"}, false},
-		{"allowlisted exact", "https://app.other.com", []string{"https://app.other.com"}, true},
-		{"allowlist is exact match", "http://app.other.com", []string{"https://app.other.com"}, false},
-		{"malformed", "http://[::1", nil, false},
-		{"no host", "foo", nil, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cr := NewRoom(tt.allowed)
-			r := httptest.NewRequest("GET", "http://example.com/ws", nil)
-			if tt.origin != "" {
-				r.Header.Set("Origin", tt.origin)
-			}
-			if got := cr.checkOrigin(r); got != tt.want {
-				t.Fatalf("checkOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestNewRoomDefaults(t *testing.T) {
-	cr := NewRoom(nil)
+	cr := NewRoom("general")
+	if cr.id != "general" {
+		t.Errorf("id = %q, want general", cr.id)
+	}
 	if cr.maxMessageSize != 4096 {
 		t.Errorf("maxMessageSize = %d, want 4096", cr.maxMessageSize)
 	}
@@ -934,7 +906,7 @@ func TestAssignNickname(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cr := NewRoom(nil)
+			cr := NewRoom("general")
 			for _, n := range tt.taken {
 				cr.taken[foldKey(n)] = struct{}{}
 			}
@@ -946,5 +918,326 @@ func TestAssignNickname(t *testing.T) {
 				t.Fatalf("result has %d runes", n)
 			}
 		})
+	}
+}
+
+// dm queues a direct message as if parseInbound had classified it from from's connection.
+func dm(t *testing.T, cr *Room, from *Client, to, text string) {
+	t.Helper()
+	select {
+	case cr.broadcast <- inbound{from: from, kind: inboundDM, to: cleanNickname(to), text: text}:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout queueing dm")
+	}
+}
+
+// exactFields requires b to be a JSON object with exactly the given keys.
+func exactFields(t *testing.T, b []byte, keys ...string) map[string]json.RawMessage {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("invalid JSON %q: %v", b, err)
+	}
+	for _, k := range keys {
+		if _, ok := fields[k]; !ok {
+			t.Fatalf("frame %q misses field %q", b, k)
+		}
+	}
+	if len(fields) != len(keys) {
+		t.Fatalf("frame %q has %d fields, want %d", b, len(fields), len(keys))
+	}
+	return fields
+}
+
+// decodeDM parses a dm frame with exactly type, from, to, text and ts.
+func decodeDM(t *testing.T, b []byte) dmFrame {
+	t.Helper()
+	exactFields(t, b, "type", "from", "to", "text", "ts")
+	var f dmFrame
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("frame %q: %v", b, err)
+	}
+	if f.Type != typeDM {
+		t.Fatalf("frame %q: type %q, want dm", b, f.Type)
+	}
+	return f
+}
+
+// decodeDMError parses a dm_error frame with exactly type, to, reason and ts.
+func decodeDMError(t *testing.T, b []byte) dmErrorFrame {
+	t.Helper()
+	exactFields(t, b, "type", "to", "reason", "ts")
+	var f dmErrorFrame
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("frame %q: %v", b, err)
+	}
+	if f.Type != typeDMError {
+		t.Fatalf("frame %q: type %q, want dm_error", b, f.Type)
+	}
+	return f
+}
+
+// expectDM waits for the next frame on c and requires it to be the given dm.
+func expectDM(t *testing.T, c *Client, from, to, text string) dmFrame {
+	t.Helper()
+	got := decodeDM(t, nextRaw(t, c))
+	if got.From != from || got.To != to || got.Text != text {
+		t.Fatalf("dm = (%q, %q, %q), want (%q, %q, %q)", got.From, got.To, got.Text, from, to, text)
+	}
+	return got
+}
+
+// expectDMError waits for the next frame on c and requires it to be the given dm_error.
+func expectDMError(t *testing.T, c *Client, to, reason string) {
+	t.Helper()
+	got := decodeDMError(t, nextRaw(t, c))
+	if got.To != to || got.Reason != reason {
+		t.Fatalf("dm_error = (%q, %q), want (%q, %q)", got.To, got.Reason, to, reason)
+	}
+}
+
+// joinAll registers cs in order and consumes every frame the joins produce, so
+// afterwards all queues are empty. Names are read after registration.
+func joinAll(t *testing.T, cr *Room, cs ...*Client) {
+	t.Helper()
+	for i, c := range cs {
+		register(t, cr, c)
+		select {
+		case <-c.registered:
+		case <-time.After(testDeadline):
+			t.Fatal("timeout waiting for registration")
+		}
+		expectWelcome(t, c, c.nickname)
+		for _, o := range cs[:i+1] {
+			expect(t, o, typeJoin, c.nickname, "")
+		}
+	}
+}
+
+// CHAT-22: the recipient and the sender get the same dm; nobody else gets anything.
+func TestDMDeliveredAndEchoed(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, bob, c := newTestClient("A", 16), newTestClient("Bob", 16), newTestClient("C", 16)
+	joinAll(t, cr, a, bob, c)
+
+	before := time.Now().UnixMilli()
+	dm(t, cr, a, "  bob ", "secreto")
+	toBob := expectDM(t, bob, "A", "Bob", "secreto")
+	toA := expectDM(t, a, "A", "Bob", "secreto")
+	after := time.Now().UnixMilli()
+	if toBob.TS != toA.TS || toBob.TS < before || toBob.TS > after {
+		t.Fatalf("ts bob=%d a=%d, want equal and in [%d, %d]", toBob.TS, toA.TS, before, after)
+	}
+
+	broadcast(t, cr, c, "marker")
+	expect(t, c, typeChat, "C", "marker") // a leaked dm would have come first
+	expectEmpty(t, c)
+}
+
+// CHAT-22: "Ana (2)" is its own recipient.
+func TestDMSuffixedRecipient(t *testing.T) {
+	cr, _ := startRoom(t)
+	ana, ana2, a := newTestClient("Ana", 16), newTestClient("Ana", 16), newTestClient("A", 16)
+	joinAll(t, cr, ana, ana2, a)
+
+	dm(t, cr, a, "Ana (2)", "hi")
+	expectDM(t, ana2, "A", "Ana (2)", "hi")
+	expectDM(t, a, "A", "Ana (2)", "hi")
+	broadcast(t, cr, a, "marker")
+	expect(t, a, typeChat, "A", "marker")
+	expect(t, ana, typeChat, "A", "marker") // the first frame ana gets: no dm before it
+	expectEmpty(t, ana)
+}
+
+// CHAT-23: errors go to the sender only and keep it in the room.
+func TestDMErrors(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("Ana", 16), newTestClient("B", 16)
+	joinAll(t, cr, a, b)
+
+	select {
+	case cr.broadcast <- inbound{from: a, kind: inboundBadDM}:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout")
+	}
+	expectDMError(t, a, "", reasonInvalid)
+	dm(t, cr, a, "ANA", "x")
+	expectDMError(t, a, "ANA", reasonSelf)
+	dm(t, cr, a, "Zoe", "x")
+	expectDMError(t, a, "Zoe", reasonOffline)
+
+	broadcast(t, cr, a, "still here")
+	expect(t, a, typeChat, "Ana", "still here")
+	expect(t, b, typeChat, "Ana", "still here") // no dm_error or dm came first
+}
+
+// CHAT-24, CHAT-18: a dm leaves no trace in history.
+func TestDMNotInHistory(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 16), newTestClient("B", 16)
+	joinAll(t, cr, a, b)
+
+	broadcast(t, cr, a, "hola")
+	dm(t, cr, a, "B", "secreto")
+	expect(t, a, typeChat, "A", "hola")
+	expectDM(t, a, "A", "B", "secreto")
+	unregister(t, cr, b)
+
+	c := newTestClient("C", 8)
+	register(t, cr, c)
+	_, hist := expectWelcome(t, c, "C")
+	expectHistory(t, hist, message{Type: typeChat, From: "A", Text: "hola"})
+}
+
+// CHAT-24: a reused nickname inherits no earlier dm and receives new ones.
+func TestReusedNicknameInheritsNothing(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 16), newTestClient("B", 16)
+	joinAll(t, cr, a, b)
+	dm(t, cr, a, "B", "one")
+	expectDM(t, a, "A", "B", "one")
+	unregister(t, cr, b)
+	expect(t, a, typeLeave, "B", "")
+
+	// CHAT-23: the recipient left, so it is offline.
+	dm(t, cr, a, "B", "x")
+	expectDMError(t, a, "B", reasonOffline)
+
+	b2 := newTestClient("b", 16)
+	register(t, cr, b2)
+	expectWelcome(t, b2, "b")
+	expect(t, b2, typeJoin, "b", "")
+	expectEmpty(t, b2)
+
+	dm(t, cr, a, "B", "two")
+	expectDM(t, b2, "A", "b", "two")
+}
+
+// CHAT-22: a dm from a client that was dropped is discarded.
+func TestDMFromNonMemberDropped(t *testing.T) {
+	cr, _ := startRoom(t)
+	slow := newTestClient("slow", privateFrames+1)
+	ok := newTestClient("ok", 16)
+	register(t, cr, slow)
+	register(t, cr, ok)
+	expectWelcome(t, ok, "ok")
+	expect(t, ok, typeJoin, "ok", "")
+	expect(t, ok, typeLeave, "slow", "")
+	expectClosed(t, slow)
+
+	dm(t, cr, slow, "ok", "ghost")
+	broadcast(t, cr, ok, "sync")
+	expect(t, ok, typeChat, "ok", "sync") // a dm or dm_error would have come first
+}
+
+// A dm queued right before unregister is routed before the leave (drain uses dispatch).
+func TestDMBeforeLeaveOnDisconnect(t *testing.T) {
+	cr := NewRoom("general")
+	a, b := newTestClient("a", 8), newTestClient("b", 8)
+	for _, c := range []*Client{a, b} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.broadcast <- inbound{from: a, kind: inboundDM, to: "b", text: "bye"}
+	cr.leave(a)
+
+	expectDM(t, b, "a", "b", "bye")
+	expect(t, b, typeLeave, "a", "")
+}
+
+// CHAT-22, CHAT-05: a recipient that cannot take its copy is dropped and announced; the echo still arrives.
+func TestDMSlowRecipientDropped(t *testing.T) {
+	cr := NewRoom("general")
+	o, a, x := newTestClient("o", 16), newTestClient("a", 16), newTestClient("x", 0)
+	for _, c := range []*Client{o, a, x} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.dispatch(inbound{from: a, kind: inboundDM, to: "x", text: "hi"})
+
+	expectClosed(t, x)
+	expectDM(t, a, "a", "x", "hi")
+	expect(t, a, typeLeave, "x", "")
+	expect(t, o, typeLeave, "x", "")
+	expectEmpty(t, o)
+}
+
+// lockedBuffer is a log sink safe against writes from goroutines of other tests.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// CHAT-22, CHAT-05: a sender that cannot take its echo is dropped and announced; the recipient still gets the dm.
+func TestDMSlowSenderDropped(t *testing.T) {
+	cr := NewRoom("general")
+	o, r, s := newTestClient("o", 16), newTestClient("r", 16), newTestClient("s", 0)
+	for _, c := range []*Client{o, r, s} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.dispatch(inbound{from: s, kind: inboundDM, to: "r", text: "hi"})
+
+	expectClosed(t, s)
+	expectDM(t, r, "s", "r", "hi")
+	expect(t, r, typeLeave, "s", "")
+	expect(t, o, typeLeave, "s", "")
+	expectEmpty(t, o)
+	expectEmpty(t, r)
+}
+
+// CHAT-23, CHAT-05: a dm_error to a sender that cannot take it drops only the sender.
+func TestDMErrorSlowSenderDropped(t *testing.T) {
+	cr := NewRoom("general")
+	o, s := newTestClient("o", 16), newTestClient("s", 0)
+	for _, c := range []*Client{o, s} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+
+	cr.dispatch(inbound{from: s, kind: inboundDM, to: "Zoe", text: "hi"})
+
+	expectClosed(t, s)
+	expect(t, o, typeLeave, "s", "")
+	expectEmpty(t, o)
+}
+
+// CHAT-24: no log line carries a dm text or recipient.
+func TestDMNotLogged(t *testing.T) {
+	buf := &lockedBuffer{}
+	orig := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	cr := NewRoom("general")
+	a, b := newTestClient("Ana", 16), newTestClient("Bea", 16)
+	for _, c := range []*Client{a, b} {
+		cr.clients[c] = struct{}{}
+		cr.taken[foldKey(c.nickname)] = struct{}{}
+	}
+	cr.dispatch(inbound{from: a, kind: inboundDM, to: "Bea", text: "texto-secreto"})
+	cr.dispatch(inbound{from: a, kind: inboundDM, to: "Ana", text: "texto-self"})
+	cr.dispatch(inbound{from: a, kind: inboundDM, to: "Zoe-offline", text: "texto-off"})
+	cr.dispatch(inbound{from: a, kind: inboundBadDM})
+
+	for _, s := range []string{"texto-secreto", "texto-self", "texto-off", "Zoe-offline", "Bea"} {
+		if strings.Contains(buf.String(), s) {
+			t.Fatalf("log contains %q: %s", s, buf.String())
+		}
 	}
 }

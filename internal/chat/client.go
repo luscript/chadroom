@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log"
 	"net"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -20,14 +19,14 @@ type Client struct {
 	nickname   string        // requested until registered is closed, final after
 }
 
-// logError logs abnormal connection errors with the nickname, skipping the
+// logError logs abnormal connection errors with the room and nickname, skipping the
 // expected ways a connection ends (normal close, local close).
-func (c *Client) logError(op string, err error) {
+func (c *Client) logError(roomID, op string, err error) {
 	if errors.Is(err, net.ErrClosed) || errors.Is(err, websocket.ErrCloseSent) ||
 		websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
 		return
 	}
-	log.Printf("%s error (%q): %v", op, c.nickname, err)
+	log.Printf("%s error (room %q, %q): %v", op, roomID, c.nickname, err)
 }
 
 // writePump sends messages and keepalive pings to the client.
@@ -45,13 +44,13 @@ func (c *Client) writePump(cr *Room) {
 				return
 			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				c.logError("Write", err)
+				c.logError(cr.id, "Write", err)
 				return
 			}
 		case <-ticker.C:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(cr.writeWait)) // only fails on a dead conn; the ping below reports it
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				c.logError("Ping", err)
+				c.logError(cr.id, "Ping", err)
 				return
 			}
 		}
@@ -82,7 +81,7 @@ func (c *Client) readPump(cr *Room) {
 	for {
 		mt, message, err := c.conn.ReadMessage()
 		if err != nil {
-			c.logError("Read", err)
+			c.logError(cr.id, "Read", err)
 			return
 		}
 		// Any received frame proves the peer is alive (CHAT-07).
@@ -95,11 +94,13 @@ func (c *Client) readPump(cr *Room) {
 			c.closeWith(cr, websocket.CloseInvalidFramePayloadData)
 			return
 		}
-		if strings.TrimSpace(string(message)) == "" {
-			continue // CHAT-13: blank frames are ignored, connection stays open
+		in, ok := parseInbound(message)
+		if !ok {
+			continue // CHAT-13: blank text is ignored, connection stays open
 		}
+		in.from = c
 		select {
-		case cr.broadcast <- inbound{from: c, text: string(message)}:
+		case cr.broadcast <- in:
 		case <-cr.done:
 			return
 		}
