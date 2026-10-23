@@ -132,7 +132,7 @@ los demás pidan una imagen a un servidor propio y vean sus IPs. Para sumar un h
 (`app.js`); un test falla si las dos listas no coinciden.
 
 **CSP:** la página no tiene código inline; la política solo permite scripts y estilos del propio
-origen, Google Fonts y las imágenes de la lista permitida.
+origen y las imágenes de la lista permitida.
 
 ## Arquitectura
 

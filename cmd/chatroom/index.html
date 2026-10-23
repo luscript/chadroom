@@ -3,31 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chatroom</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+<title>★chadroom★</title>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<div class="app">
+<div class="desktop-brand"><div class="wordmark">chadroom<span>✳</span></div><p>menos vibecoding, más charla</p><span class="edition">REJUNTA DE PROGRAMADORES VIBECODERS · EST. 1999*</span></div>
+<div class="app"><div class="window-title"><span>▣ &nbsp; chadroom.exe — tu rincón de internet</span><span aria-hidden="true" class="window-controls">_ &nbsp; □ &nbsp; ×</span></div><div class="menu-strip"><span>Hecho para conectar con tus compas de oficina</span><span>una ventana al boludeo</span></div>
 
   <section id="join-view" class="view join">
     <form id="join-form" autocomplete="off">
       <div class="brand">
         <svg width="26" height="26" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216,48H40A16,16,0,0,0,24,64V224a15.85,15.85,0,0,0,9.24,14.5A16.13,16.13,0,0,0,40,240a15.89,15.89,0,0,0,10.25-3.78l.09-.07L83,208H216a16,16,0,0,0,16-16V64A16,16,0,0,0,216,48ZM216,192H80a8,8,0,0,0-5.23,1.95L40,224V64H216Z"/></svg>
-        <span>Chatroom</span>
+        <span>chadroom</span>
       </div>
       <div>
-        <h1>Entrá a la sala.</h1>
-        <p class="text-muted">Elegí un apodo para que los demás sepan quién sos. Los mensajes llegan en tiempo real.</p>
+        <h1>Tu gente está<br>del otro lado.</h1>
+        <p class="text-muted">Ponete un apodo no banana, acomodate y volvé a conectar con algo más que un prompt.</p>
       </div>
       <div class="field">
         <label for="nick">Apodo</label>
         <!-- maxlength mirrors maxNicknameRunes in internal/chat/room.go -->
-        <input id="nick" class="input" type="text" maxlength="32" autofocus placeholder="Por ejemplo, Lucía">
+        <input id="nick" class="input" type="text" maxlength="32" autofocus placeholder="Ej: xX_Lu_Xx">
       </div>
       <div>
-        <button id="join-btn" type="submit" class="btn btn-primary" disabled>Entrar al chat</button>
+        <button id="join-btn" type="submit" class="btn btn-primary" disabled>Conectar →</button>
       </div>
       <p id="join-error" class="join-error" role="alert" hidden></p>
     </form>
@@ -38,7 +37,7 @@
       <div class="title">
         <svg width="22" height="22" viewBox="0 0 256 256" fill="var(--color-accent)" aria-hidden="true"><path d="M216,48H40A16,16,0,0,0,24,64V224a15.85,15.85,0,0,0,9.24,14.5A16.13,16.13,0,0,0,40,240a15.89,15.89,0,0,0,10.25-3.78l.09-.07L83,208H216a16,16,0,0,0,16-16V64A16,16,0,0,0,216,48ZM216,192H80a8,8,0,0,0-5.23,1.95L40,224V64H216Z"/></svg>
         <div>
-          <div class="name">Chatroom</div>
+          <div class="name">chadroom</div>
           <div id="room-name" class="text-muted subtitle"></div>
         </div>
       </div>
@@ -59,7 +58,7 @@
         <button id="leave-btn" type="button" class="btn btn-ghost">Salir</button>
       </div>
     </header>
-    <nav class="rooms" aria-label="Salas">
+    <div class="chat-main"><nav class="rooms" aria-label="Salas">
       <div id="room-tabs" class="room-tabs" role="tablist" aria-label="Salas"></div>
       <button id="room-leave-btn" type="button" class="btn btn-ghost room-leave" disabled>Dejar sala</button>
     </nav>
@@ -90,10 +89,9 @@
           <svg width="16" height="16" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M231.4,44.34a15.89,15.89,0,0,0-16.1-3.38L31.5,106.9a16,16,0,0,0-1.8,29.55l82.6,39.25,39.25,82.6A15.87,15.87,0,0,0,166.2,268h.6a15.88,15.88,0,0,0,14.4-11.1L235,72.4A15.89,15.89,0,0,0,231.4,44.34ZM166.5,251.9l-34.7-73a8,8,0,0,0-3.7-3.7l-73-34.7L218.3,57.7Z" transform="translate(0 -12)"/></svg>
         </button>
       </div>
-    </form>
-  </section>
-
-</div>
+    </form></div><aside class="scrapbook"><div class="aside-label">✦ MI PERFIL </div><div class="profile-card"><div class="profile-art" aria-hidden="true">♡<span>✧</span></div><b id="profile-nick"></b><p>✿ vibecoder profesional ✿</p><span class="mood">● disponible</span></div><div class="sticky"><span>nota mental:</span><p>Los días son más lindos<br>cuando hay sobra<br>de tokens en claude.</p><i>♡</i></div><div class="mini-stamp">100% buenas prácticas<br>0% vibecodeo</div></aside>
+  </section><div class="window-status"><span>✦ este texto sobra</span><span>este también</span></div>
+</div><footer class="desktop-footer"><span>✳ YA NO SÉ QUÉ MÁS PONER</span><span>* espirito de 1999. conexión de hoy xd</span><span>Hecho por luscript</span></footer>
 <script src="/app.js"></script>
 </body>
 </html>

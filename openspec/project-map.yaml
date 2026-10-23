@@ -86,3 +86,19 @@ api_surface:
     path: GET /app.js, GET /app.css
     description: "Embedded script and stylesheet (text/javascript, text/css; charset=utf-8) with nosniff and no-cache"
     auth: null
+staleness:
+  status: stale
+  checked_at: 2026-10-23T12:47:58.372Z
+  since_commit: 0cdca6a
+  head_commit: f28ad27
+  threshold: 5
+  drift:
+    changed_files_in_modules: 0
+    dependency_manifests_changed: false
+    modules_added:
+      - cmd
+      - internal
+      - openspec
+    modules_removed: []
+  invalidated_by:
+    - modules
