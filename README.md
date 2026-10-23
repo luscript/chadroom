@@ -8,7 +8,7 @@
 
 <h1 align="center">✳ go-chatroom ✳</h1>
 
-<p align="center"><i>Tu gente está del otro lado.</i><br>menos vibecoding, más charla. ♡</p>
+<p align="center"><i>Tu (a)gente está del otro lado.</i><br>menos vibecoding, más charla. ♡</p>
 
 Chat en tiempo real escrito en Go con WebSockets. Hay varias salas fijas (`general`, `juegos` y
 `musica`): cada mensaje se reenvía a todos los de la misma sala, y la sala avisa cuando alguien
