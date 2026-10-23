@@ -80,7 +80,8 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 
 ## `chat-features` (after `structured-messages`)
 - [x] Online user list — done in `online-users-and-history` (2026-10-22).
-- [ ] Multiple rooms — next change.
+- [x] Multiple rooms — done in `multiple-rooms` (2026-10-22).
+- [x] Private chat (1-to-1 DMs per room) — done in `private-chat` (2026-10-23).
 - [x] Last-N message history on join — done in `online-users-and-history` (2026-10-22).
 - [ ] Typing indicator.
 
@@ -98,6 +99,19 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       `drainTypes` helper instead of `goto` in `TestShutdownIsSilent`; `expectEmpty` at the
       end of `TestChatBeforeLeaveOnDisconnect`.
 - [ ] Manual screen-reader check of the bulk history insert (`aria-busy`).
+
+## `private-chat-polish` (deferred from `private-chat` verify — low priority)
+- [ ] S1 Fail-open fallback: a malformed / case-variant DM envelope (`{"Type":"dm"…}`, `"type":"DM"`,
+      truncated JSON) from a non-page client is relayed as room chat and kept in history.
+      Option: frames starting with `{` that are not a valid envelope → `dm_error invalid`
+      (needs a CHAT-21 change; breaks plain-text messages that start with `{`).
+- [ ] S2 `memberByKey` folds every nickname per DM inside `Run`; store the folded key on
+      `Client` or make `taken` a `map[string]*Client`. Pairs with `rate-limiting`.
+- [ ] S3 Recipient dropped as slow still gets the sender an echo (looks delivered); consider
+      `dm_error offline` instead.
+- [ ] Per-tab close for DM tabs (today they go away only on "Dejar sala" / "Salir").
+- [ ] Manual UI checklist from `changes/archive/2026-10-23-private-chat/design.md`.
+- [ ] Cross-room DMs / DM replay after reconnect (need a server-wide identity or session token).
 
 ## Housekeeping
 - [x] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
