@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"log"
+	"strings"
 )
 
 const (
@@ -12,7 +13,13 @@ const (
 	typeWelcome = "welcome"
 	typeUsers   = "users"
 	typeHistory = "history"
+	typeDM      = "dm"
+	typeDMError = "dm_error"
 	historySize = 50 // chat messages kept for newcomers
+
+	reasonInvalid = "invalid"
+	reasonSelf    = "self"
+	reasonOffline = "offline"
 )
 
 // message is the outbound JSON envelope. Field order is the JSON order and
@@ -39,10 +46,79 @@ type historyFrame struct {
 	TS       int64     `json:"ts"`
 }
 
-// inbound is a validated client text frame on its way to the hub.
+// dmFrame is a direct message, sent to the recipient and echoed to the sender.
+type dmFrame struct {
+	Type string `json:"type"` // always "dm"
+	From string `json:"from"` // sender's assigned nickname
+	To   string `json:"to"`   // recipient's assigned nickname
+	Text string `json:"text"`
+	TS   int64  `json:"ts"` // same in both copies
+}
+
+// dmErrorFrame tells only the sender why a direct message was not delivered.
+type dmErrorFrame struct {
+	Type   string `json:"type"`   // always "dm_error"
+	To     string `json:"to"`     // cleaned requested recipient; "" for invalid
+	Reason string `json:"reason"` // invalid | self | offline
+	TS     int64  `json:"ts"`
+}
+
+type inboundKind uint8
+
+const (
+	inboundChat  inboundKind = iota // zero value: inbound{from, text} literals stay room chat
+	inboundDM                       // to and text set
+	inboundBadDM                    // dm envelope with a bad to/text; answered with dm_error invalid
+)
+
+// inbound is a classified client text frame on its way to the hub. It travels on
+// Room.broadcast whatever its kind, so one client's frames keep their order.
 type inbound struct {
 	from *Client
+	kind inboundKind
+	to   string // inboundDM only: cleanNickname(to), never ""
 	text string
+}
+
+// parseInbound classifies a size- and UTF-8-checked text frame (CHAT-21). ok is
+// false when the frame must be discarded silently (CHAT-13). from is left for the caller.
+func parseInbound(frame []byte) (in inbound, ok bool) {
+	// Exact keys: a struct would match "TYPE" case-insensitively.
+	var env map[string]json.RawMessage
+	isObject := json.Unmarshal(frame, &env) == nil && env != nil
+	if isObject {
+		typ, _ := jsonString(env["type"])
+		text, textOK := jsonString(env["text"])
+		switch typ {
+		case typeDM:
+			to, toOK := jsonString(env["to"])
+			to = cleanNickname(to)
+			if !toOK || !textOK || to == "" {
+				return inbound{kind: inboundBadDM}, true
+			}
+			if strings.TrimSpace(text) == "" {
+				return inbound{}, false
+			}
+			return inbound{kind: inboundDM, to: to, text: text}, true
+		case typeChat:
+			// A non-string text intentionally falls through to the plain-text rule (CHAT-21).
+			if textOK {
+				return inbound{text: text}, strings.TrimSpace(text) != ""
+			}
+		}
+	}
+	whole := string(frame)
+	return inbound{text: whole}, strings.TrimSpace(whole) != ""
+}
+
+// jsonString reports whether raw is a JSON string and returns its value ("null" is not a string).
+func jsonString(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || raw[0] != '"' {
+		return "", false
+	}
+	var s string
+	err := json.Unmarshal(raw, &s)
+	return s, err == nil
 }
 
 // encode marshals v. It returns nil on error (unreachable for strings and an

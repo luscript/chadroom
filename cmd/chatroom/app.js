@@ -24,6 +24,16 @@
   let active = null; // the room whose pane and header are shown
   let requestedNick = ''; // what the user typed; re-sent by every room's socket
 
+  // Direct messages. A conversation rides its room's socket; the page is the only place
+  // its transcript lives. Nicknames go into the DOM only as text, never into ids or classes.
+  const conversations = new Map(); // convKey(room, peer) -> conversation
+  let activeConv = null; // null, or a conversation of `active`: which pane is shown
+  let convSeq = 0; // element ids: 'dm-tab-' + n / 'dm-pane-' + n
+  // Assigned nicknames are unique per room and `\n` is in neither part, so exact equality is enough.
+  const convKey = (room, nick) => room.id + '\n' + nick;
+  const current = () => activeConv || active; // the pane on screen
+  const ownerRoom = (pane) => pane.room || pane; // conversation -> its room; room -> itself
+
   // True only when the whole message is one https image URL on an allowlisted host.
   function isAllowedImage(text) {
     if (/\s/.test(text)) return false;
@@ -78,7 +88,7 @@
       status: 'connecting', myName: '', users: new Set(), lastAuthor: null, unread: 0,
     };
     tab.addEventListener('click', () => {
-      if (room === active) return;
+      if (room === active && !activeConv) return;
       if (!room.joined) joinRoom(room);
       activate(room);
     });
@@ -99,9 +109,101 @@
     room.tab.setAttribute('aria-label', label);
   }
 
-  function bumpUnread(room) {
-    room.unread++;
-    renderTab(room);
+  // — conversations —
+  function createConversation(room, peer) {
+    const n = ++convSeq;
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.id = 'dm-tab-' + n;
+    tab.className = 'room-tab dm-tab joined';
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', 'false');
+    tab.setAttribute('aria-controls', 'scroller');
+    const nameEl = document.createElement('span');
+    nameEl.className = 'room-tab-name';
+    nameEl.textContent = '@' + peer;
+    const unreadEl = document.createElement('span');
+    unreadEl.className = 'room-unread';
+    unreadEl.hidden = true;
+    tab.append(nameEl, unreadEl);
+
+    const list = document.createElement('ol');
+    list.id = 'dm-pane-' + n;
+    list.className = 'messages';
+    list.setAttribute('aria-live', 'polite');
+    list.hidden = true;
+
+    const conv = { room, peer, tab, unreadEl, list, open: true, unread: 0, lastAuthor: null };
+    tab.addEventListener('click', () => {
+      if (conv !== activeConv) activate(room, conv);
+    });
+    // Right after the room's tab, or after its latest DM tab (Map order is creation order).
+    let anchor = room.tab;
+    for (const c of conversations.values()) if (c.room === room) anchor = c.tab;
+    anchor.after(tab);
+    conversations.set(convKey(room, peer), conv);
+    $('scroller').append(list);
+    renderConvTab(conv);
+    return conv;
+  }
+
+  function renderConvTab(conv) {
+    conv.tab.classList.toggle('closed', !conv.open);
+    conv.unreadEl.hidden = conv.unread === 0;
+    conv.unreadEl.textContent = conv.unread > 99 ? '99+' : String(conv.unread);
+    let label = '@' + conv.peer + ', privado en #' + conv.room.id;
+    if (!conv.open) label += ', desconectado';
+    if (conv.unread > 0) label += ', ' + conv.unread + ' sin leer';
+    conv.tab.setAttribute('aria-label', label);
+  }
+
+  function renderPaneTab(pane) {
+    if (pane.room) renderConvTab(pane); else renderTab(pane);
+  }
+
+  // Popover action: only for someone who is in the room right now.
+  function openConversation(room, peer) {
+    if (!room.joined || !room.users.has(peer) || peer === room.myName) return;
+    const conv = conversations.get(convKey(room, peer)) || createConversation(room, peer);
+    if (!conv.open) reopenConversation(conv);
+    activate(room, conv);
+    closePanels();
+    $('draft').focus();
+  }
+
+  // The same nickname may now belong to someone else, so the divider says so.
+  function reopenConversation(conv) {
+    conv.open = true;
+    addSystem(conv, 'Nueva conversación con ' + conv.peer + ': puede ser otra persona.');
+    renderConvTab(conv);
+    if (conv === activeConv) updateSendState();
+  }
+
+  function closeConversation(conv, notice) {
+    if (!conv.open) return;
+    conv.open = false;
+    addSystem(conv, notice);
+    renderConvTab(conv);
+    if (conv === activeConv) updateSendState();
+  }
+
+  function closeConversations(room, notice) {
+    for (const conv of conversations.values()) if (conv.room === room) closeConversation(conv, notice);
+  }
+
+  function removeConversations(room) {
+    for (const [key, conv] of conversations) {
+      if (conv.room !== room) continue;
+      conv.tab.remove();
+      conv.list.remove();
+      conversations.delete(key);
+      if (activeConv === conv) activeConv = null;
+    }
+  }
+
+  function bumpUnread(pane) {
+    pane.unread++;
+    renderPaneTab(pane);
   }
 
   function joinedRooms() {
@@ -127,21 +229,23 @@
     updateLeaveBtn();
   }
 
-  // Makes the room's pane and header current. Focus and the draft are left alone.
-  function activate(room) {
+  // Makes the room's pane (or one of its conversations) and header current. Focus and the draft are left alone.
+  function activate(room, conv = null) {
     active = room;
-    for (const r of rooms.values()) {
-      r.tab.setAttribute('aria-selected', String(r === room));
-      r.list.hidden = r !== room;
+    activeConv = conv;
+    const shown = current();
+    for (const pane of [...rooms.values(), ...conversations.values()]) {
+      pane.tab.setAttribute('aria-selected', String(pane === shown));
+      pane.list.hidden = pane !== shown;
     }
-    $('scroller').setAttribute('aria-labelledby', room.tab.id);
-    $('room-name').textContent = '#' + room.id;
+    $('scroller').setAttribute('aria-labelledby', shown.tab.id);
+    $('room-name').textContent = conv ? '@' + conv.peer + ' · #' + room.id : '#' + room.id;
     const me = room.myName || requestedNick;
     $('me').textContent = me;
     $('me').title = me;
     showStatus(room);
-    room.unread = 0;
-    renderTab(room);
+    shown.unread = 0;
+    renderPaneTab(shown);
     renderUsers();
     scrollToBottom();
     updateLeaveBtn();
@@ -152,6 +256,7 @@
     room.retryTimer = null;
     if (room.ws) { const s = room.ws; room.ws = null; s.close(); } // ws = null makes its onclose a no-op
     room.joined = false;
+    removeConversations(room);
     room.list.replaceChildren();
     room.users = new Set();
     room.myName = '';
@@ -226,6 +331,8 @@
       room.outage = true;
       addSystem(room, 'Conexión perdida, reconectando…');
     }
+    // The peer's side of the conversation is gone with the socket; the transcript stays.
+    closeConversations(room, 'Se perdió la conexión. Esta conversación terminó.');
     const d = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** room.attempt);
     room.attempt++;
     room.retryTimer = setTimeout(() => connect(room), d / 2 + Math.random() * d / 2);
@@ -293,6 +400,12 @@
       if (Array.isArray(msg.messages)) renderHistory(room, msg.messages);
       return;
     }
+    // dm_error carries no from either. It goes to the conversation it names; with no
+    // such conversation (e.g. an invalid frame) it goes to the pane the user is looking at.
+    if (msg.type === 'dm_error') {
+      if (typeof msg.to === 'string' && typeof msg.reason === 'string') showDMError(room, msg.to, msg.reason);
+      return;
+    }
     if (typeof msg.from !== 'string') return;
     switch (msg.type) {
       case 'welcome':
@@ -308,9 +421,20 @@
       case 'chat':
         if (typeof msg.text === 'string') {
           addChat(room, msg.from, msg.text, msg.ts);
-          if (room !== active && msg.from !== room.myName) bumpUnread(room);
+          if (room !== current() && msg.from !== room.myName) bumpUnread(room);
         }
         break;
+      case 'dm': {
+        if (typeof msg.to !== 'string' || typeof msg.text !== 'string') break;
+        const own = msg.from === room.myName;
+        const peer = own ? msg.to : (msg.to === room.myName ? msg.from : null);
+        if (peer === null || peer === room.myName) break; // not ours: ignore
+        const conv = conversations.get(convKey(room, peer)) || createConversation(room, peer);
+        if (!conv.open) reopenConversation(conv);
+        addChat(conv, msg.from, msg.text, msg.ts);
+        if (conv !== current() && !own) bumpUnread(conv);
+        break;
+      }
       case 'join':
         room.users.add(msg.from);
         if (room === active) renderUsers();
@@ -320,8 +444,25 @@
         room.users.delete(msg.from);
         if (room === active) renderUsers();
         addSystem(room, msg.from + ' salió 👋');
+        { // a no-op when there is no conversation with them, or it is already closed
+          const conv = conversations.get(convKey(room, msg.from));
+          if (conv) closeConversation(conv, msg.from + ' se desconectó');
+        }
         break;
       // Unknown types are ignored so newer servers don't break this page.
+    }
+  }
+
+  function showDMError(room, to, reason) {
+    const conv = to !== '' ? conversations.get(convKey(room, to)) : undefined;
+    const pane = conv || (room === active ? current() : room);
+    if (reason === 'offline') {
+      const notice = to + ' no está en la sala. El mensaje no se envió.';
+      if (conv && conv.open) closeConversation(conv, notice); else addSystem(pane, notice);
+    } else if (reason === 'self') {
+      addSystem(pane, 'No podés mandarte un mensaje privado.');
+    } else {
+      addSystem(pane, 'No se pudo enviar el mensaje privado.');
     }
   }
 
@@ -350,35 +491,45 @@
   // Renders the active room's users; "vos" is that room's assigned name.
   function renderUsers() {
     if (!active) return;
-    const names = [...active.users].sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' }));
-    $('users-count').textContent = String(active.users.size);
+    const room = active;
+    const names = [...room.users].sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' }));
+    $('users-count').textContent = String(room.users.size);
     $('users-list').replaceChildren(...names.map((name) => {
       const li = document.createElement('li');
       const label = document.createElement('span');
       label.textContent = name;
       li.append(label);
-      if (name === active.myName) {
+      if (name === room.myName) {
         const tag = document.createElement('span');
         tag.className = 'tag tag-accent';
         tag.textContent = 'vos';
         li.append(tag);
+      } else {
+        const dm = document.createElement('button');
+        dm.type = 'button';
+        dm.className = 'btn btn-ghost users-dm';
+        dm.textContent = 'Mensaje privado';
+        dm.setAttribute('aria-label', 'Mensaje privado a ' + name);
+        dm.addEventListener('click', () => openConversation(room, name));
+        li.append(dm);
       }
       return li;
     }));
   }
 
-  function addSystem(room, text) {
-    room.lastAuthor = null;
+  // addSystem, addChat and append take a pane: a room or a conversation (both have list and lastAuthor).
+  function addSystem(pane, text) {
+    pane.lastAuthor = null;
     const li = document.createElement('li');
     li.className = 'msg-system';
     li.textContent = text;
-    append(room, li);
+    append(pane, li);
   }
 
-  function addChat(room, author, text, ts) {
-    const own = author === room.myName;
-    const showHead = author !== room.lastAuthor;
-    room.lastAuthor = author;
+  function addChat(pane, author, text, ts) {
+    const own = author === ownerRoom(pane).myName;
+    const showHead = author !== pane.lastAuthor;
+    pane.lastAuthor = author;
 
     const li = document.createElement('li');
     li.className = 'msg' + (own ? ' own' : '') + (showHead ? ' has-head' : '');
@@ -423,7 +574,7 @@
       img.alt = 'GIF';
       img.loading = 'lazy';
       img.referrerPolicy = 'no-referrer';
-      img.onload = () => { if (room === active) scrollToBottom(); };
+      img.onload = () => { if (pane === current()) scrollToBottom(); };
       // Fall back to the plain link text if the image can't be loaded.
       img.onerror = () => { bubble.classList.remove('media'); bubble.textContent = text; };
       bubble.append(img);
@@ -434,12 +585,12 @@
     body.append(bubble);
 
     li.append(slot, body);
-    append(room, li);
+    append(pane, li);
   }
 
-  function append(room, node) {
-    room.list.append(node);
-    if (room === active) scrollToBottom();
+  function append(pane, node) {
+    pane.list.append(node);
+    if (pane === current()) scrollToBottom();
   }
 
   function scrollToBottom() {
@@ -452,7 +603,9 @@
   draft.addEventListener('input', updateSendState);
 
   function updateSendState() {
-    const online = !!active && active.status === 'online';
+    const online = !!active && active.status === 'online' && (!activeConv || activeConv.open);
+    if (!activeConv) draft.placeholder = 'Escribí algo…';
+    else draft.placeholder = activeConv.open ? 'Mensaje privado a ' + activeConv.peer + '…' : activeConv.peer + ' se desconectó';
     $('send-btn').disabled = !draft.value.trim() || !online;
     $('gif-send').disabled = !isAllowedImage($('gif-url').value.trim()) || !online;
   }
@@ -460,11 +613,15 @@
   function sendText(text) {
     const room = active;
     if (!room || room.status !== 'online' || !room.ws || room.ws.readyState !== WebSocket.OPEN) return false;
-    if (new TextEncoder().encode(text).length > MAX_MESSAGE_BYTES) {
-      addSystem(room, 'El mensaje es demasiado largo.');
+    if (activeConv && !activeConv.open) return false;
+    // Always an envelope, so text that merely looks like a DM envelope stays room chat.
+    const frame = JSON.stringify(activeConv ? { type: 'dm', to: activeConv.peer, text } : { type: 'chat', text });
+    // The server limit applies to the whole encoded frame. The echo renders the message.
+    if (new TextEncoder().encode(frame).length > MAX_MESSAGE_BYTES) {
+      addSystem(current(), 'El mensaje es demasiado largo.');
       return false;
     }
-    room.ws.send(text);
+    room.ws.send(frame);
     return true;
   }
 

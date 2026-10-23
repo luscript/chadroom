@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log"
 	"net"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -95,11 +94,13 @@ func (c *Client) readPump(cr *Room) {
 			c.closeWith(cr, websocket.CloseInvalidFramePayloadData)
 			return
 		}
-		if strings.TrimSpace(string(message)) == "" {
-			continue // CHAT-13: blank frames are ignored, connection stays open
+		in, ok := parseInbound(message)
+		if !ok {
+			continue // CHAT-13: blank text is ignored, connection stays open
 		}
+		in.from = c
 		select {
-		case cr.broadcast <- inbound{from: c, text: string(message)}:
+		case cr.broadcast <- in:
 		case <-cr.done:
 			return
 		}

@@ -217,3 +217,28 @@ func TestCheckOrigin(t *testing.T) {
 		})
 	}
 }
+
+// CHAT-19, CHAT-22: a dm only reaches the sender's room; a nickname from another room is offline.
+func TestDMRoomScoped(t *testing.T) {
+	srv, _ := startRooms(t, nil, NewRoom("general"), NewRoom("juegos"))
+	a, _ := dialRoom(t, srv, "general", "A")
+	bGeneral, _ := dialRoom(t, srv, "general", "B")
+	bJuegos, _ := dialRoom(t, srv, "juegos", "B")
+	z, _ := dialRoom(t, srv, "juegos", "Zoe")
+
+	send(t, a, `{"type":"dm","to":"B","text":"hi"}`)
+	if f := readDM(t, bGeneral); f.From != "A" || f.To != "B" || f.Text != "hi" {
+		t.Fatalf("dm = %+v", f)
+	}
+	readDM(t, a)
+
+	send(t, a, `{"type":"dm","to":"Zoe","text":"hi"}`)
+	if e := readDMError(t, a); e.To != "Zoe" || e.Reason != reasonOffline {
+		t.Fatalf("dm_error = %+v, want Zoe offline", e)
+	}
+
+	send(t, z, "sync") // Zoe's room never saw a dm; B in juegos gets only this chat
+	if m := nextChat(t, bJuegos, ""); m.From != "Zoe" || m.Text != "sync" {
+		t.Fatalf("juegos B got %+v", m)
+	}
+}

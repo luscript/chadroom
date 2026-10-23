@@ -714,3 +714,192 @@ func TestNicknameControlAndBidiStripped(t *testing.T) {
 		})
 	}
 }
+
+// nextNonJoin reads frames, skipping join notices, and returns the first other one.
+func nextNonJoin(t *testing.T, conn *websocket.Conn) []byte {
+	t.Helper()
+	for {
+		raw := readRaw(t, conn)
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			t.Fatalf("invalid JSON %q: %v", raw, err)
+		}
+		if head.Type != typeJoin {
+			return raw
+		}
+	}
+}
+
+// readDM reads the next frame (skipping joins) and requires it to be a dm.
+func readDM(t *testing.T, conn *websocket.Conn) dmFrame {
+	t.Helper()
+	return decodeDM(t, nextNonJoin(t, conn))
+}
+
+// readDMError reads the next frame (skipping joins) and requires it to be a dm_error.
+func readDMError(t *testing.T, conn *websocket.Conn) dmErrorFrame {
+	t.Helper()
+	return decodeDMError(t, nextNonJoin(t, conn))
+}
+
+// CHAT-21, CHAT-13: classification of inbound frames.
+func TestParseInbound(t *testing.T) {
+	long := strings.Repeat("ñ", 40)
+	tests := []struct {
+		name    string
+		frame   string
+		want    inbound
+		discard bool
+	}{
+		{"plain text", "hola", inbound{text: "hola"}, false},
+		{"chat envelope", `{"type":"chat","text":"hi"}`, inbound{text: "hi"}, false},
+		{"chat envelope keeps whitespace", `{"type":"chat","text":"  hi  "}`, inbound{text: "  hi  "}, false},
+		{"chat blank", `{"type":"chat","text":"  "}`, inbound{}, true},
+		{"chat text not a string", `{"type":"chat","text":5}`, inbound{text: `{"type":"chat","text":5}`}, false},
+		{"chat without text", `{"type":"chat"}`, inbound{text: `{"type":"chat"}`}, false},
+		{"unknown type", `{"type":"typing"}`, inbound{text: `{"type":"typing"}`}, false},
+		{"missing type", `{"text":"x"}`, inbound{text: `{"text":"x"}`}, false},
+		{"array", `[1,2]`, inbound{text: `[1,2]`}, false},
+		{"json string", `"dm"`, inbound{text: `"dm"`}, false},
+		{"number", `42`, inbound{text: `42`}, false},
+		{"null", `null`, inbound{text: `null`}, false},
+		{"malformed", `{"type":"dm"`, inbound{text: `{"type":"dm"`}, false},
+		{"type is case sensitive", `{"TYPE":"dm","to":"B","text":"x"}`, inbound{text: `{"TYPE":"dm","to":"B","text":"x"}`}, false},
+		{"dm", `{"type":"dm","to":"B","text":"x"}`, inbound{kind: inboundDM, to: "B", text: "x"}, false},
+		{"dm to is cleaned", "{\"type\":\"dm\",\"to\":\"  bob‮ \",\"text\":\"x\"}", inbound{kind: inboundDM, to: "bob", text: "x"}, false},
+		{"dm to truncated", `{"type":"dm","to":"` + long + `","text":"x"}`, inbound{kind: inboundDM, to: strings.Repeat("ñ", 32), text: "x"}, false},
+		{"dm extra field ignored", `{"type":"dm","to":"B","text":"x","extra":1}`, inbound{kind: inboundDM, to: "B", text: "x"}, false},
+		{"dm from ignored", `{"type":"dm","from":"C","to":"B","text":"x"}`, inbound{kind: inboundDM, to: "B", text: "x"}, false},
+		{"dm without to", `{"type":"dm","text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm empty to", `{"type":"dm","to":"","text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm blank to", `{"type":"dm","to":"   ","text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm to only bidi", "{\"type\":\"dm\",\"to\":\"‮\",\"text\":\"x\"}", inbound{kind: inboundBadDM}, false},
+		{"dm to number", `{"type":"dm","to":7,"text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm to null", `{"type":"dm","to":null,"text":"x"}`, inbound{kind: inboundBadDM}, false},
+		{"dm without text", `{"type":"dm","to":"B"}`, inbound{kind: inboundBadDM}, false},
+		{"dm text null", `{"type":"dm","to":"B","text":null}`, inbound{kind: inboundBadDM}, false},
+		{"invalid wins over blank", `{"type":"dm","to":7,"text":" "}`, inbound{kind: inboundBadDM}, false},
+		{"dm blank text", `{"type":"dm","to":"B","text":"\n"}`, inbound{}, true},
+		{"empty frame", ``, inbound{}, true},
+		{"spaces frame", `  `, inbound{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseInbound([]byte(tt.frame))
+			if ok == tt.discard {
+				t.Fatalf("ok = %v, want %v", ok, !tt.discard)
+			}
+			if !tt.discard && got != tt.want {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// CHAT-21, CHAT-22: a dm reaches only its recipient and its sender, with the same ts.
+func TestDMOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+	c, _ := dial(t, srv, "C")
+
+	send(t, a, `{"type":"dm","to":"B","text":"secreto"}`)
+	toB, toA := readDM(t, b), readDM(t, a)
+	for _, f := range []dmFrame{toB, toA} {
+		if f.From != "A" || f.To != "B" || f.Text != "secreto" {
+			t.Fatalf("dm = %+v, want A -> B secreto", f)
+		}
+	}
+	if toB.TS != toA.TS {
+		t.Fatalf("ts differ: %d vs %d", toB.TS, toA.TS)
+	}
+
+	// CHAT-22: a forged "from" in the envelope is ignored.
+	send(t, a, `{"type":"dm","from":"C","to":"B","text":"hi"}`)
+	if f := readDM(t, b); f.From != "A" || f.To != "B" || f.Text != "hi" {
+		t.Fatalf("forged dm = %+v, want from A", f)
+	}
+	readDM(t, a)
+
+	send(t, c, "sync")
+	if m := nextChat(t, c, ""); m.Text != "sync" { // a dm would fail decode first
+		t.Fatalf("C got %+v, want sync", m)
+	}
+}
+
+// CHAT-21: the envelope never sets the sender, and non-envelope JSON stays room chat.
+func TestChatEnvelopeAndForgery(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, `{"type":"chat","from":"Bob","text":"hi"}`)
+	if m := nextChat(t, b, ""); m.From != "A" || m.Text != "hi" {
+		t.Fatalf("chat = %+v, want A hi", m)
+	}
+	for _, frame := range []string{`{"type":"typing"}`, `[1,2]`, `{"text":"x"}`, `{"type":"chat","text":5}`} {
+		send(t, a, frame)
+		if m := nextChat(t, b, ""); m.From != "A" || m.Text != frame {
+			t.Fatalf("chat = %+v, want A with the whole frame %q", m, frame)
+		}
+	}
+}
+
+// CHAT-13: blank envelope text is discarded without any frame.
+func TestDMWhitespaceDiscarded(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, `{"type":"chat","text":"  "}`)
+	send(t, a, `{"type":"dm","to":"B","text":"\n"}`)
+	send(t, a, "hi")
+	for _, conn := range []*websocket.Conn{a, b} {
+		if m := nextChat(t, conn, ""); m.Text != "hi" {
+			t.Fatalf("first chat = %+v, want hi", m)
+		}
+	}
+}
+
+// CHAT-23: invalid dms are answered to the sender and never close the connection.
+func TestInvalidDMKeepsConnection(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	for _, frame := range []string{
+		`{"type":"dm","text":"x"}`,
+		`{"type":"dm","to":"   ","text":"x"}`,
+		`{"type":"dm","to":7,"text":"x"}`,
+		`{"type":"dm","to":"B","text":null}`,
+	} {
+		send(t, a, frame)
+		if e := readDMError(t, a); e.To != "" || e.Reason != reasonInvalid {
+			t.Fatalf("%s: dm_error = %+v, want invalid with empty to", frame, e)
+		}
+	}
+	send(t, a, "still open")
+	if m := nextChat(t, b, ""); m.Text != "still open" { // B saw no dm or dm_error
+		t.Fatalf("B got %+v", m)
+	}
+}
+
+// CHAT-06: the size limit covers the whole dm envelope.
+func TestOversizedDMClosesSender(t *testing.T) {
+	room := NewRoom("general")
+	room.maxMessageSize = 64
+	srv, _ := startServer(t, room)
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	const prefix = `{"type":"dm","to":"B","text":"`
+	frame := prefix + strings.Repeat("x", 65-len(prefix)-2) + `"}`
+	if len(frame) != 65 {
+		t.Fatalf("frame is %d bytes, want 65", len(frame))
+	}
+	send(t, a, frame)
+	expectReadError(t, a)
+	expectLeaveWithoutBroadcast(t, b, "A") // a dm would fail decode first
+}

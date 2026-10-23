@@ -27,7 +27,7 @@ type Room struct {
 	taken      map[string]struct{} // foldKey(nickname) of every registered client
 	history    []message           // last historySize chat messages, oldest first
 	dropped    []*Client           // slow clients removed by a fan-out, not yet announced
-	broadcast  chan inbound
+	broadcast  chan inbound        // every inbound kind (chat and direct), so a client's frames stay ordered
 	register   chan *Client
 	unregister chan *Client
 	done       chan struct{} // closed by Run when it exits
@@ -69,7 +69,7 @@ func (cr *Room) Run(ctx context.Context) {
 		case c := <-cr.unregister:
 			cr.leave(c)
 		case in := <-cr.broadcast:
-			cr.relay(in)
+			cr.dispatch(in)
 		case <-ctx.Done():
 			for c := range cr.clients {
 				cr.remove(c)
@@ -154,12 +154,75 @@ func (cr *Room) relay(in inbound) {
 	}
 }
 
-// drainBroadcast relays everything already queued on cr.broadcast without blocking.
+// dispatch routes a classified frame from a current member. Run-only.
+func (cr *Room) dispatch(in inbound) {
+	if _, ok := cr.clients[in.from]; !ok {
+		return // removed; its name may belong to someone else now
+	}
+	switch in.kind {
+	case inboundDM:
+		cr.direct(in)
+	case inboundBadDM:
+		cr.dmError(in.from, "", reasonInvalid)
+	default:
+		cr.relay(in)
+	}
+}
+
+// direct delivers a DM to its recipient and echoes it to the sender. It never stores or logs it.
+func (cr *Room) direct(in inbound) {
+	key := foldKey(in.to)
+	if key == foldKey(in.from.nickname) {
+		cr.dmError(in.from, in.to, reasonSelf)
+		return
+	}
+	to := cr.memberByKey(key)
+	if to == nil {
+		cr.dmError(in.from, in.to, reasonOffline)
+		return
+	}
+	if f := encode(dmFrame{typeDM, in.from.nickname, to.nickname, in.text, time.Now().UnixMilli()}); f != nil {
+		cr.deliverPrivate(f, to, in.from)
+	}
+}
+
+func (cr *Room) dmError(c *Client, to, reason string) {
+	if f := encode(dmErrorFrame{typeDMError, to, reason, time.Now().UnixMilli()}); f != nil {
+		cr.deliverPrivate(f, c)
+	}
+}
+
+// memberByKey returns the member whose foldKey(nickname) is key, or nil. Rooms are
+// small, so a scan is fine; taken short-circuits the offline case.
+func (cr *Room) memberByKey(key string) *Client {
+	if _, ok := cr.taken[key]; !ok {
+		return nil
+	}
+	for c := range cr.clients {
+		if foldKey(c.nickname) == key {
+			return c
+		}
+	}
+	return nil
+}
+
+// deliverPrivate queues msg for each of cs and announces any dropped as slow. Run-only.
+func (cr *Room) deliverPrivate(msg []byte, cs ...*Client) {
+	for _, c := range cs {
+		// An earlier drop in this call may have removed c; its send is closed and a write would panic.
+		if _, ok := cr.clients[c]; ok && !cr.deliver(c, msg) {
+			cr.dropped = append(cr.dropped, c)
+		}
+	}
+	cr.announceDropped()
+}
+
+// drainBroadcast dispatches everything already queued on cr.broadcast without blocking.
 func (cr *Room) drainBroadcast() {
 	for {
 		select {
 		case in := <-cr.broadcast:
-			cr.relay(in)
+			cr.dispatch(in)
 		default:
 			return
 		}
@@ -195,10 +258,15 @@ func (cr *Room) fanOut(msg []byte) {
 	}
 }
 
-// publish fans msg out and then announces a leave for every client dropped as
-// slow, including clients dropped by those announcements. Run-only.
+// publish fans msg out and then announces the clients it dropped. Run-only.
 func (cr *Room) publish(msg []byte) {
 	cr.fanOut(msg)
+	cr.announceDropped()
+}
+
+// announceDropped announces a leave for every client dropped as slow, including
+// clients dropped by those announcements, then clears the list. Run-only.
+func (cr *Room) announceDropped() {
 	for i := 0; i < len(cr.dropped); i++ { // fanOut below may append
 		c := cr.dropped[i]
 		if leave := encode(message{typeLeave, c.nickname, "", time.Now().UnixMilli()}); leave != nil {

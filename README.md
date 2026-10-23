@@ -39,7 +39,7 @@ todas las conexiones.
 | `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. |
 | `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). |
 | `GET /rooms` | Lista de salas: `{"rooms":["general","juegos","musica"]}` (`application/json`, `nosniff`, `Cache-Control: no-cache`). |
-| `GET /ws?nickname=<nombre>&room=<sala>` | Upgrade a WebSocket a una sala. Entrada: cada frame es texto plano. Salida: cada frame es un sobre JSON (ver abajo). |
+| `GET /ws?nickname=<nombre>&room=<sala>` | Upgrade a WebSocket a una sala. Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
 
 **Salas:** `room` debe coincidir exactamente (distingue mayúsculas) con una de las de `/rooms`. Si
 falta o está vacío se usa la sala por defecto (`general`, la primera); si no existe, el servidor
@@ -49,8 +49,18 @@ historial de 50 mensajes y su propio espacio de nicknames (`bob` puede estar en 
 un WebSocket por sala. Los frames no llevan el nombre de la sala. La política de orígenes
 (`ALLOWED_ORIGINS`) es la misma para todas.
 
-**Entrada (cliente → servidor):** texto plano UTF-8 de hasta 4096 bytes. Los mensajes en blanco
-se ignoran. Los frames binarios cierran la conexión con 1003 y el UTF-8 inválido con 1007.
+**Entrada (cliente → servidor):** texto UTF-8 de hasta 4096 bytes (el frame completo). Los mensajes
+en blanco se ignoran. Los frames binarios cierran la conexión con 1003 y el UTF-8 inválido con 1007.
+Cada frame se interpreta así:
+
+| Frame | Qué es |
+|-------|--------|
+| `{"type":"chat","text":"hola"}` | Mensaje a la sala con ese `text`. |
+| `{"type":"dm","to":"bob","text":"hola"}` | Mensaje privado a `bob` (ver abajo). |
+| Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido, `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
+
+Los campos extra se ignoran; `from` nunca se toma del cliente. Un texto en blanco se descarta sin
+respuesta, también en un `dm`.
 
 **Salida (servidor → clientes):** un sobre JSON por frame:
 
@@ -64,8 +74,33 @@ se ignoran. Los frames binarios cierran la conexión con 1003 y el UTF-8 inváli
 | `join`    | Alguien entró a la sala. | `""` |
 | `leave`   | Alguien salió de la sala. | `""` |
 | `chat`    | Mensaje de `from`, reenviado a todos. | el mensaje |
+| `dm`      | Mensaje privado de `from` para `to`: solo lo reciben ambos (ver Mensajes privados). | el mensaje |
+| `dm_error`| Un `dm` no se pudo entregar; solo lo recibe el remitente (ver Mensajes privados). | no lleva `text`; trae `to` y `reason` |
 
 `ts` es el momento del evento en Unix milisegundos.
+
+**Mensajes privados:** un `dm` válido llega solo al destinatario y se devuelve como eco al
+remitente (mismo frame, mismo `ts`); nadie más de la sala lo recibe. El destinatario se busca por
+el nickname **asignado** en la sala, sin distinguir mayúsculas (`" bob "` encuentra a `Bob`;
+`Ana (2)` es otro usuario que `Ana`).
+
+```json
+{"type":"dm","from":"Alice","to":"bob","text":"hola","ts":1792684800123}
+{"type":"dm_error","to":"Zoe","reason":"offline","ts":1792684800123}
+```
+
+Si no se puede entregar, solo el remitente recibe un `dm_error` y la conexión sigue abierta:
+
+| `reason`  | Cuándo | `to` |
+|-----------|--------|------|
+| `invalid` | Falta `to` o `text`, no son strings, o `to` queda vacío tras normalizarlo. | `""` |
+| `self`    | El destinatario es el propio remitente. | el `to` normalizado |
+| `offline` | Nadie en la sala tiene ese nickname. | el `to` normalizado |
+
+**Privacidad:** los mensajes privados no se guardan: no entran al `history`, el servidor no los
+reenvía ni los reintenta y no escribe su texto ni su destinatario en los logs. Quien se conecta
+después, aunque tome el mismo nickname, no recibe ningún mensaje anterior. Son por sala: no cruzan
+a otra sala.
 
 Además hay dos frames privados que solo recibe quien se conecta y que no llevan `from` ni `text`:
 
@@ -103,12 +138,12 @@ origen, Google Fonts y las imágenes de la lista permitida.
 
 ```
 cmd/chatroom/        main: router (gin), http.Server, señales, CSP y lista de hosts de imágenes
-  index.html         página (embebida), con app.js y app.css
+  index.html, app.js, app.css   frontend (embebido en el binario)
 internal/chat/
   server.go          Server: elige la sala (`room`), hace el upgrade y aplica la política de orígenes
   room.go            Room: hub que registra clientes y difunde mensajes (uno por sala)
   client.go          Client: readPump / writePump por conexión
-  message.go         Mensaje JSON (type, from, text, ts) y su codificación
+  message.go         Mensajes JSON (type, from, text, ts), `dm`/`dm_error` y la clasificación de la entrada
   nickname.go        Normalización y unicidad de apodos
 ```
 

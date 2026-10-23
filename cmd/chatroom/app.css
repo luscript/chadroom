@@ -99,6 +99,7 @@ p { margin: 0; }
 .users-title { font-size: 12px; }
 .users-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .users-list li { display: flex; align-items: center; gap: var(--space-3); font-size: 14px; overflow-wrap: anywhere; }
+.users-list .users-dm { margin-left: auto; flex: none; font-size: 12px; }
 .users-list .tag { font-size: 10px; padding: 0 6px; }
 .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--color-neutral-400); white-space: nowrap; }
 .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot); box-shadow: 0 0 8px var(--dot); }
@@ -126,6 +127,8 @@ p { margin: 0; }
   font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: var(--radius-sm);
   background: var(--color-accent); color: var(--color-bg);
 }
+.room-tab.dm-tab .room-tab-name { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; }
+.room-tab.dm-tab.closed { color: var(--color-neutral-600); }
 .room-leave { flex: none; white-space: nowrap; font-size: 12px; }
 
 /* — messages — */
