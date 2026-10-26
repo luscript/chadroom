@@ -212,7 +212,7 @@ img.avatar { object-fit: cover; }
 .music-controls #music-volume { width: 90px; accent-color: var(--color-accent); }
 .music-time { min-width: 5.5em; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--color-neutral-400); }
 .music-now { font-size: 13px; color: var(--color-neutral-400); overflow-wrap: anywhere; }
-.music-title { font-size: 13px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.music-title { max-width: 356px; font-size: 13px; font-weight: bold; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .music-error { font-size: 13px; color: var(--color-accent-300); }
 .music-queue { list-style: none; margin: 0; padding: 0; max-height: 7.5em; overflow-y: auto; font-size: 13px; color: var(--color-neutral-400); }
 .music-queue-item { display: flex; align-items: center; gap: var(--space-2); }
@@ -228,10 +228,9 @@ img.avatar { object-fit: cover; }
   .music:has(.music-player:not([hidden])) { grid-template-columns: minmax(0, 1fr) 356px; align-items: start; }
   /* Pinned to column 1: otherwise auto-placement fills any free cell of column 2 (e.g. while the title is hidden). */
   .music:has(.music-player:not([hidden])) > :not(.music-title, .music-player) { grid-column: 1; }
-  /* Title above the video in column 2; without a title the video takes the whole column again. */
-  .music:has(.music-player:not([hidden])) .music-title { grid-column: 2; grid-row: 1; }
-  .music:has(.music-player:not([hidden])) .music-player { grid-column: 2; grid-row: 2 / span 7; }
-  .music:has(.music-player:not([hidden])):has(.music-title[hidden]) .music-player { grid-row: 1 / span 8; }
+  /* Title as a caption right under the video, same width; hidden title takes no row. */
+  .music:has(.music-player:not([hidden])) .music-title { grid-column: 2; grid-row: 8; }
+  .music:has(.music-player:not([hidden])) .music-player { grid-column: 2; grid-row: 1 / span 7; }
 }
 
 @media (max-width: 560px) {
