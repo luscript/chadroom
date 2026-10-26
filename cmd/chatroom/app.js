@@ -1028,6 +1028,7 @@
     seeking: false, tick: null, lastSend: -Infinity,
     pendingSeek: null, seekTimer: null, // a seek that arrived inside the send gap (the latest one wins)
     muted: false,
+    title: '', // widget-confirmed title for music.srv.video; reset on track change
   };
 
   const musicRoom = () => rooms.get(MUSIC_ROOM);
@@ -1110,6 +1111,7 @@
         music.finishedSeq = 0;
       }
       music.duration = 0;
+      music.title = '';
       // A seek held for the previous track must not land on the new one.
       clearTimeout(music.seekTimer);
       music.seekTimer = null;
@@ -1283,6 +1285,9 @@
     else if (s) time = formatClock(dur > 0 ? Math.min(expectedMs(), dur * 1000) : expectedMs()) + (dur > 0 ? ' / ' + formatClock(dur * 1000) : '');
     $('music-time').textContent = time;
     $('music-now').textContent = s ? 'youtu.be/' + s.video + ' · último cambio: ' + s.by : 'No suena nada. Pegá un link y tocá Poner.';
+    const titleEl = $('music-title');
+    if (music.frame && music.title) { titleEl.textContent = music.title; titleEl.hidden = false; }
+    else { titleEl.textContent = ''; titleEl.hidden = true; }
     $('music-consent').hidden = !music.blocked || music.errored;
     $('music-player').hidden = !music.frame;
   }
@@ -1364,6 +1369,14 @@
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
     if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.event !== 'string') return;
+    // readyToListen means the widget can now receive our listening pings; it is NOT a
+    // delivery. Reply with another listening and keep the handshake loop going;
+    // do not mark ready here — a real delivery (initialDelivery, infoDelivery,
+    // onStateChange …) does that so we can register event listeners and sync state.
+    if (msg.event === 'readyToListen') {
+      ytPost({ event: 'listening', id: 1, channel: 'widget' });
+      return;
+    }
     if (!music.ready) {
       music.ready = true;
       clearInterval(music.listenTimer);
@@ -1379,6 +1392,21 @@
         if (info && typeof info === 'object' && !Array.isArray(info)) {
           // Right after a load the widget still reports the previous video (its time, state and
           // duration) for a moment; judging drift against that would seek the new video.
+          // Exception: when the widget identifies the video via videoData.video_id we can safely
+          // accept duration and title early. Without duration, seekSeconds() is uncapped and a
+          // drift-seek past the actual end triggers an immediate state 0 that staleEndUntil then
+          // swallows, leaving the end unlatched so the next server frame restarts the video.
+          const vd = info.videoData;
+          // video_id match alone is sufficient; loadedSeq is not checked because the iframe
+          // is created with src already pointing at srv.video, so initialDelivery (the only
+          // message that carries videoData/duration in full) arrives before loadedSeq is set.
+          if (typeof vd === 'object' && vd && music.srv && vd.video_id === music.srv.video) {
+            if (Number.isFinite(info.duration) && info.duration > 0) music.duration = info.duration;
+            if (typeof vd.title === 'string') {
+              const t = vd.title.trim().slice(0, 200);
+              if (t) music.title = t;
+            }
+          }
           if (performance.now() < music.ignoreInfoUntil) break;
           if (Number.isFinite(info.currentTime) && info.currentTime >= 0) {
             if (Math.abs(info.currentTime - music.time) > 0.05) music.timeMovedAt = performance.now();
@@ -1535,6 +1563,7 @@
     music.playTries = 0;
     music.ignoreInfoUntil = 0;
     music.seeking = false;
+    music.title = '';
     setMusicError('');
     renderQueue();
     renderMusic();
