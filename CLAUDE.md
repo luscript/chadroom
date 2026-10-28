@@ -40,6 +40,7 @@ Chat en tiempo real en Go (gin + gorilla/websocket) con salas fijas (`general`, 
 cmd/chatroom/        main: router gin, http.Server, señales, CSP y lista de hosts de imágenes
   gifs.go            GET /gifs: proxy a Giphy (trending/búsqueda), caché TTL, validación de URLs
   index.html, app.js, app.css   frontend (embebido con go:embed)
+  favicon.svg, favicon-unread.svg   favicons (normal / con no leídos), embebidos
   main_test.go       tests del router, CSP y coherencia de hosts de imágenes (Go vs app.js)
 internal/chat/
   server.go          Server: elige sala, upgrade WebSocket, política de orígenes
@@ -66,4 +67,4 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - Sala con reproductor: `musicRoom` (main.go) y `MUSIC_ROOM` (app.js); un test falla si difieren.
 - Sin código inline en la página (CSP estricta).
 - La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`).
-- Cambios con diseño van por SDD en `openspec/changes/`. En curso: chat-notifications.
+- Cambios con diseño van por SDD en `openspec/changes/`. Ninguno en curso.

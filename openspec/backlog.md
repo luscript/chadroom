@@ -167,3 +167,8 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [x] README line ~19 still says the page connects to `ws://localhost:8080` and to avoid
       `127.0.0.1`; `index.html` already builds the URL from `location.host` (#13 partially done).
 - [ ] #20 Review `.claude.json` / `.claude/` for secrets before committing.
+
+## chat-notifications follow-ups
+
+- JS unit tests for app.js notification rules (e.g. `node:test` with a stubbed DOM).
+- Serve embedded SVGs with `Content-Security-Policy: default-src 'none'; sandbox` (defence in depth).

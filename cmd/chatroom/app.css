@@ -258,3 +258,5 @@ body{height:auto;min-height:100vh;background-color:#f9dfeb;background-image:line
 /* The video needs >=200px, so give the room more height while the strip is shown. */
 .app:has(#music:not([hidden])){height:900px}
 @media(max-width:800px){.app:has(#music:not([hidden])){height:auto;min-height:calc(100dvh - 160px)}.chat-main:has(#music:not([hidden])) .scroller{min-height:220px}}
+.tool-mute{height:32px;padding:0 8px;font-size:15px;line-height:1}
+.tool-mute[aria-pressed="true"]{border-style:inset;background:var(--color-accent-900);box-shadow:none}
