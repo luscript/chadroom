@@ -40,6 +40,24 @@ Si se corta la conexión (reinicio del servidor, Wi-Fi, notebook suspendida), la
 reconecta sola: reintenta con esperas crecientes de hasta 30 s y vuelve a pedir el mismo
 nickname. Los mensajes enviados por otros durante el corte no se recuperan.
 
+### ✦ Notificaciones
+
+Cuando llega un mensaje de otra persona (en una sala o por privado) y no lo estás mirando,
+suena un *blip* corto. Se considera que no lo estás mirando cuando la pestaña está oculta, la
+ventana no tiene el foco (estás en otra app) o el mensaje es de otra sala o conversación.
+Como mucho suena una vez por segundo; tus propios mensajes, el historial, las entradas y
+salidas, el "escribiendo…" y el reproductor nunca suenan.
+
+- **🔔 / 🔕** en el header silencia el sonido para todas las salas y privados. La elección se
+  guarda en el navegador (`localStorage`, clave `chadroom.muted`).
+- **Pestaña**: mientras no la mirás, el título muestra los mensajes nuevos (`(3) ★chadroom★`) y
+  el favicon pasa a la variante con punto. Se limpia al volver a la ventana o al salir. Esto
+  funciona aunque el sonido esté silenciado.
+
+El sonido se genera en la página con la Web Audio API (sin archivos ni cambios en la CSP). El
+navegador solo deja reproducir audio después de un gesto del usuario, así que se habilita al
+entrar al chat.
+
 ### ✦ Configuración
 
 | Variable          | Default | Descripción |
@@ -242,6 +260,7 @@ origen, las imágenes de la lista permitida y, como único frame, `https://www.y
 ```
 cmd/chatroom/        main: router (gin), http.Server, señales, CSP y lista de hosts de imágenes
   index.html, app.js, app.css   frontend (embebido en el binario)
+  favicon.svg, favicon-unread.svg   ícono de la pestaña y su variante con mensajes sin leer
 internal/chat/
   server.go          Server: elige la sala (`room`), hace el upgrade y aplica la política de orígenes
   room.go            Room: hub que registra clientes y difunde mensajes (uno por sala)

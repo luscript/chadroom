@@ -23,7 +23,7 @@ Specs: CHAT-32, CHAT-33, SRV-02 (delta). Design: `design.md`.
 ## Batch 2 — verify
 
 - [x] T301 `gofmt -l .`, `go vet ./...`, `go test -race ./...` green
-- [ ] T302 Manual two-browser checklist (design.md) — deferred to the user if not runnable
+- [x] T302 Manual two-browser checklist (design.md) — deferred to the user if not runnable — user confirmed sound (other computer, unfocused window, first message after a quiet period)
 
 ## Fix round 2 (user report: no sound for messages from another computer)
 

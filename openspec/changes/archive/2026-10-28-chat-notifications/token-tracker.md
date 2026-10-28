@@ -3,7 +3,7 @@
 > Best-effort record of token usage for this SDD run. Missing data renders as
 > `[unavailable]` and NEVER blocks the flow.
 
-**Status**: partial (through verify)
+**Status**: complete
 **Generated**: 2026-10-28
 
 ## Per-agent / per-phase
@@ -18,6 +18,14 @@
 | verify  | crombie-reviewer         | sonnet / medium | 45,167 | 16 | 51s | — |
 | verify  | crombie-security         | sonnet / medium | 17,153 | 8 | 18s | — |
 | verify  | crombie-worker (fix)     | sonnet / low | 15,285 | 4 | 17s | T901, T902 |
+| fix     | crombie-worker (fix 2)   | sonnet / low | 16,253 | 3 | 17s | T911 |
+| fix     | crombie-worker (fix 3)   | sonnet / low | 16,954 | 4 | 21s | T912 |
+
+## Orchestrator
+
+| Scope         | Model / Tier | Tokens (in / out) | Notes |
+|---------------|--------------|-------------------|-------|
+| whole feature | opus         | [unavailable]     | not parsed from the session transcript |
 
 ## Aggregate
 
@@ -27,4 +35,7 @@
 | design              | 54,075 |
 | apply               | 53,811 |
 | verify              | 90,067 |
-| **Sub-agent total** | 234,588 |
+| fix                 | 33,207 |
+| **Sub-agent total** | 267,795 |
+| **Orchestrator total** | [unavailable] |
+| **Grand total**     | 267,795 (sub-agents only; orchestrator [unavailable]) |

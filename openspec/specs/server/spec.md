@@ -53,13 +53,14 @@ empty entries SHALL be ignored.
 
 ### Requirement: SRV-02 Serve the web client
 
-The system MUST serve the chat page at `GET /` and its static assets at `GET /app.js` and
-`GET /app.css`, all embedded in the binary, so that a browser opening the server's root URL
-can load the page and connect to `/ws` without any `ALLOWED_ORIGINS` configuration and from
-any host name that reaches the server (e.g. `localhost`, `127.0.0.1`, a LAN IP). Each asset
-MUST be served with its exact media type (`text/javascript; charset=utf-8`,
-`text/css; charset=utf-8`). The page and both assets MUST be sent with
-`Cache-Control: no-cache`, so a redeployed binary never pairs a new page with stale assets.
+The system MUST serve the chat page at `GET /` and its static assets at `GET /app.js`,
+`GET /app.css`, `GET /favicon.svg` and `GET /favicon-unread.svg`, all embedded in the binary,
+so that a browser opening the server's root URL can load the page and connect to `/ws` without
+any `ALLOWED_ORIGINS` configuration and from any host name that reaches the server (e.g.
+`localhost`, `127.0.0.1`, a LAN IP). Each asset MUST be served with its exact media type
+(`text/javascript; charset=utf-8`, `text/css; charset=utf-8`, `image/svg+xml`). The page and
+every asset MUST be sent with `Cache-Control: no-cache`, so a redeployed binary never pairs a
+new page with stale assets.
 No other path MUST expose embedded files (no directory listing).
 
 #### Scenario: Open the chat page
@@ -83,6 +84,14 @@ No other path MUST expose embedded files (no directory listing).
 - THEN each response is 200 with `text/javascript; charset=utf-8` and
   `text/css; charset=utf-8` respectively
 - AND each response, like `GET /`, includes `Cache-Control: no-cache`
+
+#### Scenario: Favicons
+
+- GIVEN the server is running
+- WHEN a client requests `GET /favicon.svg` and `GET /favicon-unread.svg`
+- THEN each response is 200 with `image/svg+xml`, `X-Content-Type-Options: nosniff` and
+  `Cache-Control: no-cache`
+- AND the chat page declares `/favicon.svg` as its icon
 
 #### Scenario: Unknown path
 
