@@ -3,6 +3,10 @@
   const MAX_MESSAGE_BYTES = 4096; // defaultMaxMessageSize in internal/chat/room.go
   const MAX_AVATAR_BYTES = 512; // mirrors maxAvatarBytes in cmd/chatroom/main.go
   const AVATAR_KEY = 'chadroom.avatar'; // localStorage; best effort
+  const MUTED_KEY = 'chadroom.muted'; // localStorage; best effort
+  const BLIP_GAP_MS = 1000; // at most one notification sound per second
+  const FAVICON = '/favicon.svg'; // served by cmd/chatroom/main.go
+  const FAVICON_UNREAD = '/favicon-unread.svg';
 
   const CATS = [
     { name: 'Caras', icon: '😀', list: '😀 😃 😄 😁 😆 😅 😂 🤣 🙂 😉 😊 😇 🥰 😍 🤩 😘 😋 😛 😜 🤪 🤔 🤨 😐 😑 😶 🙄 😏 😴 😮 😲 😢 😭 😤 😡 🥳 😎 🤓 🥺 😱 🤯 😬 🫠 🤗 🫡' },
@@ -350,6 +354,7 @@
     e.preventDefault();
     const nick = nickInput.value.trim();
     if (!nick || joining) return;
+    unlockAudio(); // inside the gesture, before any await
     const avatar = avatarInput.value.trim();
     if (!validAvatarInput(avatar)) {
       $('join-error').textContent = 'La foto tiene que ser un link https a una imagen (.gif, .png, .jpg o .webp) de Giphy, Tenor o Imgur.';
@@ -440,9 +445,10 @@
   }
   function reconnectAll() { joinedRooms().forEach(reconnectNow); }
   window.addEventListener('online', reconnectAll);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) reconnectAll(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { resetTabIndicator(); reconnectAll(); } });
 
   $('leave-btn').addEventListener('click', () => {
+    resetTabIndicator();
     rooms.forEach((room) => { if (room.joined) teardown(room); });
     updateLeaveBtn();
     closePanels();
@@ -469,6 +475,73 @@
     $('status-label').textContent = STATUS_LABEL[room.status];
     updateSendState();
   }
+
+  // — notifications —
+  const baseTitle = document.title; // captured at load
+  const faviconLink = document.querySelector('link[rel="icon"]');
+  let unreadCount = 0; // notifying messages while the tab was hidden
+  let soundMuted = false;
+  try { soundMuted = localStorage.getItem(MUTED_KEY) === '1'; } catch { /* blocked: unmuted */ }
+  let audioCtx = null;
+  let lastBlipAt = -Infinity;
+  renderMute();
+
+  function notify(paneIsCurrent) {
+    if (document.hidden) { unreadCount++; renderTabIndicator(); }
+    if (document.hidden || !paneIsCurrent) playBlip();
+  }
+
+  function renderTabIndicator() {
+    document.title = unreadCount ? '(' + unreadCount + ') ' + baseTitle : baseTitle;
+    const href = unreadCount ? FAVICON_UNREAD : FAVICON;
+    if (faviconLink && faviconLink.getAttribute('href') !== href) faviconLink.setAttribute('href', href);
+  }
+  function resetTabIndicator() { unreadCount = 0; renderTabIndicator(); }
+
+  // Must run inside a user gesture (join submit, unmute click) so autoplay policy allows it.
+  function unlockAudio() {
+    try {
+      if (!audioCtx && window.AudioContext) audioCtx = new AudioContext();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    } catch { audioCtx = null; }
+  }
+
+  function playBlip() {
+    if (soundMuted || !audioCtx) return;
+    const now = performance.now();
+    if (now - lastBlipAt < BLIP_GAP_MS) return; // coalesce bursts
+    try {
+      // A suspended context has a frozen clock: scheduling now would play a stale beep later.
+      if (audioCtx.state !== 'running') { audioCtx.resume().catch(() => {}); return; }
+      lastBlipAt = now;
+      const t = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, t);
+      osc.frequency.exponentialRampToValueAtTime(1320, t + 0.08);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.08, t + 0.01); // low volume
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.16);
+      osc.onended = () => gain.disconnect();
+    } catch { /* no sound: fail silently */ }
+  }
+
+  function renderMute() {
+    $('mute-btn').setAttribute('aria-pressed', String(soundMuted));
+    $('mute-btn').textContent = soundMuted ? '🔕' : '🔔';
+  }
+  $('mute-btn').addEventListener('click', () => {
+    soundMuted = !soundMuted;
+    renderMute();
+    if (!soundMuted) unlockAudio();
+    try {
+      if (soundMuted) localStorage.setItem(MUTED_KEY, '1'); else localStorage.removeItem(MUTED_KEY);
+    } catch { /* storage blocked: the choice just isn't remembered */ }
+  });
 
   // — messages —
   // The server sends JSON frames {type, from, text, ts}; ts is Unix milliseconds.
@@ -528,6 +601,7 @@
           clearTyping(room, msg.from);
           addChat(room, msg.from, msg.text, msg.ts, msg.avatar);
           if (room !== current() && msg.from !== room.myName) bumpUnread(room);
+          if (msg.from !== room.myName) notify(room === current());
         }
         break;
       case 'dm': {
@@ -540,6 +614,7 @@
         if (!own) clearTyping(conv, msg.from);
         addChat(conv, msg.from, msg.text, msg.ts, room.avatars.get(msg.from));
         if (conv !== current() && !own) bumpUnread(conv);
+        if (!own) notify(conv === current());
         break;
       }
       case 'typing': {

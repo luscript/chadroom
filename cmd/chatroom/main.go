@@ -34,6 +34,12 @@ var appJS []byte
 //go:embed app.css
 var appCSS []byte
 
+//go:embed favicon.svg
+var faviconSVG []byte
+
+//go:embed favicon-unread.svg
+var faviconUnreadSVG []byte
+
 // imageHosts may be shown inline in the chat (CSP img-src).
 // Mirrored by IMAGE_HOSTS in app.js; TestImageHostsMirroredInJS keeps them in sync.
 var imageHosts = []string{
@@ -145,6 +151,8 @@ func newRouter(chatSrv *chat.Server, gifs *gifSearch) *gin.Engine {
 	r.GET("/", servePage)
 	r.GET("/app.js", serveAsset("text/javascript; charset=utf-8", appJS))
 	r.GET("/app.css", serveAsset("text/css; charset=utf-8", appCSS))
+	r.GET("/favicon.svg", serveAsset("image/svg+xml", faviconSVG))
+	r.GET("/favicon-unread.svg", serveAsset("image/svg+xml", faviconUnreadSVG))
 	r.GET("/rooms", serveRooms)
 	r.GET("/ws", chatSrv.HandleWebSocket)
 	if gifs != nil {

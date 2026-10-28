@@ -58,6 +58,7 @@ todas las conexiones.
 |------|-------------|
 | `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. |
 | `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). |
+| `GET /favicon.svg`, `GET /favicon-unread.svg` | Ícono de la pestaña y su variante con mensajes sin leer (embebidos). |
 | `GET /rooms` | Lista de salas: `{"rooms":["general","juegos","musica"]}` (`application/json`, `nosniff`, `Cache-Control: no-cache`). |
 | `GET /gifs?q=<texto>` | Búsqueda de GIFs en Giphy (solo con `GIPHY_API_KEY`). Sin `q` devuelve los trending. `200` `{"gifs":[{"url":"…","preview":"…"}]}` (hasta 24, solo URLs `https` de la lista permitida, sin query), `400` `{"error":"query_too_long"}` si `q` pasa de 50 caracteres, `404` si no hay clave, `502` `{"error":"unavailable"}` si Giphy falla o tarda más de 5 s. Resultados en caché 10 min. |
 | `GET /ws?nickname=<nombre>&room=<sala>&avatar=<url>` | Upgrade a WebSocket a una sala. `avatar` es opcional (foto de perfil, ver abajo). Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |

@@ -112,6 +112,8 @@ func TestStaticAssets(t *testing.T) {
 		{"/", "text/html; charset=utf-8", indexHTML},
 		{"/app.js", "text/javascript; charset=utf-8", appJS},
 		{"/app.css", "text/css; charset=utf-8", appCSS},
+		{"/favicon.svg", "image/svg+xml", faviconSVG},
+		{"/favicon-unread.svg", "image/svg+xml", faviconUnreadSVG},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -736,5 +738,33 @@ func TestMusicSyncAcrossSessions(t *testing.T) {
 		if f.Video != "dQw4w9WgXcQ" || f.Playing != c.playing || f.Pos == nil || f.Seq == nil || *f.Seq != 1 || f.By != "A" {
 			t.Fatalf("B after %s: %+v, want video dQw4w9WgXcQ playing=%v pos and seq 1 set by A", c.name, f, c.playing)
 		}
+	}
+}
+
+func TestIndexNotificationMarkup(t *testing.T) {
+	if !strings.Contains(string(indexHTML), `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`) {
+		t.Error("index.html does not declare /favicon.svg as the icon")
+	}
+	if !regexp.MustCompile(`<button id="mute-btn"[^>]*aria-pressed="false"`).Match(indexHTML) {
+		t.Error("index.html has no #mute-btn with aria-pressed=\"false\"")
+	}
+	js := string(appJS)
+	for _, want := range []string{"'/favicon.svg'", "'/favicon-unread.svg'", "'chadroom.muted'", "notify(room === current())", "notify(conv === current())", "resetTabIndicator()"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js does not contain %s", want)
+		}
+	}
+	for name, svg := range map[string][]byte{"favicon.svg": faviconSVG, "favicon-unread.svg": faviconUnreadSVG} {
+		t.Run(name, func(t *testing.T) {
+			low := strings.ToLower(string(svg))
+			for _, bad := range []string{"<script", "href", "<foreignobject"} {
+				if strings.Contains(low, bad) {
+					t.Errorf("%s contains %q", name, bad)
+				}
+			}
+			if regexp.MustCompile(`\son\w+\s*=`).MatchString(low) {
+				t.Errorf("%s contains an event handler attribute", name)
+			}
+		})
 	}
 }
