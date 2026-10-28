@@ -110,20 +110,16 @@ declarations are hoisted, and the `let`s are initialized before any socket exist
       const now = performance.now();
       if (now - lastBlipAt < BLIP_GAP_MS) return;          // coalesce bursts
       lastBlipAt = now;
+      const scheduleTone = () => {                          // reads currentTime only once the clock is live
+        try {
+          const t = audioCtx.currentTime + BLIP_LEAD_S;     // 0.12 s silent lead-in: idle OS sinks drop the first ~100-300 ms
+          // oscillator 880→1320 Hz, gain 0.0001 from currentTime, envelope relative to t, osc.stop(t + 0.16)
+          // (tone ≤ 200 ms; lead-in silence doesn't count); osc.onended disconnects gain
+        } catch { /* no sound: fail silently */ }
+      };
       try {
-        if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
-        const t = audioCtx.currentTime;
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(880, t);
-        osc.frequency.exponentialRampToValueAtTime(1320, t + 0.08);
-        gain.gain.setValueAtTime(0.0001, t);
-        gain.gain.exponentialRampToValueAtTime(0.08, t + 0.01);   // low volume
-        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
-        osc.connect(gain).connect(audioCtx.destination);
-        osc.start(t);
-        osc.stop(t + 0.16);                                       // ≤ 200 ms; nodes are GC'd after stop
+        if (audioCtx.state === 'running') scheduleTone();
+        else audioCtx.resume().then(scheduleTone, () => {}); // first sound after idle is no longer lost
       } catch { /* no sound: fail silently */ }
     }
 

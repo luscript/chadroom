@@ -21,3 +21,7 @@ Pending: T302 (manual checklist, user).
 ## Fix round 2 (user report)
 
 - T911: "unattended" = hidden or window unfocused (Linux rarely reports occlusion, so a message from another computer was silent while the user was in another app). Indicator resets on window focus. Gates green.
+
+## Fix round 3 (user report)
+
+- T912: first sound after a quiet period was lost. A suspended context is resumed and the tone scheduled once it resolves (no longer dropped); 120 ms silent lead-in lets an idle audio sink wake. Gates green.

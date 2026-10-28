@@ -5,6 +5,7 @@
   const AVATAR_KEY = 'chadroom.avatar'; // localStorage; best effort
   const MUTED_KEY = 'chadroom.muted'; // localStorage; best effort
   const BLIP_GAP_MS = 1000; // at most one notification sound per second
+  const BLIP_LEAD_S = 0.12; // silent lead-in before the tone (idle audio sinks drop the first ~100-300 ms)
   const FAVICON = '/favicon.svg'; // served by cmd/chatroom/main.go
   const FAVICON_UNREAD = '/favicon-unread.svg';
 
@@ -517,23 +518,30 @@
     if (soundMuted || !audioCtx) return;
     const now = performance.now();
     if (now - lastBlipAt < BLIP_GAP_MS) return; // coalesce bursts
+    lastBlipAt = now;
+    // Schedule only once the clock is live (a suspended context has a frozen currentTime).
+    const scheduleTone = () => {
+      try {
+        // Silent lead-in: an idle OS audio sink swallows the first ~100-300 ms while waking.
+        const t = audioCtx.currentTime + BLIP_LEAD_S;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, t);
+        osc.frequency.exponentialRampToValueAtTime(1320, t + 0.08);
+        gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.08, t + 0.01); // low volume
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.16);
+        osc.onended = () => gain.disconnect();
+      } catch { /* no sound: fail silently */ }
+    };
     try {
-      // A suspended context has a frozen clock: scheduling now would play a stale beep later.
-      if (audioCtx.state !== 'running') { audioCtx.resume().catch(() => {}); return; }
-      lastBlipAt = now;
-      const t = audioCtx.currentTime;
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, t);
-      osc.frequency.exponentialRampToValueAtTime(1320, t + 0.08);
-      gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.exponentialRampToValueAtTime(0.08, t + 0.01); // low volume
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
-      osc.connect(gain).connect(audioCtx.destination);
-      osc.start(t);
-      osc.stop(t + 0.16);
-      osc.onended = () => gain.disconnect();
+      if (audioCtx.state === 'running') scheduleTone();
+      else audioCtx.resume().then(scheduleTone, () => {});
     } catch { /* no sound: fail silently */ }
   }
 

@@ -28,3 +28,7 @@ Specs: CHAT-32, CHAT-33, SRV-02 (delta). Design: `design.md`.
 ## Fix round 2 (user report: no sound for messages from another computer)
 
 - [x] T911 `app.js`: "unattended" = `document.hidden || !document.hasFocus()`; use it in `notify` for the sound and the tab counter; reset the indicator on window `focus` (and keep visibilitychange → visible+focused); spec CHAT-32/CHAT-33 updated
+
+## Fix round 3 (user report: first sound after a quiet period is lost)
+
+- [x] T912 `playBlip`: if the context is not `running`, resume and play once the resume resolves (instead of dropping); start the tone after a ~120 ms silent lead-in so an idle audio sink (PipeWire/Pulse suspend-on-idle, Bluetooth) can wake without swallowing it
