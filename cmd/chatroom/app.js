@@ -445,7 +445,11 @@
   }
   function reconnectAll() { joinedRooms().forEach(reconnectNow); }
   window.addEventListener('online', reconnectAll);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { resetTabIndicator(); reconnectAll(); } });
+  document.addEventListener('visibilitychange', () => {
+    if (!unattended()) resetTabIndicator();
+    if (!document.hidden) reconnectAll();
+  });
+  window.addEventListener('focus', resetTabIndicator);
 
   $('leave-btn').addEventListener('click', () => {
     resetTabIndicator();
@@ -486,9 +490,12 @@
   let lastBlipAt = -Infinity;
   renderMute();
 
+  // Hidden or without focus: on Linux the browser rarely reports occlusion, so document.hidden alone misses "user in another app".
+  const unattended = () => document.hidden || !document.hasFocus();
+
   function notify(paneIsCurrent) {
-    if (document.hidden) { unreadCount++; renderTabIndicator(); }
-    if (document.hidden || !paneIsCurrent) playBlip();
+    if (unattended()) { unreadCount++; renderTabIndicator(); }
+    if (unattended() || !paneIsCurrent) playBlip();
   }
 
   function renderTabIndicator() {

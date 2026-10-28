@@ -24,3 +24,7 @@ Specs: CHAT-32, CHAT-33, SRV-02 (delta). Design: `design.md`.
 
 - [x] T301 `gofmt -l .`, `go vet ./...`, `go test -race ./...` green
 - [ ] T302 Manual two-browser checklist (design.md) — deferred to the user if not runnable
+
+## Fix round 2 (user report: no sound for messages from another computer)
+
+- [x] T911 `app.js`: "unattended" = `document.hidden || !document.hasFocus()`; use it in `notify` for the sound and the tab counter; reset the indicator on window `focus` (and keep visibilitychange → visible+focused); spec CHAT-32/CHAT-33 updated

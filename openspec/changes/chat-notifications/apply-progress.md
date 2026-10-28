@@ -17,3 +17,7 @@ Pending: T301 (gates), T302 (manual checklist).
 - T901, T902 in `app.js` and `main_test.go`. gofmt/vet/`go test -race ./...`/`node --check` green.
 
 Pending: T302 (manual checklist, user).
+
+## Fix round 2 (user report)
+
+- T911: "unattended" = hidden or window unfocused (Linux rarely reports occlusion, so a message from another computer was silent while the user was in another app). Indicator resets on window focus. Gates green.

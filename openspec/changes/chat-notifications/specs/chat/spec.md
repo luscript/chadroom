@@ -9,7 +9,11 @@ whose `from` is not the user's own nickname in that room. Messages delivered in 
 frame, the user's own echoed messages, `join`/`leave`, `typing`, `music`, `dm_error` frames
 and system notices MUST NOT be notifying messages.
 
-When a notifying message arrives and the tab is hidden, or the message belongs to a pane
+The page is **unattended** when its tab is hidden or its window does not have the focus (the
+user is in another tab, window or application; `document.hidden` alone misses a visible but
+unfocused window).
+
+When a notifying message arrives and the page is unattended, or the message belongs to a pane
 (room or private conversation) other than the one currently shown, the page MUST play a short
 sound (at most 200 ms), synthesized in the page (no audio file, no change to the
 Content-Security-Policy). The page MUST play at most one sound per second; extra notifying
@@ -39,6 +43,13 @@ affect the tab indicator (CHAT-33) nor the unread badges.
 - WHEN Bob sends a message in `general` or a private message to Ana
 - THEN the notification sound plays
 
+#### Scenario: Visible window without focus
+
+- GIVEN Ana's browser shows `general` but she is typing in another application
+- WHEN Bob, from another computer, sends a message in `general`
+- THEN the notification sound plays and the title reads `(1) ★chadroom★`
+- AND when Ana clicks back into the browser window, the title and favicon reset
+
 #### Scenario: Own messages and history are silent
 
 - GIVEN Ana's tab is hidden
@@ -66,12 +77,12 @@ affect the tab indicator (CHAT-33) nor the unread badges.
 
 ### Requirement: CHAT-33 Chat page tab indicator
 
-While the tab is hidden, every notifying message (CHAT-32), muted or not and including those
+While the page is unattended, every notifying message (CHAT-32), muted or not and including those
 in the pane being shown, MUST increment an unread counter. While the counter is above zero the
 document title MUST be `(N) ` followed by the page's original title, and the favicon MUST be
-the unread variant (`/favicon-unread.svg`). When the tab becomes visible again, or the user
-leaves the chat, the counter MUST reset to zero and the title and favicon MUST return to the
-original (`/favicon.svg`). A visible tab MUST NOT change title or favicon.
+the unread variant (`/favicon-unread.svg`). When the page is attended again (visible and focused), or
+the user leaves the chat, the counter MUST reset to zero and the title and favicon MUST return to the
+original (`/favicon.svg`). An attended page MUST NOT change title or favicon.
 
 #### Scenario: Unread while away
 

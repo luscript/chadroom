@@ -5,8 +5,8 @@
 Client-only. One `notify(paneIsCurrent)` call sits next to the existing `bumpUnread` calls in the
 `chat` and `dm` cases of `addRaw` (app.js:526-544). Those cases are only reached by live frames,
 and `history` returns early (app.js:494), so history never notifies. `notify` does two things:
-(a) while `document.hidden`, it increments a tab counter that drives the title and the favicon;
-(b) when the tab is hidden or the pane is not the current one, it asks `playBlip()` for a sound.
+(a) while unattended (tab hidden or window without focus), it increments a tab counter that drives the title and the favicon;
+(b) when unattended or the pane is not the current one, it asks `playBlip()` for a sound.
 `playBlip` checks mute and the 1 s coalescing window. The server embeds two SVG favicons and
 serves them through the existing `serveAsset`. CSP, protocol and `internal/chat` stay unchanged.
 
@@ -21,7 +21,7 @@ would replay the sound for old messages); a generic event bus (YAGNI).
 `own`). Reusing it puts every notification rule in one obvious place.
 
 ### Decision: Separate tab counter (`unreadCount`) from pane badges
-**Choice**: a module-level `let unreadCount = 0` that counts only while hidden, current pane included.
+**Choice**: a module-level `let unreadCount = 0` that counts only while unattended (hidden or unfocused), current pane included.
 **Alternatives considered**: summing pane badges. `bumpUnread` skips the current pane, and badges
 outlive visibility changes.
 **Rationale**: the counter's semantics ("arrived while you were away") are different from the
@@ -57,10 +57,10 @@ announces the state twice; a per-room mute (out of scope).
     WebSocket frame ─→ addRaw ─→ case chat/dm (not own)
                                    ├─ bumpUnread(pane)         (unchanged; pane ≠ current)
                                    └─ notify(pane === current())
-                                         ├─ hidden → unreadCount++ → renderTabIndicator()
+                                         ├─ unattended → unreadCount++ → renderTabIndicator()
                                          │                            ├─ document.title = "(N) ★chadroom★"
                                          │                            └─ link[rel=icon].href = /favicon-unread.svg
-                                         └─ hidden || !paneIsCurrent → playBlip() (skip if muted / <1 s)
+                                         └─ unattended || !paneIsCurrent → playBlip() (skip if muted / <1 s)
     visibilitychange(visible) ─→ resetTabIndicator() + reconnectAll()
     #leave-btn click          ─→ resetTabIndicator()
 
@@ -78,7 +78,7 @@ declarations are hoisted, and the `let`s are initialized before any socket exist
 
     const baseTitle = document.title;                      // captured at load
     const faviconLink = document.querySelector('link[rel="icon"]');
-    let unreadCount = 0;   // notifying messages while the tab was hidden
+    let unreadCount = 0;   // notifying messages while unattended
     let soundMuted = false;
     try { soundMuted = localStorage.getItem(MUTED_KEY) === '1'; } catch { /* blocked: unmuted */ }
     let audioCtx = null;
@@ -86,8 +86,8 @@ declarations are hoisted, and the `let`s are initialized before any socket exist
     renderMute();
 
     function notify(paneIsCurrent) {
-      if (document.hidden) { unreadCount++; renderTabIndicator(); }
-      if (document.hidden || !paneIsCurrent) playBlip();
+      if (unattended()) { unreadCount++; renderTabIndicator(); }
+      if (unattended() || !paneIsCurrent) playBlip();
     }
 
     function renderTabIndicator() {
@@ -145,7 +145,7 @@ Hooks into existing code:
 | Where | Change |
 |-------|--------|
 | join submit (line 349) | add `unlockAudio();` right after `if (!nick \|\| joining) return;`, before any `await`, so it runs in the same gesture |
-| `visibilitychange` (line 443) | `if (!document.hidden) { resetTabIndicator(); reconnectAll(); }` |
+| `visibilitychange` (line 443) | `if (!unattended()) resetTabIndicator(); if (!document.hidden) reconnectAll();`; plus `window` `focus` -> `resetTabIndicator` |
 | `#leave-btn` click (line 445) | add `resetTabIndicator();` |
 | `case 'chat'` (line 530) | after the `bumpUnread` line: `if (msg.from !== room.myName) notify(room === current());` |
 | `case 'dm'` (line 542) | after the `bumpUnread` line: `if (!own) notify(conv === current());` |
@@ -225,6 +225,7 @@ Run `gofmt` and `go test -race ./...`.
 7. B opens a DM to A while A is on `general`: blip plus DM badge. With the DM open and visible: silent.
 8. A clicks 🔔: it becomes 🔕 and looks pressed. Repeat steps 2 and 5: no sound, but the title and favicon still update.
 9. A reloads the page: the button stays 🔕 (localStorage). Clicking it again gives 🔔 and sound works without a reload.
+10b. Browser visible but focus in another app: B writes -> A hears the sound and sees (N); clicking back on A's window resets title and favicon.
 10. With the tab hidden and the counter above zero, A clicks Salir (keyboard focus) or leaves and rejoins: the title and favicon are reset.
 11. B leaves or joins `general`, starts typing, or loads music in `musica`: A gets no sound.
 12. A reconnects (network off then on): replayed history makes no sound.
