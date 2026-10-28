@@ -176,7 +176,9 @@ The page MUST work under that policy with no CSP violations reported by the brow
 - GIVEN the page is opened in a current Chrome or Firefox with the developer console open
 - AND the server runs with `GIPHY_API_KEY` set
 - WHEN the user joins, sends messages, opens the emoji and GIF panels, searches for a GIF,
-  sends one, opens `musica`, presses "Escuchar", puts a YouTube link, pauses, seeks and leaves
+  sends one, opens `musica`, puts a YouTube link (and presses "Escuchar" only if the blocked
+  warning appears), queues a second link, removes it, queues another, skips, pauses, seeks and
+  leaves
 - THEN everything renders styled and works
 - AND the console reports no Content-Security-Policy violations
 

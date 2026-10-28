@@ -40,7 +40,7 @@ modules:
       - cmd/chatroom/main_test.go
   - name: openspec
     path: openspec
-    description: "Spec-Driven Development artifacts: specs/{chat,server}/spec.md (current requirements CHAT-01..CHAT-33, SRV-01..SRV-08), changes/<name>/ (active: music-queue, implemented and merged, pending verify/archive), changes/archive/YYYY-MM-DD-<slug>/ (10 completed changes: fix-channel-handling, structured-messages, frontend-hardening, online-users-and-history, multiple-rooms, private-chat, typing-indicator, gif-picker, profile-picture, room-music-sync), backlog.md (future changes), config.yaml (SDD rules, project_map auto_refresh advise, threshold 5), project-map.yaml"
+    description: "Spec-Driven Development artifacts: specs/{chat,server}/spec.md (current requirements CHAT-01..CHAT-33, SRV-01..SRV-08), changes/<name>/ (active changes in progress), changes/archive/YYYY-MM-DD-<slug>/ (12 completed changes: fix-channel-handling, structured-messages, frontend-hardening, online-users-and-history, multiple-rooms, private-chat, typing-indicator, gif-picker, profile-picture, room-music-sync, music-queue, chat-notifications), backlog.md (future changes), config.yaml (SDD rules, project_map auto_refresh advise, threshold 5), project-map.yaml"
     language: markdown
     entry_points:
       - openspec/backlog.md
@@ -104,9 +104,9 @@ api_surface:
     auth: null
 staleness:
   status: fresh
-  checked_at: 2026-10-27T11:30:00.000Z
-  since_commit: 7f9c221
-  head_commit: 7f9c221
+  checked_at: 2026-10-28T18:30:00.000Z
+  since_commit: bde477e
+  head_commit: bde477e
   threshold: 5
   drift:
     changed_files_in_modules: 0

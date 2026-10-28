@@ -5,7 +5,7 @@
 > completion notification's `usage` block; the orchestrator total is parsed post-hoc from
 > the local session transcript JSONL (`[unavailable]` on failure).
 
-**Status**: partial (through verify; T905 bug-fix pending user re-test)
+**Status**: complete
 **Generated**: 2026-10-23
 
 ## Per-agent / per-phase
