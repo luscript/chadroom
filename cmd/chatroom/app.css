@@ -256,7 +256,14 @@ body{height:auto;min-height:100vh;background-color:#f9dfeb;background-image:line
 .music{padding:8px 0}.music-error{color:#a22263}.btn-accent{background:#fce4f1;color:#a22263;border-color:#ee92bf}
 @media(max-width:480px){.music-controls{gap:5px}.music-controls #music-volume{width:56px}}
 /* The video needs >=200px, so give the room more height while the strip is shown. */
-.app:has(#music:not([hidden])){height:900px}
-@media(max-width:800px){.app:has(#music:not([hidden])){height:auto;min-height:calc(100dvh - 160px)}.chat-main:has(#music:not([hidden])) .scroller{min-height:220px}}
+.app:has(#music:not([hidden], .parked)){height:900px}
+@media(max-width:800px){.app:has(#music:not([hidden], .parked)){height:auto;min-height:calc(100dvh - 160px)}.chat-main:has(#music:not([hidden], .parked)) .scroller{min-height:220px}}
 .tool-mute{height:32px;padding:0 8px;font-size:15px;line-height:1}
 .tool-mute[aria-pressed="true"]{border-style:inset;background:var(--color-accent-900);box-shadow:none}
+/* Parked: off-screen but rendered at full size, so the embed keeps playing unthrottled. Never display:none/visibility:hidden. */
+.music.parked{position:fixed;left:-10000px;top:0;width:356px;padding:0;pointer-events:none}
+.music.parked>:not(.music-player){display:none}
+.music-now-playing{max-width:180px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:480px){.music-now-playing{display:none}}
+.music.parked:has(.music-player){grid-template-columns:minmax(0,1fr)}
+.music.parked .music-player{grid-column:1;grid-row:auto}
