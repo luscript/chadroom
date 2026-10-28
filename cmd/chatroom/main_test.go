@@ -741,6 +741,45 @@ func TestMusicSyncAcrossSessions(t *testing.T) {
 	}
 }
 
+func TestIndexGlobalMusicMarkup(t *testing.T) {
+	html := string(indexHTML)
+	startTag := func(id string) string {
+		i := strings.Index(html, `id="`+id+`"`)
+		if i < 0 {
+			t.Fatalf("index.html missing id=%q", id)
+		}
+		return html[strings.LastIndex(html[:i], "<") : i+strings.Index(html[i:], ">")+1]
+	}
+	hidden := regexp.MustCompile(`\shidden[\s>]`)
+	mute := startTag("music-global-mute")
+	if !strings.HasPrefix(mute, "<button") || !strings.Contains(mute, `aria-pressed="false"`) ||
+		!hidden.MatchString(mute) || !strings.Contains(mute, "tool-mute") {
+		t.Errorf("#music-global-mute must be a hidden button with aria-pressed=\"false\" and class tool-mute: %s", mute)
+	}
+	if now := startTag("music-now-playing"); !hidden.MatchString(now) {
+		t.Errorf("#music-now-playing must start hidden: %s", now)
+	}
+	prev := -1
+	for _, marker := range []string{`class="actions"`, `id="music-now-playing"`, `id="music-global-mute"`, `id="mute-btn"`, `id="leave-btn"`} {
+		i := strings.Index(html, marker)
+		if i <= prev {
+			t.Errorf("%s is missing or out of order in the header", marker)
+		}
+		prev = i
+	}
+	if !strings.Contains(string(appJS), "'chadroom.musicMuted'") {
+		t.Error("app.js does not contain 'chadroom.musicMuted'")
+	}
+	for _, want := range []string{".music.parked", ":not([hidden], .parked)"} {
+		if !strings.Contains(string(appCSS), want) {
+			t.Errorf("app.css does not contain %q", want)
+		}
+	}
+	if strings.Contains(string(appJS), "pauseLocal") {
+		t.Error("app.js still contains pauseLocal")
+	}
+}
+
 func TestIndexNotificationMarkup(t *testing.T) {
 	if !strings.Contains(string(indexHTML), `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`) {
 		t.Error("index.html does not declare /favicon.svg as the icon")

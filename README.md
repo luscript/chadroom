@@ -252,6 +252,11 @@ origen, las imágenes de la lista permitida y, como único frame, `https://www.y
 > cuando el navegador bloquea el audio. Mientras no abras `musica`, no se hace ningún pedido a
 > YouTube. La sala con reproductor es `musicRoom`
 > (`main.go`) y `MUSIC_ROOM` (`app.js`); un test falla si difieren.
+>
+> **Música en otras salas:** mientras sigas unido a `musica`, la música sigue sonando aunque
+> mires otra sala o un privado; el encabezado muestra `♪` con el título (o `⏸` si está en pausa).
+> El botón 🎵 del encabezado la silencia solo en tu navegador (se recuerda) y es el mismo estado
+> que el 🔊 del reproductor. Al salir de `musica` se corta el audio.
 
 <p align="center"><img src="docs/readme/divider.svg" alt=""></p>
 

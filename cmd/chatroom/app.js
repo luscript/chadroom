@@ -1062,10 +1062,14 @@
 
   // — shared music (CHAT-30, CHAT-31) —
   // Only the musica room has a player. The server holds its state; this page follows it.
-  // Nothing here contacts YouTube until the musica pane is shown while a video is current (other
-  // rooms never do), and no YouTube script is ever loaded: the iframe is driven with postMessage,
-  // the way YouTube's own widget does it. "Escuchar" only appears when the browser blocks audio.
+  // Nothing here contacts YouTube until the user has shown the musica pane at least once since
+  // joining (afterwards the frame may be created off-pane), and no YouTube script is ever loaded: the iframe is driven with postMessage, the way YouTube's own
+  // widget does it. Once the frame exists it keeps playing while the user stays joined to musica,
+  // whatever pane is shown (CHAT-31, CHAT-34): the strip is parked off-screen, never moved or hidden,
+  // because reparenting an iframe reloads it and a hidden cross-origin frame gets throttled.
+  // "Escuchar" only appears when the browser blocks audio.
   const MUSIC_ROOM = 'musica'; // mirrors musicRoom in cmd/chatroom/main.go
+  const MUSIC_MUTED_KEY = 'chadroom.musicMuted'; // localStorage; best effort
   const YT_ORIGIN = 'https://www.youtube-nocookie.com';
   const YT_EMBED = 'https://www.youtube-nocookie.com/embed/';
   const YT_ID = /^[A-Za-z0-9_-]{11}$/;
@@ -1100,6 +1104,7 @@
 
   const music = {
     shown: false, // the pane was visible at the last activate (see syncShown)
+    seen: false, // the pane was shown since joining: from then on the frame may be created off-pane
     blocked: false, // the browser refused to start playback: ask for a click again
     frame: null, ready: false, listenTimer: null,
     srv: null, // {video, playing, pos, by, seq, queue, at}: the server's state, the only thing the UI shows
@@ -1117,12 +1122,17 @@
     errored: false, // the embed reported an error for this video: no play retries, no "Escuchar" again
     seeking: false, tick: null, lastSend: -Infinity,
     pendingSeek: null, seekTimer: null, // a seek that arrived inside the send gap (the latest one wins)
-    muted: false,
+    muted: false, // local only; persisted under MUSIC_MUTED_KEY, survives resetMusic
     title: '', // widget-confirmed title for music.srv.video; reset on track change
   };
 
   const musicRoom = () => rooms.get(MUSIC_ROOM);
+  const musicJoined = () => { const r = musicRoom(); return !!r && r.joined; };
+  // The musica pane is on screen.
   const musicShown = () => { const r = musicRoom(); return !!r && r.joined && active === r && !activeConv; };
+  // The local player must follow the room, on screen or not.
+  const playerActive = () => !!music.frame && musicJoined();
+  try { music.muted = localStorage.getItem(MUSIC_MUTED_KEY) === '1'; } catch { /* blocked: unmuted */ }
 
   // The 11-character id for the link forms CHAT-31 allows, else null.
   function parseYouTubeId(text) {
@@ -1220,7 +1230,7 @@
     music.srv = { video: msg.video, playing: msg.playing, pos: msg.pos, by: msg.by, seq: msg.seq, queue, at: performance.now() };
     music.settleUntil = 0; // a global action applies at once
     music.playTries = 0;
-    createPlayer(); // a no-op without a video, while hidden, or with a player already
+    createPlayer(); // a no-op without a video, before the pane was seen, or with a player already
     renderQueue();
     renderMusic();
     reconcile({ seek });
@@ -1341,15 +1351,40 @@
     setMusicError(MUSIC_ERRORS[code] || 'No se pudo reproducir el video.');
   }
 
+  // The header widgets live outside the musica pane, so they render before renderMusic's early return.
+  function renderMusicHeader() {
+    const joined = musicJoined();
+    $('music-global-mute').hidden = !joined;
+    const s = music.srv;
+    const show = joined && !musicShown() && !!s;
+    $('music-now-playing').hidden = !show;
+    if (!show) return;
+    const text = music.blocked && !music.errored
+      ? 'Audio bloqueado: abrí #musica'
+      : !music.seen
+      ? 'Abrí #musica para escuchar'
+      : (s.playing ? '♪ ' : '⏸ ') + (music.title || 'youtu.be/' + s.video);
+    const el = $('music-now-playing');
+    if (el.textContent !== text) el.textContent = text;
+  }
+
   function renderMusic() {
     const shown = musicShown();
-    $('music').hidden = !shown;
-    if (!shown) {
+    if (shown) music.seen = true;
+    renderMusicHeader();
+    $('music-player').hidden = !music.frame;
+    // Off the pane with a live frame the strip is parked, not hidden (see the section comment).
+    const parked = !shown && playerActive();
+    $('music').hidden = !shown && !parked;
+    $('music').classList.toggle('parked', parked);
+    $('music').inert = parked;
+    if (shown || playerActive()) {
+      if (music.tick === null) music.tick = setInterval(musicTick, MUSIC_TICK_MS);
+    } else {
       clearInterval(music.tick);
       music.tick = null;
-      return;
     }
-    if (music.tick === null) music.tick = setInterval(musicTick, MUSIC_TICK_MS);
+    if (!shown) return; // the pane's own controls are not updated off-screen
     const room = musicRoom();
     const online = room.status === 'online';
     const s = music.srv;
@@ -1379,7 +1414,6 @@
     if (music.frame && music.title) { titleEl.textContent = music.title; titleEl.hidden = false; }
     else { titleEl.textContent = ''; titleEl.hidden = true; }
     $('music-consent').hidden = !music.blocked || music.errored;
-    $('music-player').hidden = !music.frame;
   }
 
   // reconcile() here (not only on frames) retries a stalled player and heals drift, and it also
@@ -1391,11 +1425,12 @@
   }
 
   // — the YouTube iframe —
-  // Built only while the musica pane is on screen with a video current (never while the
-  // user is in another room). Every attribute is set before it is appended, so the very first
-  // request already carries the referrer policy.
+  // Built with a video current, and only once the user has shown the musica pane since joining
+  // (never for someone who stays in another room). Every attribute is set before it is appended,
+  // so the very first request already carries the referrer policy.
   function createPlayer() {
-    if (music.frame || !music.srv || !musicShown()) return;
+    if (!musicShown() && music.blocked) return; // a refused start is retried from the pane, not off it
+    if (music.frame || !music.srv || !(musicShown() || (music.seen && musicJoined()))) return;
     const frame = document.createElement('iframe');
     frame.title = 'Reproductor de YouTube';
     frame.referrerPolicy = 'strict-origin-when-cross-origin'; // keeps error 153 away; sends only the origin
@@ -1403,7 +1438,7 @@
     frame.width = '356';
     frame.height = '200';
     frame.addEventListener('load', startListening);
-    frame.src = YT_EMBED + music.srv.video + '?enablejsapi=1&controls=0&disablekb=1&playsinline=1&rel=0' +
+    frame.src = YT_EMBED + encodeURIComponent(music.srv.video) + '?enablejsapi=1&controls=0&disablekb=1&playsinline=1&rel=0' +
       '&iv_load_policy=3&widgetid=1&origin=' + encodeURIComponent(location.origin);
     music.frame = frame;
     $('music-player').append(frame);
@@ -1534,7 +1569,7 @@
   // it are not enough: a server frame (`frame` given) always posts the matching command, and while
   // no state has been reported the tick keeps re-sending the intent. Commands are idempotent.
   function reconcile(frame) {
-    if (!music.ready || !musicShown()) return;
+    if (!music.ready || !playerActive()) return;
     const s = music.srv;
     const now = performance.now();
     if (music.state === 1 && (music.playTries !== 0 || music.blocked)) {
@@ -1604,23 +1639,14 @@
     }
   }
 
-  // Leaving musica silences the local player only: no control goes to the room.
-  function pauseLocal() {
-    ytCommand('pauseVideo');
-  }
-
-  // Called by activate. On hidden -> shown the player is forced to the room's position: the
-  // local one froze at the pause, and no frame says the room moved on. reconcile({seek:true}) seeks
-  // then plays/pauses whatever was reported, or loads when the track changed meanwhile.
+  // Called by activate. Leaving the pane does not pause: the tick keeps the parked player in sync,
+  // and reconcile() corrects any drift (e.g. from a throttled background tab) on return too.
   function syncShown() {
-    const was = music.shown;
-    music.shown = musicShown();
-    if (!music.shown) { if (was) pauseLocal(); return; }
+    const shown = musicShown();
+    if (!shown) return;
+    music.seen = true;
     createPlayer(); // a no-op without a video or with a frame already
-    if (was) { reconcile(); return; } // still shown (e.g. a repeated activate): no audible seek
-    music.settleUntil = 0;
-    music.playTries = 0;
-    reconcile({ seek: true });
+    reconcile();
   }
 
   // The room's socket is gone for good (leave): back to the state before any frame.
@@ -1642,7 +1668,7 @@
     music.finishedSeq = 0;
     music.timeMovedAt = 0;
     music.staleEndUntil = 0;
-    music.shown = false;
+    music.seen = false;
     music.state = -1;
     music.reported = false;
     music.assertAt = 0;
@@ -1702,12 +1728,24 @@
     sendMusic('seek', { pos: Math.round(Number($('music-seek').value) * 1000) });
   });
 
-  $('music-mute').addEventListener('click', () => {
-    music.muted = !music.muted;
+  // One state, two buttons: the in-pane 🔊 and the header 🎵 (reachable from any room).
+  function renderMusicMute() {
     $('music-mute').setAttribute('aria-pressed', String(music.muted));
     $('music-mute').textContent = music.muted ? '🔇' : '🔊';
-    ytCommand(music.muted ? 'mute' : 'unMute');
-  });
+    $('music-global-mute').setAttribute('aria-pressed', String(music.muted));
+    $('music-global-mute').textContent = music.muted ? '🔇' : '🎵';
+  }
+  function setMusicMuted(muted) {
+    music.muted = muted;
+    renderMusicMute();
+    ytCommand(muted ? 'mute' : 'unMute');
+    try {
+      if (muted) localStorage.setItem(MUSIC_MUTED_KEY, '1'); else localStorage.removeItem(MUSIC_MUTED_KEY);
+    } catch { /* storage blocked: the choice just isn't remembered */ }
+  }
+  $('music-mute').addEventListener('click', () => setMusicMuted(!music.muted));
+  $('music-global-mute').addEventListener('click', () => setMusicMuted(!music.muted));
+  renderMusicMute();
   $('music-volume').addEventListener('input', () => {
     ytCommand('setVolume', [Number($('music-volume').value)]);
   });
