@@ -1313,6 +1313,7 @@ only when:
 | `action` | Other fields | Effect on the state |
 |----------|--------------|---------------------|
 | `add`    | `video`: a string matching `^[A-Za-z0-9_-]{11}$` | if no video is current, or `finished` is true and the queue is empty: the video becomes current. Otherwise it is appended to the queue (requires fewer than 30 queued items) |
+| `addmany` | `videos`: an array of 1 to 31 strings, each matching `^[A-Za-z0-9_-]{11}$` | `add` is applied to each element in order: the first may become current (same rule as `add`), the rest are appended while fewer than 30 items are queued; the elements that do not fit are dropped silently. Requires at least one element to be accepted |
 | `remove` | `id`: an integer ≥ 1 | the queue item with that `id` is removed (requires it to exist) |
 | `skip`   | — | the first queue item is removed and becomes current (requires a non-empty queue) |
 | `ended`  | `seq`: an integer ≥ 1 | requires `seq` equal to the state's `seq` and `finished` false. If the queue is non-empty, as `skip`. Otherwise `finished` = true and `playing` = false at the current position |
@@ -1322,16 +1323,16 @@ only when:
 
 `play` and `seek` on a `finished` track set `finished` to false (the track is replayed). For
 `play`, `pause` and `seek`, `by` becomes the sender's nickname. For `remove`, and for `add` that
-only appends, `by` is unchanged. Every accepted control produces a `music` frame.
+only appends, `by` is unchanged. Every accepted control produces a `music` frame (one per `addmany`, however many of its ids were added).
 
 Any other control MUST be discarded without any reply. This includes an unknown or missing
-`action` (including the former `load`), wrong field types, an invalid `video`, `pos`, `id` or
+`action` (including the former `load`), wrong field types, an invalid `video`, a `videos` that is not an array of 1 to 31 valid ids (one invalid element discards the whole control), `pos`, `id` or
 `seq` out of range or not an integer, an unmet requirement above, or an `ended` whose `seq` is
 not the current one. Several clients reporting the same track as ended therefore advance the
 queue only once.
 
 Per connection, the server MUST accept at most 4 `ended` controls per second and, separately,
-at most 4 other music controls per second. It MUST discard the excess without any reply.
+at most 4 other music controls per second; an `addmany` counts as one control. It MUST discard the excess without any reply.
 
 After each accepted control the server MUST send every registered client of the room (including
 the sender) a `music` frame, a JSON object with exactly these fields:
@@ -1370,6 +1371,14 @@ frame is ever sent.
 - WHEN `B` sends `add` with `video` = `9bZkp7q19f0`
 - THEN every client receives `video` = `dQw4w9WgXcQ`, `playing` = true, `by` unchanged, the same
   `seq`, and `queue` = `[{"id":1,"video":"9bZkp7q19f0","by":"B"}]`
+
+#### Scenario: Add many queues a list
+
+- GIVEN clients `A` and `B` are in `musica` and no video is current
+- WHEN `A` sends `{"type":"music","action":"addmany","videos":[X1,X2,X3]}` with valid ids
+- THEN exactly one `music` frame is sent, with `video` = X1, `playing` = true, `by` = `A`,
+  `seq` = 1 and `queue` = `[{id 1, X2, by A}, {id 2, X3, by A}]`
+- AND with 29 items already queued, only the first id that fits is appended and the rest dropped
 
 #### Scenario: Skip advances
 

@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -863,7 +866,7 @@ func TestParseInbound(t *testing.T) {
 			if ok == tt.discard {
 				t.Fatalf("ok = %v, want %v", ok, !tt.discard)
 			}
-			if !tt.discard && got != tt.want {
+			if !tt.discard && !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
 			}
 		})
@@ -1256,6 +1259,87 @@ func TestMusicEndedNotThrottledOverWebSocket(t *testing.T) {
 				t.Fatalf("frame = %+v, want video aaaaaaaaaaa", f)
 			}
 			return
+		}
+	}
+}
+
+// manyIDs returns n distinct valid video ids.
+func manyIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("track%06d", i) // 11 chars
+	}
+	return ids
+}
+
+// CHAT-30: addmany is validated completely (1..maxMusicQueue+1 ids, each a video id) or discarded.
+func TestParseMusicAddMany(t *testing.T) {
+	quote := func(ids []string) string {
+		b, _ := json.Marshal(ids)
+		return string(b)
+	}
+	frame := func(videos string) []byte {
+		return []byte(`{"type":"music","action":"addmany","videos":` + videos + `}`)
+	}
+	tests := []struct {
+		name   string
+		videos string
+		want   []string // nil means discarded
+	}{
+		{"one id", `["dQw4w9WgXcQ"]`, []string{"dQw4w9WgXcQ"}},
+		{"several ids keep their order", `["dQw4w9WgXcQ","a-_B1c2D3e4","aaaaaaaaaaa"]`, []string{"dQw4w9WgXcQ", "a-_B1c2D3e4", "aaaaaaaaaaa"}},
+		{"duplicates are allowed", `["dQw4w9WgXcQ","dQw4w9WgXcQ"]`, []string{"dQw4w9WgXcQ", "dQw4w9WgXcQ"}},
+		{"31 ids is the maximum", quote(manyIDs(maxMusicQueue + 1)), manyIDs(maxMusicQueue + 1)},
+		{"32 ids is too long", quote(manyIDs(maxMusicQueue + 2)), nil},
+		{"empty array", `[]`, nil},
+		{"missing", ``, nil},
+		{"null", `null`, nil},
+		{"string", `"dQw4w9WgXcQ"`, nil},
+		{"object", `{"a":"dQw4w9WgXcQ"}`, nil},
+		{"number", `5`, nil},
+		{"bad id among good ones", `["dQw4w9WgXcQ","abc"]`, nil},
+		{"url instead of id", `["https://youtu.be/dQw4w9WgXcQ"]`, nil},
+		{"id with trailing newline", `["dQw4w9WgXcQ\n"]`, nil},
+		{"element not a string", `["dQw4w9WgXcQ",12345678901]`, nil},
+		{"element null", `["dQw4w9WgXcQ",null]`, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := frame(tt.videos)
+			if tt.videos == "" {
+				f = []byte(`{"type":"music","action":"addmany"}`)
+			}
+			in, ok := parseInbound(f)
+			if tt.want == nil {
+				if ok {
+					t.Fatalf("parseInbound = %+v, want the frame discarded", in)
+				}
+				return
+			}
+			if !ok || in.kind != inboundMusic || in.music.action != musicAddMany || !slices.Equal(in.music.videos, tt.want) {
+				t.Fatalf("parseInbound = %+v (ok %v), want addmany of %v", in, ok, tt.want)
+			}
+		})
+	}
+}
+
+// CHAT-30: one frame with N ids yields one music frame; it spends a single rate-gate slot.
+func TestMusicAddManyOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewMusicRoom("musica"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	ids := manyIDs(5)
+	send(t, a, `{"type":"music","action":"addmany","videos":["`+strings.Join(ids, `","`)+`"]}`)
+	for _, conn := range []*websocket.Conn{a, b} {
+		f := readMusic(t, conn)
+		if f.Video != ids[0] || !f.Playing || f.By != "A" || f.Seq != 1 || len(f.Queue) != 4 {
+			t.Fatalf("music = %+v, want %s playing by A with 4 queued", f, ids[0])
+		}
+		for i, it := range f.Queue {
+			if it.Video != ids[i+1] || it.ID != int64(i+1) || it.By != "A" {
+				t.Fatalf("queue[%d] = %+v, want %s id %d by A", i, it, ids[i+1], i+1)
+			}
 		}
 	}
 }

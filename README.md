@@ -102,7 +102,7 @@ Cada frame se interpreta así:
 | `{"type":"dm","to":"bob","text":"hola"}` | Mensaje privado a `bob` (ver abajo). |
 | `{"type":"typing"}` | "Escribiendo…" para toda la sala (ver abajo). |
 | `{"type":"typing","to":"bob"}` | "Escribiendo…" solo para `bob` (ver abajo). |
-| `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`, `remove`, `skip`, `ended`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
+| `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`, `{"type":"music","action":"addmany","videos":["dQw4w9WgXcQ","9bZkp7q19f0"]}`, `remove`, `skip`, `ended`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
 | Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido (`typing` y `music` ya no cuentan), `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
 
 Los campos extra se ignoran; `from` nunca se toma del cliente. Un texto en blanco se descarta sin
@@ -173,6 +173,7 @@ toca YouTube: solo retransmite el estado y cada página sigue su propio reproduc
 | `action` | Campos | Efecto |
 |----------|--------|--------|
 | `add`    | `video`: id de 11 caracteres `[A-Za-z0-9_-]` (solo el id, nunca una URL) | Sin video actual, o si el actual terminó y la cola está vacía, lo pone a sonar desde 0. Si no, lo agrega al final de la cola; con la cola llena (30) se descarta. |
+| `addmany` | `videos`: arreglo de 1 a 31 ids de 11 caracteres `[A-Za-z0-9_-]` (solo ids, nunca URLs) | Aplica `add` a cada id, en orden: el primero puede pasar a sonar (mismo criterio que `add`) y el resto va al final de la cola mientras haya lugar (30). Lo que no entra se descarta en silencio; si no entra ninguno, se descarta todo el control. Cuenta como un solo control para el límite por segundo y genera un solo frame `music`. |
 | `remove` | `id`: entero, el `id` de un elemento de la cola | Lo quita de la cola. Un `id` desconocido se descarta. |
 | `skip`   | no lleva | El primero de la cola pasa a sonar desde 0. Con la cola vacía se descarta. |
 | `ended`  | `seq`: entero, el `seq` del video que terminó | Si coincide con el actual, avanza como `skip`; con la cola vacía, el video queda terminado y en pausa. Un `seq` viejo o repetido se descarta (así se deduplican los avisos de varios clientes). |
@@ -181,7 +182,8 @@ toca YouTube: solo retransmite el estado y cada página sigue su propio reproduc
 | `seek`   | `pos`: entero en milisegundos, de 0 a 86 400 000 | Salta a esa posición sin cambiar si suena o no (necesita un video cargado). |
 
 Cualquier otro control (`action` faltante o desconocida, campos con tipo incorrecto, `pos`
-fraccionario, negativo o fuera de rango, `video` inválido, o `play`/`pause`/`seek` sin video
+fraccionario, negativo o fuera de rango, `video` inválido, `videos` que no sea un arreglo de 1 a 31
+ids válidos (basta un elemento inválido para descartarlo entero), o `play`/`pause`/`seek` sin video
 cargado, `remove` con `id` desconocido, `skip` con la cola vacía o `ended` con `seq` que no
 coincide) se descarta sin respuesta y la conexión sigue abierta. Se aceptan hasta 4 controles por
 segundo por conexión; el resto se descarta. `ended` tiene su propio límite por conexión, aparte

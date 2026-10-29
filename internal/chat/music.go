@@ -11,13 +11,14 @@ const (
 	maxMusicPos   = 24 * 60 * 60 * 1000    // ms
 	maxMusicQueue = 30                     // queued tracks, not counting the current one (CHAT-30)
 
-	musicAdd    = "add"
-	musicRemove = "remove"
-	musicSkip   = "skip"
-	musicEnded  = "ended"
-	musicPlay   = "play"
-	musicPause  = "pause"
-	musicSeek   = "seek"
+	musicAdd     = "add"
+	musicAddMany = "addmany" // a whole list of tracks in one control (one rate-gate slot)
+	musicRemove  = "remove"
+	musicSkip    = "skip"
+	musicEnded   = "ended"
+	musicPlay    = "play"
+	musicPause   = "pause"
+	musicSeek    = "seek"
 )
 
 var videoID = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`) // Go's $ is end-of-text: no trailing \n
@@ -31,11 +32,12 @@ type queueItem struct {
 
 // musicCmd is a validated music control (CHAT-30).
 type musicCmd struct {
-	action string // one of the action constants
-	video  string // add only
-	pos    int64  // seek only, ms
-	id     int64  // remove only
-	seq    int64  // ended only
+	action string   // one of the action constants
+	video  string   // add only
+	videos []string // addmany only: 1..maxMusicQueue+1 valid ids
+	pos    int64    // seek only, ms
+	id     int64    // remove only
+	seq    int64    // ended only
 }
 
 // player is a room's shared playback state (CHAT-30). Owned by Room.Run: no locks.
@@ -74,21 +76,36 @@ func (p *player) advance(now time.Time) {
 	p.start(next, now)
 }
 
+// add makes video current when nothing is, or when the last track finished with an empty
+// queue; otherwise it queues it. It returns false, leaving the state untouched, when the
+// queue is full.
+func (p *player) add(video, by string, now time.Time) bool {
+	if p.video == "" || (p.finished && len(p.queue) == 0) {
+		p.start(queueItem{Video: video, By: by}, now)
+		return true
+	}
+	if len(p.queue) >= maxMusicQueue {
+		return false
+	}
+	p.nextID++
+	p.queue = append(p.queue, queueItem{p.nextID, video, by})
+	return true
+}
+
 // apply performs c on behalf of by and re-anchors the position at now. It returns false,
 // leaving the state untouched, when c is not applicable (CHAT-30).
 func (p *player) apply(c musicCmd, by string, now time.Time) bool {
 	switch c.action {
 	case musicAdd:
-		if p.video == "" || (p.finished && len(p.queue) == 0) {
-			p.start(queueItem{Video: c.video, By: by}, now)
-			return true
+		return p.add(c.video, by, now)
+	case musicAddMany:
+		added := false
+		for _, v := range c.videos {
+			// The first id may start playback; the rest queue until the cap, and the
+			// extras are dropped silently.
+			added = p.add(v, by, now) || added
 		}
-		if len(p.queue) >= maxMusicQueue {
-			return false
-		}
-		p.nextID++
-		p.queue = append(p.queue, queueItem{p.nextID, c.video, by})
-		return true
+		return added
 	case musicRemove:
 		i := slices.IndexFunc(p.queue, func(it queueItem) bool { return it.ID == c.id })
 		if i < 0 {
