@@ -176,3 +176,6 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 
 - JS unit tests for app.js notification rules (e.g. `node:test` with a stubbed DOM).
 - Serve embedded SVGs with `Content-Security-Policy: default-src 'none'; sandbox` (defence in depth).
+
+- Respuestas: botón de responder en pantallas táctiles (hoy solo hover/teclado).
+- Respuestas: contador de ids separado para DMs (hoy los huecos en ids de sala revelan que hubo DMs).

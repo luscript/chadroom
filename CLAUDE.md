@@ -68,4 +68,4 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - Sala con reproductor: `musicRoom` (main.go) y `MUSIC_ROOM` (app.js); un test falla si difieren.
 - Sin código inline en la página (CSP estricta).
 - La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`). La key de YouTube va en el header `X-Goog-Api-Key`, nunca en la URL ni en los logs.
-- Cambios con diseño van por SDD en `openspec/changes/`. En curso: `youtube-playlist-import`.
+- Cambios con diseño van por SDD en `openspec/changes/`. En curso: `message-replies`.
