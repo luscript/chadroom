@@ -73,6 +73,10 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Rate limiting for `/playlist` (and `/gifs`) to protect the shared API quota; belongs with
       `rate-limiting`.
 - [ ] `youtu.be/X?list=Y` share links import the playlist (today `?list=` is ignored there).
+- [ ] `/playlist`: short negative cache for `not_found` and singleflight per list id (cheap quota
+      protection before full rate limiting; verify-report youtube-playlist-import #1).
+- [ ] Playlist import UX: typing during an import clears "Importando playlist…", and success clears
+      text typed meanwhile; add a Go guard test that `PLAYLIST_TEXT` strings appear verbatim in app.js.
 
 ## `profile-picture` — done, archived 2026-10-23 (manual UI check pending)
 - [x] Profile picture next to messages and in the online list (allowlisted image URL at join,

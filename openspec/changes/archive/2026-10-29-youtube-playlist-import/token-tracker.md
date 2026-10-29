@@ -5,7 +5,7 @@
 > completion notification's `usage` block; the orchestrator total is parsed post-hoc from
 > the local session transcript JSONL (`[unavailable]` on failure).
 
-**Status**: partial (through verify)
+**Status**: complete
 **Generated**: 2026-10-29
 
 ## Per-agent / per-phase
@@ -24,9 +24,9 @@
 
 ## Orchestrator
 
-| Scope         | Model / Tier  | Tokens (in / out) | Notes                     |
-|---------------|---------------|-------------------|---------------------------|
-| whole feature | [unavailable] | [unavailable]     | Captured at sdd-archive   |
+| Scope         | Model / Tier           | Tokens (in / out) | Notes |
+|---------------|------------------------|-------------------|-------|
+| whole feature | claude-opus-5-5 / —    | 134 / 57,906      | Parsed from the session transcript JSONL (main thread, 56 messages). Window = whole session, so it also includes the initial bug diagnosis before the first artifact write (the artifact mtime was reset by a checkout). Cache: 177,491 created, 6,099,134 read |
 
 ## Aggregate
 
@@ -37,5 +37,5 @@
 | apply                  | 146,691                                                |
 | verify                 | 123,682                                                |
 | **Sub-agent total**    | 465,317                                      |
-| **Orchestrator total** | [unavailable]                                          |
-| **Grand total**        | 465,317 (sub-agents only; orchestrator [unavailable])  |
+| **Orchestrator total** | 58,040 (in/out; cache excluded)                        |
+| **Grand total**        | 523,357 (sub-agents + orchestrator in/out; cache excluded) |
