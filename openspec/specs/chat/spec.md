@@ -832,8 +832,8 @@ inbound text frame as follows:
 4. Otherwise (not JSON, not an object, missing or unknown `type`, or a `chat` object whose
    `text` is not a string) it is a **room message** whose text is the whole frame, unchanged.
 
-Fields other than `type`, `to` and `text` (and `action`, `video`, `pos`, `id` and `seq` in a
-music control) MUST be ignored (`text` is also ignored in a typing signal and a music control). Room messages are relayed per CHAT-01. The blank-text rule (CHAT-13) applies to the
+Fields other than `type`, `to` and `text` (and `action`, `video`, `videos`, `pos`, `id` and
+`seq` in a music control) MUST be ignored (`text` is also ignored in a typing signal and a music control). Room messages are relayed per CHAT-01. The blank-text rule (CHAT-13) applies to the
 resulting `text` of room messages and direct messages.
 
 #### Scenario: Plain text stays room chat
@@ -1298,7 +1298,7 @@ player, the server MUST keep the **music state**, owned by the room:
 | position   | milliseconds into the video; while `playing` it advances with server time |
 | `by`       | nickname shown as responsible for the current state (see below) |
 | `seq`      | integer that increases by 1 every time a track becomes current; 0 while none has |
-| `queue`    | ordered list of at most **30** items `{id, video, by}` waiting after the current track |
+| `queue`    | ordered list of at most **50** items `{id, video, by}` waiting after the current track |
 | `finished` | whether the current track ended with nothing queued after it |
 
 Each queue item gets an `id`: a positive integer assigned by the server, unique within the room
@@ -1310,9 +1310,10 @@ A track **becomes current** when its video is set as `video` with position 0, `p
 A **music control** (CHAT-21) is a JSON object `{"type":"music","action":A,…}` and is **valid**
 only when:
 
-| `action` | Other fields | Effect on the state |
-|----------|--------------|---------------------|
-| `add`    | `video`: a string matching `^[A-Za-z0-9_-]{11}$` | if no video is current, or `finished` is true and the queue is empty: the video becomes current. Otherwise it is appended to the queue (requires fewer than 30 queued items) |
+| `action`   | Other fields | Effect on the state |
+|------------|--------------|---------------------|
+| `add`      | `video`: a string matching `^[A-Za-z0-9_-]{11}$` | if no video is current, or `finished` is true and the queue is empty: the video becomes current. Otherwise it is appended to the queue (requires fewer than 50 queued items) |
+| `add_many` | `videos`: a JSON array of 1 to 50 elements, each a string matching `^[A-Za-z0-9_-]{11}$` | processed in order as one control: if no video is current, or `finished` is true and the queue is empty, the first element becomes current; the remaining elements are appended to the queue while it has fewer than 50 items, and the rest are dropped. Requires at least one element to become current or be queued |
 | `remove` | `id`: an integer ≥ 1 | the queue item with that `id` is removed (requires it to exist) |
 | `skip`   | — | the first queue item is removed and becomes current (requires a non-empty queue) |
 | `ended`  | `seq`: an integer ≥ 1 | requires `seq` equal to the state's `seq` and `finished` false. If the queue is non-empty, as `skip`. Otherwise `finished` = true and `playing` = false at the current position |
@@ -1321,17 +1322,23 @@ only when:
 | `seek`   | `pos`: an integer, 0 ≤ `pos` ≤ 86 400 000 | position = `pos`, `playing` unchanged (requires a current video) |
 
 `play` and `seek` on a `finished` track set `finished` to false (the track is replayed). For
-`play`, `pause` and `seek`, `by` becomes the sender's nickname. For `remove`, and for `add` that
-only appends, `by` is unchanged. Every accepted control produces a `music` frame.
+`play`, `pause` and `seek`, `by` becomes the sender's nickname. For `remove`, and for `add` or
+`add_many` that only appends, `by` is unchanged. When an `add_many` makes its first element
+current, `by` is the sender's nickname. Every queued item gets its own `id`, in order. Every
+accepted control produces a `music` frame; an accepted `add_many` produces exactly one, reflecting
+the whole batch.
 
 Any other control MUST be discarded without any reply. This includes an unknown or missing
 `action` (including the former `load`), wrong field types, an invalid `video`, `pos`, `id` or
 `seq` out of range or not an integer, an unmet requirement above, or an `ended` whose `seq` is
 not the current one. Several clients reporting the same track as ended therefore advance the
-queue only once.
+queue only once. Discarded controls also include an `add_many` whose `videos` is missing, not
+an array, empty, longer than 50, or contains any element that is not a string matching the video
+id pattern (the whole control is discarded; no element is applied).
 
 Per connection, the server MUST accept at most 4 `ended` controls per second and, separately,
-at most 4 other music controls per second. It MUST discard the excess without any reply.
+at most 4 other music controls per second (an `add_many` counts as one). It MUST discard the
+excess without any reply.
 
 After each accepted control the server MUST send every registered client of the room (including
 the sender) a `music` frame, a JSON object with exactly these fields:
@@ -1401,8 +1408,8 @@ frame is ever sent.
 
 #### Scenario: Queue cap
 
-- GIVEN 30 items are queued
-- WHEN `A` sends `add`
+- GIVEN 50 items are queued
+- WHEN `A` sends `add`, or `add_many` with any valid `videos`
 - THEN no client receives any frame
 
 #### Scenario: Pause and seek keep the position
@@ -1447,6 +1454,36 @@ frame is ever sent.
 - THEN `B` receives `playing` = false with `pos` about the position at the time `A` left, and
   the queued item
 
+#### Scenario: Bulk add on an idle player
+
+- GIVEN clients `A` and `B` are in `musica` and no video is current
+- WHEN `A` sends `{"type":"music","action":"add_many","videos":["dQw4w9WgXcQ","9bZkp7q19f0","kJQP7kiw5Fk"]}`
+- THEN `A` and `B` receive exactly one `music` frame with `video` = `dQw4w9WgXcQ`,
+  `playing` = true, `by` = `A`, `seq` = 1 and `queue` =
+  `[{"id":1,"video":"9bZkp7q19f0","by":"A"},{"id":2,"video":"kJQP7kiw5Fk","by":"A"}]`
+
+#### Scenario: Bulk add while playing fills free slots only
+
+- GIVEN a video is current and 48 items are queued
+- WHEN `B` sends `add_many` with 5 valid videos
+- THEN every client receives one `music` frame with the same current video and `seq`, and 50
+  queued items, the last two being the first two videos sent, added by `B`
+
+#### Scenario: Bulk add after the last track ended
+
+- GIVEN the current track has `finished` = true and the queue is empty, with `seq` = 2
+- WHEN `A` sends `add_many` with 2 valid videos
+- THEN every client receives the first video as current with `seq` = 3, `playing` = true, and
+  the second one queued
+
+#### Scenario: Invalid bulk add is discarded whole
+
+- GIVEN clients `A` and `B` in `musica`, no video current
+- WHEN `A` sends `add_many` with `videos` = `[]`, with 51 valid ids, with
+  `["dQw4w9WgXcQ","abc"]`, with `["dQw4w9WgXcQ",null]`, with `"dQw4w9WgXcQ"`, or without
+  `videos`
+- THEN no client receives any frame
+
 ### Requirement: CHAT-31 Chat page shared player
 
 The chat page MUST show the shared player controls only while the active pane belongs to
@@ -1463,10 +1500,35 @@ The page MUST accept links of the forms `https://www.youtube.com/watch?v=ID`,
 `https://music.youtube.com/watch?v=ID`, `https://youtu.be/ID`,
 `https://www.youtube.com/shorts/ID`, `https://youtube.com/shorts/ID` and
 `https://m.youtube.com/shorts/ID` (extra query parameters allowed), where `ID` matches
-`^[A-Za-z0-9_-]{11}$`, and MUST send only the id (`add`). Anything else MUST show an error and
-send nothing. When the last `music` frame shows 30 queued items, the page MUST show
-"La cola está llena" and send nothing. The skip control MUST be disabled while the queue is
-empty.
+`^[A-Za-z0-9_-]{11}$`, and MUST send only the id (`add`).
+
+The page MUST also accept **playlist links**: `https://H/playlist?list=LIST` and
+`https://H/watch?v=ID&list=LIST`, where `H` is `www.youtube.com`, `youtube.com`,
+`m.youtube.com` or `music.youtube.com`, `LIST` matches `^[A-Za-z0-9_-]{10,64}$` (extra query
+parameters allowed). For a playlist link the page MUST request `GET /playlist?list=LIST`
+(SRV-09) and send the returned ids with one `add_many`:
+
+- For a `watch?v=ID&list=LIST` link, `ID` goes first and is removed from the rest of the list.
+  If `LIST` starts with `RD` (an automatic mix), the page MUST NOT request the playlist, MUST
+  send `ID` only and show "Las mezclas automáticas de YouTube no se pueden importar. Puse solo
+  el video." If the request fails for any reason, the page MUST send `ID` only (as `add` or as a
+  one-element `add_many`) and show the matching error text below followed by " Puse solo el
+  video."
+- The page MUST send at most 50 ids and at most the free queue slots (50 minus the queued
+  items in the last `music` frame). When it has to drop ids it MUST show "Se agregaron N de M."
+  (N sent, M received, counting `ID` for a `watch?v=ID&list=LIST` link). When nothing fits it MUST show "La cola está llena" and send nothing.
+- While the request is pending the page MUST show "Importando playlist…", MUST disable the add
+  control, and MUST NOT start another import. If the user leaves `musica` before the answer,
+  the page MUST send nothing.
+- Errors (send nothing): when `/playlist` answers 404 without a JSON `error` (import disabled),
+  "Importar playlists no está disponible."; `not_found`, "No encontré esa playlist (¿es
+  privada?)."; an empty `videos`, "Esa playlist no tiene videos reproducibles."; anything else,
+  "No se pudo leer la playlist." The page MUST show only these fixed texts, never text from the
+  response, and MUST use only returned ids that match the video id pattern.
+
+Anything else MUST show an error and send nothing. When the last `music` frame shows 50 queued
+items, the page MUST show "La cola está llena" and send nothing. The skip control MUST be
+disabled while the queue is empty.
 
 The video MUST play in an embedded `https://www.youtube-nocookie.com/embed/ID` frame with
 YouTube's own controls disabled, controlled only through cross-document messages; the page MUST
@@ -1562,6 +1624,39 @@ message.
 - GIVEN a video is playing in `musica`
 - WHEN a user joins and stays in `general` without opening `musica`
 - THEN the page makes no request to any YouTube host
+
+#### Scenario: Paste a YouTube Music playlist
+
+- GIVEN two browsers with the `musica` pane open, nothing current, and the server has a
+  YouTube key
+- WHEN one pastes `https://music.youtube.com/playlist?list=PLlb3q7unEBfNPa0aR-cOQB33HDAwyDLpF`
+  and presses "Poner"
+- THEN both play the first playable video of the playlist and show up to 49 more in the queue,
+  added by the first user
+
+#### Scenario: Song inside a playlist
+
+- GIVEN the player and a server with a YouTube key
+- WHEN the user pastes `https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL…&index=3`
+- THEN `dQw4w9WgXcQ` is sent first, followed by the rest of the playlist without repeating it
+
+#### Scenario: Mix link adds only the song
+
+- GIVEN the player
+- WHEN the user pastes `https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ`
+- THEN the page sends only `dQw4w9WgXcQ`, shows the mix text, and does not request `/playlist`
+
+#### Scenario: Import disabled
+
+- GIVEN the server runs without a YouTube key
+- WHEN the user pastes a `/playlist?list=` link and presses "Poner"
+- THEN the page shows "Importar playlists no está disponible." and sends nothing
+
+#### Scenario: Partial import
+
+- GIVEN a video is current and 45 items are queued
+- WHEN the user imports a playlist that returns 20 videos
+- THEN the page sends `add_many` with the first 5 and shows "Se agregaron 5 de 20."
 
 ### Requirement: CHAT-32 Chat page notification sound
 
