@@ -25,7 +25,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	chatSrv := newChatServer(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	go chatSrv.Run(ctx)
-	ts := httptest.NewServer(newRouter(chatSrv, nil))
+	ts := httptest.NewServer(newRouter(chatSrv, nil, nil))
 	t.Cleanup(func() {
 		cancel()
 		ts.Close()
@@ -805,5 +805,13 @@ func TestIndexNotificationMarkup(t *testing.T) {
 				t.Errorf("%s contains an event handler attribute", name)
 			}
 		})
+	}
+}
+
+// SRV-09: the list id rule is written once in Go and once in the page, and they must agree.
+func TestPlaylistIDMirroredInJS(t *testing.T) {
+	want := "const YT_LIST_ID = /" + playlistID.String() + "/;"
+	if !strings.Contains(string(appJS), want) {
+		t.Errorf("app.js does not contain %q", want)
 	}
 }

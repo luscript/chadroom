@@ -1073,6 +1073,8 @@
   const YT_ORIGIN = 'https://www.youtube-nocookie.com';
   const YT_EMBED = 'https://www.youtube-nocookie.com/embed/';
   const YT_ID = /^[A-Za-z0-9_-]{11}$/;
+  const YT_LIST_ID = /^[A-Za-z0-9_-]{10,64}$/;
+  const YT_MIX_PREFIX = 'RD'; // auto-generated mixes: the API can't read them
   const YT_WATCH_HOSTS = new Set(['www.youtube.com', 'youtube.com', 'm.youtube.com', 'music.youtube.com']);
   const YT_SHORTS_HOSTS = new Set(['www.youtube.com', 'youtube.com', 'm.youtube.com']);
   const YT_SHORT_LINK_PATH = /^\/([A-Za-z0-9_-]{11})$/;
@@ -1089,7 +1091,17 @@
   const MUSIC_ASSERT_MS = 2000; // while the player has never reported a state: re-send the server's intent this often
   const MUSIC_STALE_MS = 1000; // after a load: ignore the widget's reports of the previous video this long
   const MUSIC_SEEK_FRAME_MS = 1000; // a frame this far from where we expected the track is a server seek
-  const MUSIC_QUEUE_MAX = 30; // mirrors maxMusicQueue in internal/chat/music.go
+  const MUSIC_QUEUE_MAX = 50; // mirrors maxMusicQueue in internal/chat/music.go
+  const MUSIC_ADD_MANY_MAX = 50; // mirrors maxMusicAddMany in internal/chat/music.go
+  const PLAYLIST_TEXT = {
+    loading: 'Importando playlist…',
+    disabled: 'Importar playlists no está disponible.',
+    notFound: 'No encontré esa playlist (¿es privada?).',
+    empty: 'Esa playlist no tiene videos reproducibles.',
+    failed: 'No se pudo leer la playlist.',
+    mix: 'Las mezclas automáticas de YouTube no se pueden importar.',
+    onlyVideo: ' Puse solo el video.',
+  };
   const MUSIC_END_GRACE_MS = 2000; // time-based end report: this long past the reported duration
   const MUSIC_PLATEAU_MS = 2000; // the player's clock stood still this long while the room plays: the track ended
   const MUSIC_PLATEAU_NEAR_END_MS = 3000; // with a known duration, a plateau only counts this close to the end
@@ -1124,6 +1136,8 @@
     pendingSeek: null, seekTimer: null, // a seek that arrived inside the send gap (the latest one wins)
     muted: false, // local only; persisted under MUSIC_MUTED_KEY, survives resetMusic
     title: '', // widget-confirmed title for music.srv.video; reset on track change
+    importing: false, // a /playlist fetch is in flight: Poner stays disabled
+    importSeq: 0, // token of the current import; leaving the room bumps it so a late answer sends nothing
   };
 
   const musicRoom = () => rooms.get(MUSIC_ROOM);
@@ -1134,21 +1148,33 @@
   const playerActive = () => !!music.frame && musicJoined();
   try { music.muted = localStorage.getItem(MUSIC_MUTED_KEY) === '1'; } catch { /* blocked: unmuted */ }
 
-  // The 11-character id for the link forms CHAT-31 allows, else null.
-  function parseYouTubeId(text) {
+  // {video, list} for the link forms CHAT-31 allows (video: 11-char id or null, list: playlist id or null), else null.
+  function parseYouTubeLink(text) {
     let url;
     try { url = new URL(String(text).trim()); } catch { return null; }
     if (url.protocol !== 'https:' || url.port !== '' || url.username !== '' || url.password !== '') return null;
     let id = null;
+    let list = null;
     let m;
+    if (YT_WATCH_HOSTS.has(url.hostname) && url.pathname === '/playlist') {
+      const l = url.searchParams.get('list');
+      return l !== null && YT_LIST_ID.test(l) ? { video: null, list: l } : null;
+    }
     if (YT_WATCH_HOSTS.has(url.hostname) && url.pathname === '/watch') {
       id = url.searchParams.get('v');
+      const l = url.searchParams.get('list');
+      if (l !== null && YT_LIST_ID.test(l)) list = l;
     } else if (url.hostname === 'youtu.be' && (m = YT_SHORT_LINK_PATH.exec(url.pathname))) {
       id = m[1];
     } else if (YT_SHORTS_HOSTS.has(url.hostname) && (m = YT_SHORTS_PATH.exec(url.pathname))) {
       id = m[1];
     }
-    return id !== null && YT_ID.test(id) ? id : null;
+    return id !== null && YT_ID.test(id) ? { video: id, list } : null;
+  }
+
+  // How many more videos one add_many may carry: the queue cap as far as this page knows it.
+  function freeSlots() {
+    return Math.min(MUSIC_ADD_MANY_MAX, MUSIC_QUEUE_MAX - (music.srv ? music.srv.queue.length : 0));
   }
 
   // Controls only: the page shows what the server answers, never what it asked for.
@@ -1389,7 +1415,7 @@
     const online = room.status === 'online';
     const s = music.srv;
     const ended = trackDone();
-    $('music-load').disabled = !online;
+    $('music-load').disabled = !online || music.importing;
     const toggle = $('music-toggle');
     toggle.disabled = !s || !online;
     const skip = $('music-skip');
@@ -1651,6 +1677,8 @@
 
   // The room's socket is gone for good (leave): back to the state before any frame.
   function resetMusic() {
+    music.importSeq++;
+    music.importing = false;
     clearInterval(music.listenTimer);
     music.listenTimer = null;
     if (music.frame) { music.frame.remove(); music.frame = null; }
@@ -1686,20 +1714,83 @@
   }
 
   // — strip handlers —
-  $('music-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const id = parseYouTubeId($('music-url').value);
-    if (id === null) {
-      setMusicError('Ese link no es de YouTube.');
+  // Reads the playlist through our own /playlist (the browser never talks to YouTube's API) and
+  // sends ONE add_many. `video` (the watch link's own video) goes first and survives any failure.
+  async function importPlaylist({ video, list }) {
+    const seq = ++music.importSeq;
+    music.importing = true;
+    setMusicError(PLAYLIST_TEXT.loading);
+    renderMusic();
+    let ids = null;
+    let fail = null;
+    try {
+      const res = await fetch('/playlist?list=' + encodeURIComponent(list));
+      const body = await res.json().catch(() => null);
+      if (seq !== music.importSeq) return;
+      if (res.ok && body && Array.isArray(body.videos)) {
+        ids = body.videos.filter((v) => typeof v === 'string' && YT_ID.test(v));
+      } else if (body && body.error === 'not_found') {
+        fail = PLAYLIST_TEXT.notFound;
+      } else if (res.status === 404) {
+        fail = PLAYLIST_TEXT.disabled; // no route: the server runs without YOUTUBE_API_KEY
+      } else {
+        fail = PLAYLIST_TEXT.failed;
+      }
+    } catch {
+      if (seq === music.importSeq) fail = PLAYLIST_TEXT.failed;
+    } finally {
+      if (seq === music.importSeq) {
+        music.importing = false;
+        renderMusic();
+      }
+    }
+    if (seq !== music.importSeq) return;
+    if (!fail && ids.length === 0 && !video) fail = PLAYLIST_TEXT.empty;
+    if (fail && !video) {
+      setMusicError(fail); // the link stays in the box
       return;
     }
-    if (music.srv && music.srv.queue.length >= MUSIC_QUEUE_MAX) {
+    const all = [...new Set([video, ...(ids || [])].filter(Boolean))];
+    const slots = freeSlots();
+    if (slots <= 0) {
       setMusicError('La cola está llena');
       return;
     }
-    if (sendMusic('add', { video: id })) {
+    const send = all.slice(0, slots);
+    if (sendMusic('add_many', { videos: send })) {
       $('music-url').value = '';
-      setMusicError('');
+      setMusicError(fail ? fail + PLAYLIST_TEXT.onlyVideo : send.length < all.length ? `Se agregaron ${send.length} de ${all.length}.` : '');
+    } else if ($('music-error').textContent === PLAYLIST_TEXT.loading) {
+      setMusicError(''); // sendMusic showed its own text, or we're offline; the link stays
+    }
+  }
+
+  $('music-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (music.importing) return;
+    const link = parseYouTubeLink($('music-url').value);
+    if (link === null) {
+      setMusicError('Ese link no es de YouTube.');
+      return;
+    }
+    if (freeSlots() <= 0) {
+      setMusicError('La cola está llena');
+      return;
+    }
+    if (!link.list) {
+      if (sendMusic('add', { video: link.video })) {
+        $('music-url').value = '';
+        setMusicError('');
+      }
+    } else if (link.list.startsWith(YT_MIX_PREFIX)) {
+      // a /playlist link with a mix id never gets here with a video: the server answers not_found
+      if (link.video === null) importPlaylist(link);
+      else if (sendMusic('add', { video: link.video })) {
+        $('music-url').value = '';
+        setMusicError(PLAYLIST_TEXT.mix + PLAYLIST_TEXT.onlyVideo);
+      }
+    } else {
+      importPlaylist(link);
     }
   });
   $('music-url').addEventListener('input', () => setMusicError(''));

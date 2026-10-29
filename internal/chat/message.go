@@ -172,6 +172,24 @@ func parseMusic(env map[string]json.RawMessage) (musicCmd, bool) {
 	case musicAdd:
 		video, ok := jsonString(env["video"])
 		return musicCmd{action: action, video: video}, ok && videoID.MatchString(video)
+	case musicAddMany:
+		raw := env["videos"]
+		if len(raw) == 0 || raw[0] != '[' {
+			return musicCmd{}, false
+		}
+		var elems []json.RawMessage
+		if json.Unmarshal(raw, &elems) != nil || len(elems) < 1 || len(elems) > maxMusicAddMany {
+			return musicCmd{}, false
+		}
+		videos := make([]string, 0, len(elems))
+		for _, e := range elems {
+			v, ok := jsonString(e)
+			if !ok || !videoID.MatchString(v) {
+				return musicCmd{}, false
+			}
+			videos = append(videos, v)
+		}
+		return musicCmd{action: action, videos: videos}, true
 	case musicRemove:
 		id, ok := jsonInt(env["id"])
 		return musicCmd{action: action, id: id}, ok && id >= 1

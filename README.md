@@ -64,6 +64,7 @@ entrar al chat.
 |-------------------|---------|-------------|
 | `ALLOWED_ORIGINS` | vacío   | Orígenes extra (separados por coma, exactos: `https://chat.example.com`) que pueden abrir el WebSocket además del propio servidor. `null` nunca se acepta. |
 | `GIPHY_API_KEY`   | vacío   | Clave de la API de Giphy. Si está, el selector de GIFs del chat busca en Giphy a través de `GET /gifs`; si no, `/gifs` responde `404` y la página solo ofrece pegar la URL de un GIF. La clave nunca llega al navegador ni a los logs. |
+| `YOUTUBE_API_KEY` | vacío   | Clave de la YouTube Data API v3. Si está, el campo de la música acepta links de playlist y los expande a través de `GET /playlist`; si no, `/playlist` responde `404` y la página avisa que importar no está disponible (los links de un solo video siguen funcionando). La clave nunca llega al navegador ni a los logs (viaja en el header `X-Goog-Api-Key`, nunca en la URL). Conviene restringirla a "YouTube Data API v3" en Google Cloud Console. |
 
 El servidor escucha en `:8080` y se apaga ordenadamente con `Ctrl+C` / `SIGTERM`, cerrando
 todas las conexiones.
@@ -77,6 +78,7 @@ todas las conexiones.
 | `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. |
 | `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). |
 | `GET /favicon.svg`, `GET /favicon-unread.svg` | Ícono de la pestaña y su variante con mensajes sin leer (embebidos). |
+| `GET /playlist?list=<id>` | Videos de una playlist de YouTube (solo con `YOUTUBE_API_KEY`). `200` `{"videos":["dQw4w9WgXcQ",…]}` (hasta 50 ids, solo la primera página, sin los privados, no procesados o no embebibles), `400` si `list` falta o es inválido, `404` `{"error":"not_found"}` si la playlist no existe o es privada (y `404` sin JSON si no hay clave), `502` `{"error":"unavailable"}` si YouTube falla o tarda más de 5 s. Resultados en caché 10 min. |
 | `GET /rooms` | Lista de salas: `{"rooms":["general","juegos","musica"]}` (`application/json`, `nosniff`, `Cache-Control: no-cache`). |
 | `GET /gifs?q=<texto>` | Búsqueda de GIFs en Giphy (solo con `GIPHY_API_KEY`). Sin `q` devuelve los trending. `200` `{"gifs":[{"url":"…","preview":"…"}]}` (hasta 24, solo URLs `https` de la lista permitida, sin query), `400` `{"error":"query_too_long"}` si `q` pasa de 50 caracteres, `404` si no hay clave, `502` `{"error":"unavailable"}` si Giphy falla o tarda más de 5 s. Resultados en caché 10 min. |
 | `GET /ws?nickname=<nombre>&room=<sala>&avatar=<url>` | Upgrade a WebSocket a una sala. `avatar` es opcional (foto de perfil, ver abajo). Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
@@ -102,7 +104,7 @@ Cada frame se interpreta así:
 | `{"type":"dm","to":"bob","text":"hola"}` | Mensaje privado a `bob` (ver abajo). |
 | `{"type":"typing"}` | "Escribiendo…" para toda la sala (ver abajo). |
 | `{"type":"typing","to":"bob"}` | "Escribiendo…" solo para `bob` (ver abajo). |
-| `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`, `remove`, `skip`, `ended`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
+| `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`, `add_many`, `remove`, `skip`, `ended`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
 | Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido (`typing` y `music` ya no cuentan), `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
 
 Los campos extra se ignoran; `from` nunca se toma del cliente. Un texto en blanco se descarta sin
@@ -167,18 +169,24 @@ No se guarda, no entra al `history` ni se escribe en los logs.
 **Música compartida:** solo la sala `musica` tiene un reproductor de YouTube compartido; en las
 demás salas un frame `music` se descarta sin respuesta. El servidor guarda qué video suena, si
 está en reproducción, la posición, quién hizo el último cambio (`by`) y una cola de videos
-pendientes (máximo 30, sin contar el que suena). Cualquiera puede agregar, quitar y saltar. Nunca
+pendientes (máximo 50, sin contar el que suena). Cualquiera puede agregar, quitar y saltar. Nunca
 toca YouTube: solo retransmite el estado y cada página sigue su propio reproductor.
 
 | `action` | Campos | Efecto |
 |----------|--------|--------|
-| `add`    | `video`: id de 11 caracteres `[A-Za-z0-9_-]` (solo el id, nunca una URL) | Sin video actual, o si el actual terminó y la cola está vacía, lo pone a sonar desde 0. Si no, lo agrega al final de la cola; con la cola llena (30) se descarta. |
+| `add`    | `video`: id de 11 caracteres `[A-Za-z0-9_-]` (solo el id, nunca una URL) | Sin video actual, o si el actual terminó y la cola está vacía, lo pone a sonar desde 0. Si no, lo agrega al final de la cola; con la cola llena (50) se descarta. |
+| `add_many` | `videos`: lista de 1 a 50 ids de 11 caracteres (sin URLs) | Como `add` para cada elemento, en orden y como un solo control: el primero puede pasar a sonar y el resto se agrega a la cola mientras tenga menos de 50; lo que no entra se descarta. Produce un único frame `music`. |
 | `remove` | `id`: entero, el `id` de un elemento de la cola | Lo quita de la cola. Un `id` desconocido se descarta. |
 | `skip`   | no lleva | El primero de la cola pasa a sonar desde 0. Con la cola vacía se descarta. |
 | `ended`  | `seq`: entero, el `seq` del video que terminó | Si coincide con el actual, avanza como `skip`; con la cola vacía, el video queda terminado y en pausa. Un `seq` viejo o repetido se descarta (así se deduplican los avisos de varios clientes). |
 | `play`   | no lleva | Reanuda desde la posición actual (necesita un video cargado). |
 | `pause`  | no lleva | Pausa en la posición actual (necesita un video cargado). |
 | `seek`   | `pos`: entero en milisegundos, de 0 a 86 400 000 | Salta a esa posición sin cambiar si suena o no (necesita un video cargado). |
+
+Links que acepta el campo de la página: `youtube.com/watch?v=…`, `youtu.be/…`, `youtube.com/shorts/…`
+y, con `YOUTUBE_API_KEY`, `youtube.com/playlist?list=…` (también `music.youtube.com`) o un
+`watch?v=…&list=…`, que importa la playlist con ese video primero (hasta lo que quede libre en la
+cola, máximo 50). Las mezclas automáticas (`list=RD…`) no se pueden importar: se agrega solo el video.
 
 Cualquier otro control (`action` faltante o desconocida, campos con tipo incorrecto, `pos`
 fraccionario, negativo o fuera de rango, `video` inválido, o `play`/`pause`/`seek` sin video

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -1680,9 +1681,21 @@ var (
 )
 
 func addCmd(video string) musicCmd { return musicCmd{action: musicAdd, video: video} }
-func seekCmd(pos int64) musicCmd   { return musicCmd{action: musicSeek, pos: pos} }
-func removeCmd(id int64) musicCmd  { return musicCmd{action: musicRemove, id: id} }
-func endedCmd(seq int64) musicCmd  { return musicCmd{action: musicEnded, seq: seq} }
+func addManyCmd(videos ...string) musicCmd {
+	return musicCmd{action: musicAddMany, videos: videos}
+}
+
+// idList returns n distinct valid video ids.
+func idList(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("v%010d", i)
+	}
+	return ids
+}
+func seekCmd(pos int64) musicCmd  { return musicCmd{action: musicSeek, pos: pos} }
+func removeCmd(id int64) musicCmd { return musicCmd{action: musicRemove, id: id} }
+func endedCmd(seq int64) musicCmd { return musicCmd{action: musicEnded, seq: seq} }
 
 // queueIDs lists the ids of the queued tracks, never nil.
 func queueIDs(q []queueItem) []int64 {
@@ -1812,6 +1825,102 @@ func TestPlayerApply(t *testing.T) {
 		}
 		if last := p.queue[len(p.queue)-1]; last.ID != maxMusicQueue+1 {
 			t.Fatalf("last id = %d, want %d", last.ID, maxMusicQueue+1)
+		}
+	})
+
+	t.Run("add_many idle", func(t *testing.T) {
+		p := &player{}
+		if !p.apply(addManyCmd(v1, v2, v3), "A", t0) {
+			t.Fatal("add_many rejected")
+		}
+		want := state{v1, true, 0, "A", 1, []int64{1, 2}, false}
+		if st := snap(p, t0); !reflect.DeepEqual(st, want) {
+			t.Fatalf("state = %+v, want %+v", st, want)
+		}
+		if p.queue[0] != (queueItem{1, v2, "A"}) || p.queue[1] != (queueItem{2, v3, "A"}) {
+			t.Fatalf("queue = %+v", p.queue)
+		}
+	})
+
+	t.Run("add_many while playing", func(t *testing.T) {
+		p := &player{}
+		p.apply(addCmd(v1), "A", t0)
+		p.apply(addCmd(v2), "A", t0) // nextID = 1
+		if !p.apply(addManyCmd(v3, v3), "B", at(1000)) {
+			t.Fatal("add_many rejected")
+		}
+		want := state{v1, true, 1000, "A", 1, []int64{1, 2, 3}, false}
+		if st := snap(p, at(1000)); !reflect.DeepEqual(st, want) {
+			t.Fatalf("state = %+v, want %+v", st, want)
+		}
+		if p.queue[1].By != "B" || p.queue[2].Video != v3 {
+			t.Fatalf("queue = %+v", p.queue)
+		}
+	})
+
+	t.Run("add_many while paused keeps the state", func(t *testing.T) {
+		p := &player{}
+		p.apply(addCmd(v1), "A", t0)
+		p.apply(pauseCmd, "A", at(500))
+		p.apply(addManyCmd(v2), "B", at(900))
+		want := state{v1, false, 500, "A", 1, []int64{1}, false}
+		if st := snap(p, at(900)); !reflect.DeepEqual(st, want) {
+			t.Fatalf("state = %+v, want %+v", st, want)
+		}
+	})
+
+	t.Run("add_many finished with an empty queue", func(t *testing.T) {
+		p := &player{}
+		p.apply(addCmd(v1), "A", t0)
+		p.apply(endedCmd(1), "A", at(1000)) // finished
+		if !p.apply(addManyCmd(v2, v3), "B", at(2000)) {
+			t.Fatal("add_many rejected")
+		}
+		want := state{v2, true, 0, "B", 2, []int64{1}, false}
+		if st := snap(p, at(2000)); !reflect.DeepEqual(st, want) {
+			t.Fatalf("state = %+v, want %+v", st, want)
+		}
+	})
+
+	t.Run("add_many partial fit", func(t *testing.T) {
+		p := &player{}
+		p.apply(addCmd(v1), "A", t0)
+		p.apply(addManyCmd(idList(maxMusicQueue-2)...), "A", t0)
+		if !p.apply(addManyCmd(idList(4)...), "B", t0) {
+			t.Fatal("add_many rejected")
+		}
+		if len(p.queue) != maxMusicQueue || p.nextID != maxMusicQueue {
+			t.Fatalf("queue = %d, nextID = %d, want %d", len(p.queue), p.nextID, maxMusicQueue)
+		}
+		if n := len(p.queue); p.queue[n-1].Video != idList(4)[1] || p.queue[n-1].By != "B" {
+			t.Fatalf("last = %+v, want the second of the batch (the rest dropped)", p.queue[n-1])
+		}
+	})
+
+	t.Run("add_many full", func(t *testing.T) {
+		p := &player{}
+		p.apply(addCmd(v1), "A", t0)
+		p.apply(addManyCmd(idList(maxMusicAddMany)...), "A", t0)
+		if len(p.queue) != maxMusicQueue {
+			t.Fatalf("setup: queue = %d", len(p.queue))
+		}
+		before := *p
+		before.queue = slices.Clone(p.queue)
+		if p.apply(addManyCmd(v2, v3), "B", at(1000)) {
+			t.Fatal("add_many on a full queue was accepted")
+		}
+		if !reflect.DeepEqual(*p, before) {
+			t.Fatalf("a rejected add_many changed the state: %+v", *p)
+		}
+	})
+
+	t.Run("add_many idle with the maximum", func(t *testing.T) {
+		p := &player{}
+		if !p.apply(addManyCmd(idList(maxMusicAddMany)...), "A", t0) {
+			t.Fatal("add_many rejected")
+		}
+		if p.video != idList(1)[0] || p.seq != 1 || len(p.queue) != maxMusicAddMany-1 {
+			t.Fatalf("video %q seq %d queue %d", p.video, p.seq, len(p.queue))
 		}
 	})
 
@@ -2056,7 +2165,7 @@ func TestMusicRemoveById(t *testing.T) {
 	}
 }
 
-// CHAT-30: with 30 tracks queued another add is discarded without any reply.
+// CHAT-30: with a full queue (maxMusicQueue tracks) another add is discarded without any reply.
 func TestMusicQueueCap(t *testing.T) {
 	cr, _ := startMusicRoom(t)
 	a := newTestClient("A", 64)
@@ -2073,6 +2182,50 @@ func TestMusicQueueCap(t *testing.T) {
 	broadcast(t, cr, a, "after")
 	expect(t, a, typeChat, "A", "after")
 	expectEmpty(t, a)
+}
+
+// CHAT-30: one add_many is one frame for everyone, with the first track current and the rest queued.
+func TestMusicAddManyBroadcast(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a, b := newTestClient("A", 64), newTestClient("B", 64)
+	joinAll(t, cr, a, b)
+
+	musicCtl(t, cr, a, addManyCmd(v1, v2, v3))
+	expectMusicAll(t, []*Client{a, b}, v1, true, "A", 1, []queueItem{{1, v2, "A"}, {2, v3, "A"}})
+	expectEmpty(t, a)
+	expectEmpty(t, b)
+}
+
+// CHAT-30: an add_many with a full queue is discarded without any reply.
+func TestMusicAddManyFull(t *testing.T) {
+	cr, _ := startMusicRoom(t)
+	a := newTestClient("A", 64)
+	joinAll(t, cr, a)
+
+	musicCtl(t, cr, a, addManyCmd(idList(1+maxMusicQueue)...))
+	if f := expectMusic(t, a, idList(1)[0], true, "A"); len(f.Queue) != maxMusicQueue {
+		t.Fatalf("queue = %d, want %d", len(f.Queue), maxMusicQueue)
+	}
+	musicCtl(t, cr, a, addManyCmd(v2, v3))
+	broadcast(t, cr, a, "after")
+	expect(t, a, typeChat, "A", "after")
+	expectEmpty(t, a)
+}
+
+// The page's limits are copies of the server's: they must match (CHAT-30).
+func TestMusicLimitsMirroredInJS(t *testing.T) {
+	js, err := os.ReadFile("../../cmd/chatroom/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("const MUSIC_QUEUE_MAX = %d;", maxMusicQueue),
+		fmt.Sprintf("const MUSIC_ADD_MANY_MAX = %d;", maxMusicAddMany),
+	} {
+		if !bytes.Contains(js, []byte(want)) {
+			t.Errorf("app.js does not contain %q", want)
+		}
+	}
 }
 
 // CHAT-30: play, pause, seek, skip, ended and remove with nothing current are discarded without any reply.

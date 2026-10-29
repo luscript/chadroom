@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -751,6 +752,12 @@ func readDMError(t *testing.T, conn *websocket.Conn) dmErrorFrame {
 }
 
 // CHAT-21, CHAT-13: classification of inbound frames.
+// manyFrame builds an add_many frame for ids.
+func manyFrame(ids []string) string {
+	b, _ := json.Marshal(ids)
+	return `{"type":"music","action":"add_many","videos":` + string(b) + `}`
+}
+
 func TestParseInbound(t *testing.T) {
 	long := strings.Repeat("ñ", 40)
 	tests := []struct {
@@ -852,6 +859,22 @@ func TestParseInbound(t *testing.T) {
 		{"music ended seq string", `{"type":"music","action":"ended","seq":"1"}`, inbound{}, true},
 		{"music ended seq fraction", `{"type":"music","action":"ended","seq":1.5}`, inbound{}, true},
 		{"music ended without seq", `{"type":"music","action":"ended"}`, inbound{}, true},
+		{"music add_many one", `{"type":"music","action":"add_many","videos":["dQw4w9WgXcQ"]}`, inbound{kind: inboundMusic, music: musicCmd{action: musicAddMany, videos: []string{v1}}}, false},
+		{"music add_many 50", manyFrame(idList(50)), inbound{kind: inboundMusic, music: musicCmd{action: musicAddMany, videos: idList(50)}}, false},
+		{"music add_many repeated ids", manyFrame([]string{v1, v1}), inbound{kind: inboundMusic, music: musicCmd{action: musicAddMany, videos: []string{v1, v1}}}, false},
+		{"music add_many extra keys ignored", `{"type":"music","action":"add_many","videos":["dQw4w9WgXcQ"],"video":"x","text":"hola","by":"C"}`, inbound{kind: inboundMusic, music: musicCmd{action: musicAddMany, videos: []string{v1}}}, false},
+		{"music add_many without videos", `{"type":"music","action":"add_many"}`, inbound{}, true},
+		{"music add_many videos null", `{"type":"music","action":"add_many","videos":null}`, inbound{}, true},
+		{"music add_many videos empty", `{"type":"music","action":"add_many","videos":[]}`, inbound{}, true},
+		{"music add_many 51", manyFrame(idList(51)), inbound{}, true},
+		{"music add_many videos string", `{"type":"music","action":"add_many","videos":"dQw4w9WgXcQ"}`, inbound{}, true},
+		{"music add_many videos object", `{"type":"music","action":"add_many","videos":{}}`, inbound{}, true},
+		{"music add_many element null", `{"type":"music","action":"add_many","videos":[null]}`, inbound{}, true},
+		{"music add_many element number", `{"type":"music","action":"add_many","videos":[123]}`, inbound{}, true},
+		{"music add_many element array", `{"type":"music","action":"add_many","videos":[["dQw4w9WgXcQ"]]}`, inbound{}, true},
+		{"music add_many one bad id among good", `{"type":"music","action":"add_many","videos":["dQw4w9WgXcQ","abc","aaaaaaaaaaa"]}`, inbound{}, true},
+		{"music add_many id trailing newline", `{"type":"music","action":"add_many","videos":["dQw4w9WgXcQ\n"]}`, inbound{}, true},
+		{"music add_many url instead of id", `{"type":"music","action":"add_many","videos":["https://youtu.be/dQw4w9WgXcQ"]}`, inbound{}, true},
 		{"music key case sensitive", `{"TYPE":"music","action":"play"}`, inbound{text: `{"TYPE":"music","action":"play"}`}, false},
 		{"music value case sensitive", `{"type":"MUSIC","action":"play"}`, inbound{text: `{"type":"MUSIC","action":"play"}`}, false},
 		{"empty frame", ``, inbound{}, true},
@@ -863,7 +886,7 @@ func TestParseInbound(t *testing.T) {
 			if ok == tt.discard {
 				t.Fatalf("ok = %v, want %v", ok, !tt.discard)
 			}
-			if !tt.discard && got != tt.want {
+			if !tt.discard && !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
 			}
 		})
@@ -1148,6 +1171,26 @@ func TestMusicOverWebSocket(t *testing.T) {
 	send(t, c, "hola")
 	for _, conn := range []*websocket.Conn{c, d} {
 		if m := nextChat(t, conn, ""); m.Text != "hola" { // a music frame would fail decode first
+			t.Fatalf("chat = %+v, want hola", m)
+		}
+	}
+}
+
+// CHAT-21, CHAT-30: an add_many is one control: one frame, and a second one right after is throttled.
+func TestMusicAddManyOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewMusicRoom("musica"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, manyFrame([]string{v1, "aaaaaaaaaaa", "bbbbbbbbbbb"}))
+	send(t, a, manyFrame([]string{"ccccccccccc", "ddddddddddd"})) // within 260 ms: no token left
+	send(t, a, "hola")
+	for _, conn := range []*websocket.Conn{a, b} {
+		f := readMusic(t, conn)
+		if f.Video != v1 || !f.Playing || f.By != "A" || len(f.Queue) != 2 {
+			t.Fatalf("music = %+v, want %s playing by A with 2 queued", f, v1)
+		}
+		if m := nextChat(t, conn, ""); m.Text != "hola" { // a second music frame would fail decode first
 			t.Fatalf("chat = %+v, want hola", m)
 		}
 	}

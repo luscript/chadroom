@@ -142,8 +142,9 @@ func serveRooms(c *gin.Context) {
 }
 
 // newRouter registers the HTML page, its static assets, the room list and the WebSocket endpoint.
-// /gifs is registered only when gifs is non-nil, so without a key it is a plain 404.
-func newRouter(chatSrv *chat.Server, gifs *gifSearch) *gin.Engine {
+// /gifs and /playlist are registered only when gifs / playlists are non-nil, so without their key
+// they are a plain 404.
+func newRouter(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport) *gin.Engine {
 	r := gin.Default()
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("set trusted proxies: %v", err)
@@ -157,6 +158,9 @@ func newRouter(chatSrv *chat.Server, gifs *gifSearch) *gin.Engine {
 	r.GET("/ws", chatSrv.HandleWebSocket)
 	if gifs != nil {
 		r.GET("/gifs", gifs.handle)
+	}
+	if playlists != nil {
+		r.GET("/playlist", playlists.handle)
 	}
 	return r
 }
@@ -183,6 +187,7 @@ func parseAllowedOrigins(s string) []string {
 type config struct {
 	allowedOrigins string // ALLOWED_ORIGINS, comma-separated
 	giphyKey       string // GIPHY_API_KEY; "" disables /gifs
+	youtubeKey     string // YOUTUBE_API_KEY; "" disables /playlist
 }
 
 func main() {
@@ -190,6 +195,7 @@ func main() {
 	code := serve(ctx, addr, config{
 		allowedOrigins: os.Getenv("ALLOWED_ORIGINS"),
 		giphyKey:       strings.TrimSpace(os.Getenv("GIPHY_API_KEY")),
+		youtubeKey:     strings.TrimSpace(os.Getenv("YOUTUBE_API_KEY")),
 	})
 	stop() // os.Exit skips defers.
 	os.Exit(code)
@@ -216,6 +222,12 @@ func run(ctx context.Context, ln net.Listener, cfg config) int {
 	} else {
 		log.Println("GIPHY_API_KEY not set: GIF search disabled")
 	}
+	var playlists *playlistImport
+	if cfg.youtubeKey != "" {
+		playlists = newPlaylistImport(youtubeAPI, cfg.youtubeKey)
+	} else {
+		log.Println("YOUTUBE_API_KEY not set: playlist import disabled")
+	}
 	roomsDone := make(chan struct{})
 	go func() {
 		chatSrv.Run(ctx)
@@ -223,7 +235,7 @@ func run(ctx context.Context, ln net.Listener, cfg config) int {
 	}()
 
 	srv := &http.Server{
-		Handler:           newRouter(chatSrv, gifs),
+		Handler:           newRouter(chatSrv, gifs, playlists),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    8 << 10,

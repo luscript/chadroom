@@ -39,6 +39,7 @@ Chat en tiempo real en Go (gin + gorilla/websocket) con salas fijas (`general`, 
 ```
 cmd/chatroom/        main: router gin, http.Server, señales, CSP y lista de hosts de imágenes
   gifs.go            GET /gifs: proxy a Giphy (trending/búsqueda), caché TTL, validación de URLs
+  playlist.go        GET /playlist: proxy a YouTube Data API (expande playlists), caché TTL
   index.html, app.js, app.css   frontend (embebido con go:embed)
   favicon.svg, favicon-unread.svg   favicons (normal / con no leídos), embebidos
   main_test.go       tests del router, CSP y coherencia de hosts de imágenes (Go vs app.js)
@@ -55,7 +56,7 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 
 ## Comandos
 
-- Correr: `go run ./cmd/chatroom` (puerto `:8080`; `ALLOWED_ORIGINS` y `GIPHY_API_KEY` opcionales).
+- Correr: `go run ./cmd/chatroom` (puerto `:8080`; `ALLOWED_ORIGINS`, `GIPHY_API_KEY` y `YOUTUBE_API_KEY` opcionales).
   Go no lee `.env`: cargarlo con `set -a; . ./.env; set +a` antes de correr.
 - Tests: `go test -race ./...`
 - Formato: `gofmt` (con snap, usar `/snap/go/current/bin/go` y `gofmt`; el wrapper traga el output)
@@ -66,5 +67,5 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - Para sumar un host de imágenes: `imageHosts` (`main.go`) **y** `IMAGE_HOSTS` (`app.js`); un test falla si difieren.
 - Sala con reproductor: `musicRoom` (main.go) y `MUSIC_ROOM` (app.js); un test falla si difieren.
 - Sin código inline en la página (CSP estricta).
-- La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`).
-- Cambios con diseño van por SDD en `openspec/changes/`. Ninguno en curso.
+- La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`). La key de YouTube va en el header `X-Goog-Api-Key`, nunca en la URL ni en los logs.
+- Cambios con diseño van por SDD en `openspec/changes/`. En curso: `youtube-playlist-import`.

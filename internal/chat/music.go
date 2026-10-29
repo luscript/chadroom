@@ -7,17 +7,19 @@ import (
 )
 
 const (
-	musicInterval = 260 * time.Millisecond // 250 ms would let 5 controls into a closed 1 s window; 260 ms caps it at 4 (CHAT-30); also the ended gate's interval
-	maxMusicPos   = 24 * 60 * 60 * 1000    // ms
-	maxMusicQueue = 30                     // queued tracks, not counting the current one (CHAT-30)
+	musicInterval   = 260 * time.Millisecond // 250 ms would let 5 controls into a closed 1 s window; 260 ms caps it at 4 (CHAT-30); also the ended gate's interval
+	maxMusicPos     = 24 * 60 * 60 * 1000    // ms
+	maxMusicQueue   = 50                     // queued tracks, not counting the current one (CHAT-30); mirrored by MUSIC_QUEUE_MAX
+	maxMusicAddMany = 50                     // ids per add_many (CHAT-30); mirrored by MUSIC_ADD_MANY_MAX
 
-	musicAdd    = "add"
-	musicRemove = "remove"
-	musicSkip   = "skip"
-	musicEnded  = "ended"
-	musicPlay   = "play"
-	musicPause  = "pause"
-	musicSeek   = "seek"
+	musicAdd     = "add"
+	musicAddMany = "add_many"
+	musicRemove  = "remove"
+	musicSkip    = "skip"
+	musicEnded   = "ended"
+	musicPlay    = "play"
+	musicPause   = "pause"
+	musicSeek    = "seek"
 )
 
 var videoID = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`) // Go's $ is end-of-text: no trailing \n
@@ -31,11 +33,12 @@ type queueItem struct {
 
 // musicCmd is a validated music control (CHAT-30).
 type musicCmd struct {
-	action string // one of the action constants
-	video  string // add only
-	pos    int64  // seek only, ms
-	id     int64  // remove only
-	seq    int64  // ended only
+	action string   // one of the action constants
+	video  string   // add only
+	videos []string // add_many only: 1..maxMusicAddMany valid ids, repeats allowed (as with add)
+	pos    int64    // seek only, ms
+	id     int64    // remove only
+	seq    int64    // ended only
 }
 
 // player is a room's shared playback state (CHAT-30). Owned by Room.Run: no locks.
@@ -88,6 +91,22 @@ func (p *player) apply(c musicCmd, by string, now time.Time) bool {
 		}
 		p.nextID++
 		p.queue = append(p.queue, queueItem{p.nextID, c.video, by})
+		return true
+	case musicAddMany:
+		vids := c.videos
+		idle := p.video == "" || (p.finished && len(p.queue) == 0) // same condition as add
+		free := maxMusicQueue - len(p.queue)
+		if !idle && free <= 0 {
+			return false // nothing fits: no frame
+		}
+		if idle {
+			p.start(queueItem{Video: vids[0], By: by}, now) // seq++ once, by = sender, finished cleared
+			vids = vids[1:]
+		}
+		for _, v := range vids[:min(len(vids), free)] {
+			p.nextID++
+			p.queue = append(p.queue, queueItem{p.nextID, v, by})
+		}
 		return true
 	case musicRemove:
 		i := slices.IndexFunc(p.queue, func(it queueItem) bool { return it.ID == c.id })
