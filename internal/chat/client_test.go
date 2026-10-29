@@ -95,7 +95,7 @@ func dialRaw(t *testing.T, srv *httptest.Server, nick string) *websocket.Conn {
 
 // dial connects and reads the welcome, users and history frames, so the client
 // is known to be registered with the room when dial returns and every later
-// frame is a 4-field envelope. It returns the assigned nickname.
+// frame is a decode-checked envelope. It returns the assigned nickname.
 func dial(t *testing.T, srv *httptest.Server, nick string) (*websocket.Conn, string) {
 	t.Helper()
 	conn := dialRaw(t, srv, nick)
@@ -119,7 +119,7 @@ func readRaw(t *testing.T, conn *websocket.Conn) []byte {
 	return msg
 }
 
-// readMsg reads and decodes one 4-field frame.
+// readMsg reads and decodes one envelope frame.
 func readMsg(t *testing.T, conn *websocket.Conn) message {
 	t.Helper()
 	return decode(t, readRaw(t, conn))
@@ -751,13 +751,24 @@ func readDMError(t *testing.T, conn *websocket.Conn) dmErrorFrame {
 	return decodeDMError(t, nextNonJoin(t, conn))
 }
 
-// CHAT-21, CHAT-13: classification of inbound frames.
 // manyFrame builds an add_many frame for ids.
 func manyFrame(ids []string) string {
 	b, _ := json.Marshal(ids)
 	return `{"type":"music","action":"add_many","videos":` + string(b) + `}`
 }
 
+// CHAT-35: an id or reply inside an inbound frame is never read; the server assigns both.
+func TestInboundIDAndReplyIgnored(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	send(t, a, `{"type":"chat","text":"hi","id":99,"reply":{"id":1,"from":"X","text":"forged"}}`)
+	m := nextChat(t, a, "")
+	if m.Text != "hi" || m.ID != 1 || m.Reply != nil {
+		t.Fatalf("chat = %+v (%+v), want server id 1 and no reply", m, m.Reply)
+	}
+}
+
+// CHAT-21, CHAT-13: classification of inbound frames.
 func TestParseInbound(t *testing.T) {
 	long := strings.Repeat("ñ", 40)
 	tests := []struct {
@@ -780,6 +791,19 @@ func TestParseInbound(t *testing.T) {
 		{"null", `null`, inbound{text: `null`}, false},
 		{"malformed", `{"type":"dm"`, inbound{text: `{"type":"dm"`}, false},
 		{"type is case sensitive", `{"TYPE":"dm","to":"B","text":"x"}`, inbound{text: `{"TYPE":"dm","to":"B","text":"x"}`}, false},
+		{"chat reply_to", `{"type":"chat","text":"hi","reply_to":3}`, inbound{text: "hi", replyTo: 3}, false},
+		{"chat reply_to string", `{"type":"chat","text":"hi","reply_to":"3"}`, inbound{text: "hi"}, false},
+		{"chat reply_to zero", `{"type":"chat","text":"hi","reply_to":0}`, inbound{text: "hi"}, false},
+		{"chat reply_to negative", `{"type":"chat","text":"hi","reply_to":-1}`, inbound{text: "hi"}, false},
+		{"chat reply_to fraction", `{"type":"chat","text":"hi","reply_to":1.5}`, inbound{text: "hi"}, false},
+		{"chat reply_to exponent", `{"type":"chat","text":"hi","reply_to":1e2}`, inbound{text: "hi"}, false},
+		{"chat reply_to null", `{"type":"chat","text":"hi","reply_to":null}`, inbound{text: "hi"}, false},
+		{"chat reply_to overflow", `{"type":"chat","text":"hi","reply_to":99999999999999999999}`, inbound{text: "hi"}, false},
+		{"chat reply_to with non-string text", `{"type":"chat","text":5,"reply_to":3}`, inbound{text: `{"type":"chat","text":5,"reply_to":3}`}, false},
+		{"dm reply_to", `{"type":"dm","to":"B","text":"x","reply_to":7}`, inbound{kind: inboundDM, to: "B", text: "x", replyTo: 7}, false},
+		{"dm bad reply_to still a dm", `{"type":"dm","to":"B","text":"x","reply_to":"7"}`, inbound{kind: inboundDM, to: "B", text: "x"}, false},
+		{"dm bad to with reply_to", `{"type":"dm","to":7,"text":"x","reply_to":7}`, inbound{kind: inboundBadDM}, false},
+		{"typing reply_to ignored", `{"type":"typing","reply_to":3}`, inbound{kind: inboundTyping}, false},
 		{"dm", `{"type":"dm","to":"B","text":"x"}`, inbound{kind: inboundDM, to: "B", text: "x"}, false},
 		{"dm to is cleaned", "{\"type\":\"dm\",\"to\":\"  bob‮ \",\"text\":\"x\"}", inbound{kind: inboundDM, to: "bob", text: "x"}, false},
 		{"dm to truncated", `{"type":"dm","to":"` + long + `","text":"x"}`, inbound{kind: inboundDM, to: strings.Repeat("ñ", 32), text: "x"}, false},

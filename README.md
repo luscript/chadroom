@@ -101,7 +101,9 @@ Cada frame se interpreta así:
 | Frame | Qué es |
 |-------|--------|
 | `{"type":"chat","text":"hola"}` | Mensaje a la sala con ese `text`. |
+| `{"type":"chat","text":"dale","reply_to":3}` | Respuesta al mensaje de sala con `id` 3 (ver Respuestas). |
 | `{"type":"dm","to":"bob","text":"hola"}` | Mensaje privado a `bob` (ver abajo). |
+| `{"type":"dm","to":"bob","text":"dale","reply_to":7}` | Respuesta a un mensaje privado con `id` 7 (ver Respuestas). |
 | `{"type":"typing"}` | "Escribiendo…" para toda la sala (ver abajo). |
 | `{"type":"typing","to":"bob"}` | "Escribiendo…" solo para `bob` (ver abajo). |
 | `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`, `add_many`, `remove`, `skip`, `ended`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
@@ -113,7 +115,7 @@ respuesta, también en un `dm`.
 **Salida (servidor → clientes):** un sobre JSON por frame:
 
 ```json
-{"type":"chat","from":"bob (2)","text":"hola","ts":1792684800123}
+{"type":"chat","from":"bob (2)","text":"hola","ts":1792684800123,"id":1}
 ```
 
 | `type`    | Cuándo | `text` |
@@ -137,13 +139,29 @@ sobres `welcome`, `join` y `chat` (y sus entradas en `history`) llevan `"avatar"
 cuando quien los origina tiene foto; sin foto el frame no cambia. `leave`, `dm`, `dm_error` y
 `typing` nunca lo llevan.
 
+**Respuestas:** el servidor numera con `id` cada `chat` y cada `dm`, con una sola secuencia por
+sala que empieza en 1 (un frame descartado no gasta número). `welcome`, `join` y `leave` no lo
+llevan. Para responder, el cliente suma `reply_to` con el `id` del mensaje; el `id` y el `reply`
+que vengan en un frame de entrada se ignoran. En un `chat`, el servidor busca el original entre
+los últimos 200 mensajes de la sala y, si lo encuentra, agrega `reply` con `id`, `from` y `text`
+(el texto cortado a 100 caracteres, sin espacios al final). Sin `reply_to` válido (no entero, menor
+que 1, `null`, string) o si el original no se encuentra (no existe, ya salió de los 200 o es un
+`dm`), el mensaje se reenvía igual, sin `reply` y sin error. En un `dm`, `reply_to` se reenvía tal
+cual en las dos copias: el servidor no guarda ni busca mensajes privados. Un `reply_to` mal formado
+nunca invalida el mensaje.
+
+```json
+{"type":"chat","from":"bob","text":"dale","ts":1792684800123,"id":4,"reply":{"id":3,"from":"Alice","text":"¿pizza?"}}
+{"type":"dm","from":"Alice","to":"bob","text":"dale","ts":1792684800123,"id":5,"reply_to":2}
+```
+
 **Mensajes privados:** un `dm` válido llega solo al destinatario y se devuelve como eco al
 remitente (mismo frame, mismo `ts`); nadie más de la sala lo recibe. El destinatario se busca por
 el nickname **asignado** en la sala, sin distinguir mayúsculas (`" bob "` encuentra a `Bob`;
 `Ana (2)` es otro usuario que `Ana`).
 
 ```json
-{"type":"dm","from":"Alice","to":"bob","text":"hola","ts":1792684800123}
+{"type":"dm","from":"Alice","to":"bob","text":"hola","ts":1792684800123,"id":2}
 {"type":"dm_error","to":"Zoe","reason":"offline","ts":1792684800123}
 ```
 
@@ -217,13 +235,13 @@ Además hay dos frames privados que solo recibe quien se conecta y que no llevan
 
 ```json
 {"type":"users","users":["Alice","bob"],"ts":1792684800123}
-{"type":"history","messages":[{"type":"chat","from":"bob","text":"hola","ts":1792684790000}],"ts":1792684800123}
+{"type":"history","messages":[{"type":"chat","from":"bob","text":"hola","ts":1792684790000,"id":1}],"ts":1792684800123}
 ```
 
 - `users`: los nicknames conectados (incluido el propio), ordenados sin distinguir mayúsculas.
   Si alguien tiene foto suma `"avatars":{"<nickname>":"<url>"}` solo con quienes la tienen; sin
   fotos el campo no aparece.
-- `history`: los últimos 50 mensajes `chat`, del más viejo al más nuevo (`[]` si no hay). Vive solo
+- `history`: los últimos 50 mensajes `chat` (con su `id` y `reply`), del más viejo al más nuevo (`[]` si no hay). Vive solo
   en memoria: se pierde al reiniciar el servidor.
 
 **Secuencia al conectarse:** `welcome` → `users` → `history` → `join` (este último lo reciben todos,

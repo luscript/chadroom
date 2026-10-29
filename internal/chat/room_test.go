@@ -74,8 +74,9 @@ func broadcast(t *testing.T, cr *Room, from *Client, text string) {
 	}
 }
 
-// decode parses an outbound frame, requiring exactly the four envelope
-// fields and a known type.
+// decode parses an outbound frame, requiring type, from, text and ts and a known
+// type. A chat also carries id (>= 1) and may carry reply with exactly id, from and
+// text (CHAT-35); avatar is optional; nothing else is allowed.
 func decode(t *testing.T, b []byte) message {
 	t.Helper()
 	var fields map[string]json.RawMessage
@@ -87,17 +88,28 @@ func decode(t *testing.T, b []byte) message {
 			t.Fatalf("frame %q misses field %q", b, k)
 		}
 	}
-	if len(fields) != 4 {
-		t.Fatalf("frame %q has %d fields, want 4", b, len(fields))
-	}
 	var m message
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("frame %q: %v", b, err)
 	}
+	allowed := map[string]bool{"type": true, "from": true, "text": true, "ts": true, "avatar": true}
 	switch m.Type {
-	case typeChat, typeJoin, typeLeave, typeWelcome:
+	case typeChat:
+		allowed["id"], allowed["reply"] = true, true
+		if m.ID < 1 {
+			t.Fatalf("chat %q has no id >= 1", b)
+		}
+		if _, ok := fields["reply"]; ok {
+			exactFields(t, fields["reply"], "id", "from", "text")
+		}
+	case typeJoin, typeLeave, typeWelcome:
 	default:
 		t.Fatalf("unknown type in %q", b)
+	}
+	for k := range fields {
+		if !allowed[k] {
+			t.Fatalf("frame %q has unexpected field %q", b, k)
+		}
 	}
 	return m
 }
@@ -977,10 +989,17 @@ func exactFields(t *testing.T, b []byte, keys ...string) map[string]json.RawMess
 	return fields
 }
 
-// decodeDM parses a dm frame with exactly type, from, to, text and ts.
+// decodeDM parses a dm frame with exactly type, from, to, text, ts and id, plus reply_to when present.
 func decodeDM(t *testing.T, b []byte) dmFrame {
 	t.Helper()
-	exactFields(t, b, "type", "from", "to", "text", "ts")
+	keys := []string{"type", "from", "to", "text", "ts", "id"}
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(b, &probe) == nil {
+		if _, ok := probe["reply_to"]; ok {
+			keys = append(keys, "reply_to")
+		}
+	}
+	exactFields(t, b, keys...)
 	var f dmFrame
 	if err := json.Unmarshal(b, &f); err != nil {
 		t.Fatalf("frame %q: %v", b, err)
@@ -1543,7 +1562,7 @@ func TestChatAndHistoryKeepAvatar(t *testing.T) {
 
 	broadcast(t, cr, a, "from a")
 	for _, c := range []*Client{a, b} {
-		f := expectAvatarFrame(t, c, "type", "from", "text", "ts", "avatar")
+		f := expectAvatarFrame(t, c, "type", "from", "text", "ts", "avatar", "id")
 		if string(f["avatar"]) != `"pic-a"` {
 			t.Fatalf("chat avatar = %s", f["avatar"])
 		}
@@ -1565,7 +1584,7 @@ func TestChatAndHistoryKeepAvatar(t *testing.T) {
 	if err := json.Unmarshal(nextRaw(t, late), &hist); err != nil || len(hist.Messages) != 2 {
 		t.Fatalf("history = %+v, err %v", hist, err)
 	}
-	f := exactFields(t, hist.Messages[0], "type", "from", "text", "ts", "avatar")
+	f := exactFields(t, hist.Messages[0], "type", "from", "text", "ts", "avatar", "id")
 	if string(f["avatar"]) != `"pic-a"` {
 		t.Fatalf("history avatar = %s", f["avatar"])
 	}
@@ -2418,4 +2437,259 @@ func TestMusicSlowClientDropped(t *testing.T) {
 	if !cr.player.playing {
 		t.Fatal("the room still has members, so the player must keep playing")
 	}
+}
+
+// chatWithReply queues a room chat that replies to replyTo.
+func chatWithReply(t *testing.T, cr *Room, from *Client, text string, replyTo int64) {
+	t.Helper()
+	select {
+	case cr.broadcast <- inbound{from: from, text: text, replyTo: replyTo}:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout broadcasting")
+	}
+}
+
+// dmWithReply queues a dm that carries reply_to.
+func dmWithReply(t *testing.T, cr *Room, from *Client, to, text string, replyTo int64) {
+	t.Helper()
+	select {
+	case cr.broadcast <- inbound{from: from, kind: inboundDM, to: cleanNickname(to), text: text, replyTo: replyTo}:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout queueing dm")
+	}
+}
+
+// CHAT-35: chat and dm frames draw ids from one sequence; both dm copies share theirs.
+func TestMessageIDsSharedByChatAndDM(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 16), newTestClient("B", 16)
+	joinAll(t, cr, a, b)
+
+	broadcast(t, cr, a, "uno")
+	dm(t, cr, a, "B", "dos")
+	broadcast(t, cr, b, "tres")
+
+	if m := next(t, a); m.ID != 1 {
+		t.Fatalf("first chat id = %d, want 1", m.ID)
+	}
+	toA := expectDM(t, a, "A", "B", "dos")
+	if m := next(t, a); m.ID != 3 {
+		t.Fatalf("third frame id = %d, want 3", m.ID)
+	}
+	if m := next(t, b); m.ID != 1 {
+		t.Fatalf("b first chat id = %d, want 1", m.ID)
+	}
+	toB := expectDM(t, b, "A", "B", "dos")
+	if toA.ID != 2 || toB.ID != 2 {
+		t.Fatalf("dm ids = %d and %d, want 2 and 2", toA.ID, toB.ID)
+	}
+	if m := next(t, b); m.ID != 3 {
+		t.Fatalf("b third id = %d, want 3", m.ID)
+	}
+}
+
+// CHAT-35: frames that are not delivered use no id.
+func TestDiscardedFramesUseNoID(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, ghost := newTestClient("A", 16), newTestClient("Ghost", 16)
+	joinAll(t, cr, a)
+
+	dm(t, cr, a, "A", "a mi mismo")
+	expectDMError(t, a, "A", reasonSelf)
+	dm(t, cr, a, "Nadie", "hola")
+	expectDMError(t, a, "Nadie", reasonOffline)
+	broadcast(t, cr, ghost, "no soy miembro") // never registered: dropped
+	broadcast(t, cr, a, "primero")
+	if m := next(t, a); m.Text != "primero" || m.ID != 1 {
+		t.Fatalf("chat = %+v, want id 1", m)
+	}
+}
+
+// CHAT-35: a resolved reply embeds {id, from, text}; history keeps id and reply.
+func TestReplyResolved(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 16), newTestClient("B", 16)
+	joinAll(t, cr, a, b)
+
+	broadcast(t, cr, a, "¿pizza?")
+	next(t, a)
+	next(t, b)
+	chatWithReply(t, cr, b, "dale", 1)
+	want := quote{ID: 1, From: "A", Text: "¿pizza?"}
+	for _, c := range []*Client{a, b} {
+		m := next(t, c)
+		if m.ID != 2 || m.Reply == nil || *m.Reply != want {
+			t.Fatalf("reply = %+v (%+v), want id 2 quoting %+v", m, m.Reply, want)
+		}
+	}
+}
+
+// CHAT-35: a late joiner's history entry keeps both id and reply.
+func TestReplyKeptInHistory(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := newTestClient("A", 16)
+	joinAll(t, cr, a)
+	broadcast(t, cr, a, "hola")
+	chatWithReply(t, cr, a, "yo mismo", 1)
+	next(t, a)
+	next(t, a)
+
+	late := newTestClient("Late", 16)
+	register(t, cr, late)
+	if m := next(t, late); m.Type != typeWelcome {
+		t.Fatalf("first frame = %+v", m)
+	}
+	nextRaw(t, late) // users
+	h := decodeHistory(t, nextRaw(t, late))
+	if len(h.Messages) != 2 || h.Messages[0].ID != 1 || h.Messages[0].Reply != nil {
+		t.Fatalf("history = %+v", h.Messages)
+	}
+	if r := h.Messages[1].Reply; h.Messages[1].ID != 2 || r == nil || *r != (quote{ID: 1, From: "A", Text: "hola"}) {
+		t.Fatalf("history[1] = %+v (%+v)", h.Messages[1], r)
+	}
+}
+
+// CHAT-35: a reply_to that does not resolve is relayed with an id and no reply, and no error frame.
+func TestReplyUnresolvedIgnored(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 512), newTestClient("B", 512)
+	joinAll(t, cr, a, b)
+
+	broadcast(t, cr, a, "uno")   // id 1
+	dm(t, cr, a, "B", "secreto") // id 2
+	if m := next(t, a); m.ID != 1 {
+		t.Fatalf("id = %d", m.ID)
+	}
+	expectDM(t, a, "A", "B", "secreto")
+	next(t, b)
+	expectDM(t, b, "A", "B", "secreto")
+
+	check := func(replyTo int64, wantID int64) {
+		t.Helper()
+		chatWithReply(t, cr, a, "x", replyTo)
+		m := next(t, a)
+		if m.ID != wantID || m.Reply != nil || m.Text != "x" {
+			t.Fatalf("reply_to %d: got %+v (%+v), want id %d without reply", replyTo, m, m.Reply, wantID)
+		}
+	}
+	check(999, 3) // unknown
+	check(2, 4)   // a DM id
+	check(5, 5)   // its own id
+	for i := 0; i < replyTargets+1; i++ {
+		broadcast(t, cr, a, "relleno")
+		next(t, a)
+	}
+	check(1, 6+replyTargets+1) // evicted
+	expectEmpty(t, a)
+}
+
+// CHAT-35: the reply ring holds exactly replyTargets room messages. The reply is itself a room
+// message, so it is the one that evicts: id 1 resolves after replyTargets-1 more, not after replyTargets.
+func TestReplyRingBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fillers int
+		want    bool
+	}{
+		{"last one still resolves", replyTargets - 1, true},
+		{"one more evicts it", replyTargets, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, _ := startRoom(t)
+			a := newTestClient("A", 16)
+			joinAll(t, cr, a)
+
+			broadcast(t, cr, a, "primero") // id 1
+			next(t, a)
+			for i := 0; i < tc.fillers; i++ {
+				broadcast(t, cr, a, "relleno")
+				next(t, a)
+			}
+			chatWithReply(t, cr, a, "r", 1)
+			m := next(t, a)
+			if wantID := int64(tc.fillers + 2); m.ID != wantID {
+				t.Fatalf("id = %d, want %d", m.ID, wantID)
+			}
+			if tc.want != (m.Reply != nil) {
+				t.Fatalf("reply = %+v, want resolved = %v", m.Reply, tc.want)
+			}
+		})
+	}
+}
+
+// CHAT-35: a quote is cut at 100 runes and loses trailing whitespace.
+func TestReplyQuoteTruncated(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := newTestClient("A", 16)
+	joinAll(t, cr, a)
+
+	long := strings.Repeat("ñ", 300)
+	broadcast(t, cr, a, long)
+	next(t, a)
+	chatWithReply(t, cr, a, "r", 1)
+	if m := next(t, a); m.Reply == nil || m.Reply.Text != strings.Repeat("ñ", 100) {
+		t.Fatalf("quote = %+v", m.Reply)
+	}
+
+	broadcast(t, cr, a, strings.Repeat("a", 99)+" "+strings.Repeat("b", 50)) // id 3: space is rune 100
+	next(t, a)
+	chatWithReply(t, cr, a, "r", 3)
+	if m := next(t, a); m.Reply == nil || m.Reply.Text != strings.Repeat("a", 99) {
+		t.Fatalf("quote = %+v, want 99 a's", m.Reply)
+	}
+	// The message itself is untouched.
+	if got := quoteText("hola  \n"); got != "hola" {
+		t.Fatalf("quoteText = %q", got)
+	}
+}
+
+// CHAT-35: replying to a reply quotes only that reply's own text.
+func TestReplyQuotesDoNotNest(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := newTestClient("A", 16)
+	joinAll(t, cr, a)
+
+	broadcast(t, cr, a, "uno")
+	chatWithReply(t, cr, a, "dos", 1)
+	chatWithReply(t, cr, a, "tres", 2)
+	next(t, a)
+	next(t, a)
+	m := next(t, a)
+	if m.Reply == nil || *m.Reply != (quote{ID: 2, From: "A", Text: "dos"}) {
+		t.Fatalf("reply = %+v", m.Reply)
+	}
+}
+
+// CHAT-24, CHAT-35: reply_to in a dm is forwarded as is; the ring never holds a dm.
+func TestDMReplyToForwarded(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 16), newTestClient("B", 16)
+	joinAll(t, cr, a, b)
+
+	dmWithReply(t, cr, a, "B", "respuesta", 41)
+	toB := expectDM(t, b, "A", "B", "respuesta")
+	toA := expectDM(t, a, "A", "B", "respuesta")
+	if toB.ReplyTo != 41 || toA.ReplyTo != 41 || toA.ID != 1 || toB.ID != 1 {
+		t.Fatalf("dm copies = %+v / %+v, want id 1 and reply_to 41", toA, toB)
+	}
+
+	chatWithReply(t, cr, a, "x", 1) // the dm's id
+	if m := next(t, a); m.Reply != nil || m.ID != 2 {
+		t.Fatalf("chat = %+v (%+v), want id 2 without reply", m, m.Reply)
+	}
+}
+
+// CHAT-35: welcome, join and leave carry neither id nor reply.
+func TestJoinLeaveWelcomeHaveNoID(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("A", 16), newTestClient("B", 16)
+	register(t, cr, a)
+	exactFields(t, nextRaw(t, a), "type", "from", "text", "ts")
+	nextRaw(t, a)                                               // users
+	nextRaw(t, a)                                               // history
+	exactFields(t, nextRaw(t, a), "type", "from", "text", "ts") // join A
+	register(t, cr, b)
+	exactFields(t, nextRaw(t, a), "type", "from", "text", "ts") // join B
+	unregister(t, cr, b)
+	exactFields(t, nextRaw(t, a), "type", "from", "text", "ts") // leave B
 }

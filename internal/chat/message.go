@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -19,21 +21,34 @@ const (
 	typeMusic   = "music"
 	historySize = 50 // chat messages kept for newcomers
 
+	replyTargets = 200 // room messages that can still be quoted (CHAT-35)
+	quoteRunes   = 100 // runes kept in a quote (CHAT-35)
+
 	reasonInvalid = "invalid"
 	reasonSelf    = "self"
 	reasonOffline = "offline"
 )
 
+// quote is a reply target: a flat, truncated snapshot of a room message (CHAT-35).
+type quote struct {
+	ID   int64  `json:"id"`
+	From string `json:"from"`
+	Text string `json:"text"`
+}
+
 // message is the outbound JSON envelope. Field order is the JSON order. type, from,
 // text and ts are always present; avatar only when the sender has one (welcome, join,
 // chat and history entries, never leave), so frames without a picture are unchanged
-// (CHAT-28). users and history frames have their own shapes below.
+// (CHAT-28). id and reply are chat-only (CHAT-35), so welcome, join and leave are
+// unchanged. users and history frames have their own shapes below.
 type message struct {
 	Type   string `json:"type"` // chat | join | leave | welcome
 	From   string `json:"from"`
 	Text   string `json:"text"` // "" for everything but chat
 	TS     int64  `json:"ts"`   // unix milliseconds
 	Avatar string `json:"avatar,omitempty"`
+	ID     int64  `json:"id,omitempty"`    // chat only (CHAT-35); 0 on welcome/join/leave
+	Reply  *quote `json:"reply,omitempty"` // chat only, when reply_to resolved
 }
 
 // usersFrame is the private snapshot of connected nicknames sent on join.
@@ -53,11 +68,13 @@ type historyFrame struct {
 
 // dmFrame is a direct message, sent to the recipient and echoed to the sender.
 type dmFrame struct {
-	Type string `json:"type"` // always "dm"
-	From string `json:"from"` // sender's assigned nickname
-	To   string `json:"to"`   // recipient's assigned nickname
-	Text string `json:"text"`
-	TS   int64  `json:"ts"` // same in both copies
+	Type    string `json:"type"` // always "dm"
+	From    string `json:"from"` // sender's assigned nickname
+	To      string `json:"to"`   // recipient's assigned nickname
+	Text    string `json:"text"`
+	TS      int64  `json:"ts"`                 // same in both copies
+	ID      int64  `json:"id"`                 // same in both copies (CHAT-35)
+	ReplyTo int64  `json:"reply_to,omitempty"` // forwarded as is, never looked up (CHAT-24)
 }
 
 // dmErrorFrame tells only the sender why a direct message was not delivered.
@@ -109,11 +126,12 @@ const (
 // inbound is a classified client text frame on its way to the hub. It travels on
 // Room.broadcast whatever its kind, so one client's frames keep their order.
 type inbound struct {
-	from  *Client
-	kind  inboundKind
-	to    string // inboundDM: cleanNickname(to), never "". inboundTyping: "" for a room signal
-	text  string
-	music musicCmd // inboundMusic only
+	from    *Client
+	kind    inboundKind
+	to      string // inboundDM: cleanNickname(to), never "". inboundTyping: "" for a room signal
+	text    string
+	replyTo int64    // inboundChat/inboundDM: valid reply_to (>= 1), else 0 (CHAT-21)
+	music   musicCmd // inboundMusic only
 }
 
 // parseInbound classifies a size- and UTF-8-checked text frame (CHAT-21). ok is
@@ -135,7 +153,7 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 			if strings.TrimSpace(text) == "" {
 				return inbound{}, false
 			}
-			return inbound{kind: inboundDM, to: to, text: text}, true
+			return inbound{kind: inboundDM, to: to, text: text, replyTo: replyTo(env)}, true
 		case typeTyping:
 			// CHAT-21 rule 2: text is ignored and the blank rule does not apply.
 			raw, hasTo := env["to"]
@@ -156,12 +174,30 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 		case typeChat:
 			// A non-string text intentionally falls through to the plain-text rule (CHAT-21).
 			if textOK {
-				return inbound{text: text}, strings.TrimSpace(text) != ""
+				return inbound{text: text, replyTo: replyTo(env)}, strings.TrimSpace(text) != ""
 			}
 		}
 	}
 	whole := string(frame)
 	return inbound{text: whole}, strings.TrimSpace(whole) != ""
+}
+
+// replyTo returns env's reply_to when it is a JSON integer >= 1, else 0: a malformed
+// one is ignored and never invalidates the message (CHAT-21).
+func replyTo(env map[string]json.RawMessage) int64 {
+	if n, ok := jsonInt(env["reply_to"]); ok && n >= 1 {
+		return n
+	}
+	return 0
+}
+
+// quoteText is the reply-target form of a message text: the first quoteRunes runes
+// without trailing whitespace (CHAT-35).
+func quoteText(s string) string {
+	if utf8.RuneCountInString(s) > quoteRunes {
+		s = string([]rune(s)[:quoteRunes])
+	}
+	return strings.TrimRightFunc(s, unicode.IsSpace)
 }
 
 // parseMusic validates a music control's fields (CHAT-30). Whether it applies to the

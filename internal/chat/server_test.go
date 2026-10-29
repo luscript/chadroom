@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -331,5 +332,75 @@ func TestForgedInboundAvatarIgnored(t *testing.T) {
 	m := nextChat(t, a, "")
 	if m.Text != "hi" || m.Avatar != "" {
 		t.Fatalf("chat = %+v, want text hi without avatar", m)
+	}
+}
+
+// CHAT-35: a reply reaches everyone with its quote, and a later joiner gets it in history.
+func TestReplyIntegration(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+
+	send(t, a, "¿pizza?")
+	first := nextChat(t, a, "")
+	nextChat(t, b, "")
+	send(t, b, `{"type":"chat","text":"dale","reply_to":`+strconv.FormatInt(first.ID, 10)+`}`)
+	want := quote{ID: first.ID, From: "A", Text: "¿pizza?"}
+	for _, c := range []*websocket.Conn{a, b} {
+		if m := nextChat(t, c, ""); m.Text != "dale" || m.Reply == nil || *m.Reply != want {
+			t.Fatalf("reply = %+v (%+v), want quote %+v", m, m.Reply, want)
+		}
+	}
+
+	_, _, hist := joinRoom(t, srv, "general", "C")
+	if len(hist.Messages) != 2 || hist.Messages[1].Reply == nil || *hist.Messages[1].Reply != want {
+		t.Fatalf("history = %+v", hist.Messages)
+	}
+}
+
+// CHAT-22, CHAT-35: a dm reply carries the same id and reply_to in both copies; a third client sees nothing.
+func TestDMReplyIntegration(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+	b, _ := dial(t, srv, "B")
+	c, _ := dial(t, srv, "C")
+
+	send(t, a, `{"type":"dm","to":"B","text":"hola"}`)
+	orig := readDM(t, b)
+	readDM(t, a)
+	send(t, b, `{"type":"dm","to":"A","text":"que tal","reply_to":`+strconv.FormatInt(orig.ID, 10)+`}`)
+	toA, toB := readDM(t, a), readDM(t, b)
+	if toA.ID != toB.ID || toA.ID <= orig.ID || toA.ReplyTo != orig.ID || toB.ReplyTo != orig.ID {
+		t.Fatalf("copies = %+v / %+v, orig id %d", toA, toB, orig.ID)
+	}
+
+	send(t, c, "sync")
+	if m := nextChat(t, c, ""); m.Text != "sync" {
+		t.Fatalf("c got %+v, want only its own chat", m)
+	}
+}
+
+// CHAT-21, CHAT-35: an inbound frame near the 4096-byte limit plus reply_to is accepted,
+// and the outbound reply, which grows past 4096 bytes, arrives intact.
+func TestReplyFrameLargerThanLimit(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	a, _ := dial(t, srv, "A")
+
+	origin := strings.Repeat("ñ", 100)
+	send(t, a, origin)
+	nextChat(t, a, "")
+	text := strings.Repeat("x", 3950)
+	frame := `{"type":"chat","text":"` + text + `","reply_to":1}`
+	if len(frame) >= 4096 {
+		t.Fatalf("inbound frame is %d bytes, want < 4096", len(frame))
+	}
+	send(t, a, frame)
+	raw := readRaw(t, a)
+	if len(raw) <= 4096 {
+		t.Fatalf("outbound frame is %d bytes, want > 4096", len(raw))
+	}
+	m := decode(t, raw)
+	if m.Text != text || m.Reply == nil || m.Reply.Text != origin {
+		t.Fatalf("reply = %+v", m)
 	}
 }
