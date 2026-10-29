@@ -68,7 +68,11 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Seek bar disabled until "Escuchar" (no duration known); frames during buffering may cause a
       drift seek (jitter); Safari/iOS may block `playVideo` into the iframe.
 - [ ] Undocumented `postMessage` protocol: if YouTube changes it, sync breaks (chat unaffected).
-- [ ] Queue / playlists, titles/thumbnails, DJ role (out of scope today).
+- [x] Queue (done in `music-queue`) and playlists (done in `youtube-playlist-import`).
+- [ ] Titles/thumbnails in the queue, DJ role (out of scope today).
+- [ ] Rate limiting for `/playlist` (and `/gifs`) to protect the shared API quota; belongs with
+      `rate-limiting`.
+- [ ] `youtu.be/X?list=Y` share links import the playlist (today `?list=` is ignored there).
 
 ## `profile-picture` — done, archived 2026-10-23 (manual UI check pending)
 - [x] Profile picture next to messages and in the online list (allowlisted image URL at join,

@@ -29,8 +29,8 @@ func (u *upstream) requests() []*http.Request {
 	return append([]*http.Request(nil), u.reqs...)
 }
 
-// fakeGiphy starts a fake upstream that records every request before calling h.
-func fakeGiphy(t *testing.T, h http.HandlerFunc) *upstream {
+// fakeUpstream starts a fake upstream that records every request before calling h.
+func fakeUpstream(t *testing.T, h http.HandlerFunc) *upstream {
 	t.Helper()
 	u := &upstream{}
 	u.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +45,7 @@ func fakeGiphy(t *testing.T, h http.HandlerFunc) *upstream {
 
 func newGifTestServer(t *testing.T, g *gifSearch) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewServer(newRouter(newChatServer(nil), g))
+	ts := httptest.NewServer(newRouter(newChatServer(nil), g, nil))
 	t.Cleanup(ts.Close)
 	return ts
 }
@@ -93,7 +93,7 @@ func getGifs(t *testing.T, ts *httptest.Server, query string) (int, string, http
 // setup wires a fake upstream, a gifSearch pointed at it and a test server.
 func setup(t *testing.T, h http.HandlerFunc) (*upstream, *gifSearch, *httptest.Server) {
 	t.Helper()
-	up := fakeGiphy(t, h)
+	up := fakeUpstream(t, h)
 	g := newGifSearch(up.URL, testKey)
 	return up, g, newGifTestServer(t, g)
 }
@@ -207,7 +207,7 @@ func TestGifsUpstreamError(t *testing.T) {
 }
 
 func TestGifsUpstreamRedirectNotFollowed(t *testing.T) {
-	other := fakeGiphy(t, okJSON(giphyJSON([2]string{gifA, gifAP})))
+	other := fakeUpstream(t, okJSON(giphyJSON([2]string{gifA, gifAP})))
 	_, _, ts := setup(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, other.URL+"/x", http.StatusFound)
 	})
@@ -260,7 +260,7 @@ func TestGifsKeyNeverLeaks(t *testing.T) {
 			if tc.h == nil {
 				g = newGifSearch(tc.base, secret)
 			} else {
-				up := fakeGiphy(t, tc.h)
+				up := fakeUpstream(t, tc.h)
 				g = newGifSearch(up.URL, secret)
 			}
 			ts := newGifTestServer(t, g)
