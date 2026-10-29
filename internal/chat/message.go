@@ -172,24 +172,6 @@ func parseMusic(env map[string]json.RawMessage) (musicCmd, bool) {
 	case musicAdd:
 		video, ok := jsonString(env["video"])
 		return musicCmd{action: action, video: video}, ok && videoID.MatchString(video)
-	case musicAddMany:
-		var raws []json.RawMessage
-		raw := env["videos"]
-		// The frame is already capped by the read limit; the length check below still
-		// bounds the work done per element.
-		if len(raw) == 0 || raw[0] != '[' || json.Unmarshal(raw, &raws) != nil ||
-			len(raws) == 0 || len(raws) > maxMusicQueue+1 {
-			return musicCmd{}, false
-		}
-		videos := make([]string, 0, len(raws))
-		for _, r := range raws {
-			v, ok := jsonString(r)
-			if !ok || !videoID.MatchString(v) {
-				return musicCmd{}, false
-			}
-			videos = append(videos, v)
-		}
-		return musicCmd{action: action, videos: videos}, true
 	case musicRemove:
 		id, ok := jsonInt(env["id"])
 		return musicCmd{action: action, id: id}, ok && id >= 1

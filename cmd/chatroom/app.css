@@ -208,7 +208,6 @@ img.avatar { object-fit: cover; }
 .music > * { min-width: 0; }
 .music-load, .music-controls, .music-consent { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
 .music-load .input { flex: 1; min-width: 0; }
-.music-load textarea.input { resize: none; overflow-y: auto; max-height: 6rem; }
 .music-controls #music-seek { flex: 1; min-width: 80px; accent-color: var(--color-accent); }
 .music-controls #music-volume { width: 90px; accent-color: var(--color-accent); }
 .music-time { min-width: 5.5em; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--color-neutral-400); }
