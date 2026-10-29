@@ -74,8 +74,8 @@
     </nav>
     <section id="music" class="music" aria-label="Música compartida" hidden>
       <form id="music-form" class="music-load" autocomplete="off" novalidate>
-        <textarea id="music-url" class="input" rows="1" maxlength="8192" spellcheck="false" autocapitalize="off"
-          placeholder="Pegá uno o varios links de YouTube o YouTube Music" aria-label="Links de YouTube"></textarea>
+        <input id="music-url" class="input" type="url" inputmode="url" maxlength="2048"
+          placeholder="Pegá un link de YouTube o YouTube Music" aria-label="Link de YouTube">
         <button id="music-load" type="submit" class="btn">Poner</button>
       </form>
       <div class="music-controls">

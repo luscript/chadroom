@@ -1686,23 +1686,10 @@
   }
 
   // — strip handlers —
-  // Links or bare ids separated by whitespace, commas or semicolons. A playlist-only URL is not
-  // a track (the page cannot expand it), so it counts as ignored like any other bad token.
-  function parseMusicTokens(text) {
-    const ids = [];
-    let ignored = 0;
-    for (const token of String(text).split(/[\s,;]+/)) {
-      if (token === '') continue;
-      const id = YT_ID.test(token) ? token : parseYouTubeId(token);
-      if (id === null) ignored++; else ids.push(id);
-    }
-    return { ids, ignored };
-  }
-
   $('music-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    const { ids, ignored } = parseMusicTokens($('music-url').value);
-    if (ids.length === 0) {
+    const id = parseYouTubeId($('music-url').value);
+    if (id === null) {
       setMusicError('Ese link no es de YouTube.');
       return;
     }
@@ -1710,20 +1697,10 @@
       setMusicError('La cola está llena');
       return;
     }
-    // One current track plus a full queue is the most one control can use (maxMusicQueue + 1).
-    const truncated = ids.length > MUSIC_QUEUE_MAX + 1;
-    const sent = ids.slice(0, MUSIC_QUEUE_MAX + 1);
-    const ok = sent.length === 1 ? sendMusic('add', { video: sent[0] }) : sendMusic('addmany', { videos: sent });
-    if (!ok) return;
-    $('music-url').value = '';
-    const notes = [];
-    if (truncated) notes.push('Solo se agregaron los primeros ' + sent.length + '.');
-    if (ignored > 0) notes.push(ignored === 1 ? 'Se ignoró 1 link que no es de YouTube.' : 'Se ignoraron ' + ignored + ' links que no son de YouTube.');
-    setMusicError(notes.join(' '));
-  });
-  // Enter sends, Shift+Enter adds a line (the field is a textarea so pasted lists keep their newlines).
-  $('music-url').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('music-form').requestSubmit(); }
+    if (sendMusic('add', { video: id })) {
+      $('music-url').value = '';
+      setMusicError('');
+    }
   });
   $('music-url').addEventListener('input', () => setMusicError(''));
 
