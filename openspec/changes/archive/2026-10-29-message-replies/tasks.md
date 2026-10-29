@@ -27,4 +27,4 @@ Design: `design.md`. Specs: `specs/chat/spec.md` (CHAT-10/18/21/22 modified, CHA
 ## 5. Verification
 
 - [x] 5.1 `gofmt` clean and `go test -race ./...` green
-- [ ] 5.2 Manual two-browser checklist (`design.md`) — user
+- [ ] 5.2 Manual two-browser checklist (`design.md`) — user (deferred; not confirmed at archive)

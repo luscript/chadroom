@@ -5,7 +5,7 @@
 > completion notification's `usage` block; the orchestrator total is parsed post-hoc from
 > the local session transcript JSONL (`[unavailable]` on failure).
 
-**Status**: partial (through verify)
+**Status**: complete
 **Generated**: 2026-10-29
 
 ## Per-agent / per-phase
@@ -26,7 +26,7 @@
 
 | Scope         | Model / Tier           | Tokens (in / out) | Notes |
 |---------------|------------------------|-------------------|-------|
-| whole feature | claude-opus-5-5 / —    | [unavailable]     | captured at archive |
+| whole session | claude-opus-5-5 / —    | 224 / 107,179     | cache creation 262,655, cache read 7,612,128; session-wide (also covers archiving youtube-playlist-import), not filtered to the feature window |
 
 ## Aggregate
 
@@ -37,5 +37,5 @@
 | apply                  | 148,009 |
 | verify                 | 152,195 |
 | **Sub-agent total**    | 504,743 |
-| **Orchestrator total** | [unavailable] |
-| **Grand total**        | 504,743 (sub-agents only; orchestrator [unavailable]) |
+| **Orchestrator total** | 224 / 107,179 (in/out) |
+| **Grand total**        | 611,146 (sub-agents + orchestrator in/out; cache excluded) |
