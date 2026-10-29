@@ -179,6 +179,27 @@ func TestIndexHasNoInlineCode(t *testing.T) {
 	}
 }
 
+func TestIndexHasReplyPreview(t *testing.T) {
+	html := string(indexHTML)
+	for _, want := range []string{`id="reply-preview"`, `id="reply-preview-author"`, `id="reply-preview-text"`, `id="reply-cancel"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing %s", want)
+		}
+	}
+	if strings.Index(html, `id="reply-preview"`) > strings.Index(html, `class="composer-bar"`) {
+		t.Error("reply preview must come before the composer bar")
+	}
+	js := string(appJS)
+	for _, want := range []string{"reply_to", "'Mensaje no disponible'", "'🖼 GIF'"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %s", want)
+		}
+	}
+	if !strings.Contains(string(appCSS), ".msg:focus-within .msg-reply") {
+		t.Error("app.css missing the focus-within reveal of the reply button")
+	}
+}
+
 func TestIndexHasOnlineList(t *testing.T) {
 	html := string(indexHTML)
 	for _, want := range []string{

@@ -104,6 +104,13 @@
     <div id="typing" class="typing"></div>
 
     <form id="send-form" class="composer" autocomplete="off">
+      <div id="reply-preview" class="reply-preview" aria-live="polite" hidden>
+        <div class="reply-preview-body">
+          <span id="reply-preview-author" class="reply-preview-author"></span>
+          <span id="reply-preview-text" class="reply-preview-text"></span>
+        </div>
+        <button id="reply-cancel" type="button" class="btn btn-ghost reply-cancel" aria-label="Cancelar respuesta" title="Cancelar respuesta">✕</button>
+      </div>
       <div class="composer-bar">
         <div id="emoji-panel" class="popover" hidden>
           <div id="cats" class="cats" role="tablist"></div>

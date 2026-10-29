@@ -33,6 +33,11 @@ type Room struct {
 	done       chan struct{} // closed by Run when it exits
 	player     *player       // nil: this room has no shared player (CHAT-30); set only by NewMusicRoom
 
+	// Run-only (CHAT-35). One id sequence per room, shared by chat and dm frames.
+	nextID     int64               // last id assigned; 0 before the first message
+	targets    [replyTargets]quote // ring of quotable room messages; a zero ID marks an empty slot
+	targetNext int                 // slot the next target overwrites
+
 	// Unexported so tests can shorten them right after NewRoom.
 	writeWait      time.Duration
 	pongWait       time.Duration
@@ -174,11 +179,37 @@ func (cr *Room) relay(in inbound) {
 	if _, ok := cr.clients[in.from]; !ok {
 		return // sender was removed; its name may belong to someone else now
 	}
-	m := message{Type: typeChat, From: in.from.nickname, Text: in.text, Avatar: in.from.avatar, TS: time.Now().UnixMilli()}
+	// The target is resolved before the new message joins the ring, so a reply_to equal
+	// to the message's own id can't match. The id is used only once encode succeeds.
+	m := message{Type: typeChat, From: in.from.nickname, Text: in.text, Avatar: in.from.avatar, TS: time.Now().UnixMilli(),
+		ID: cr.nextID + 1, Reply: cr.replyTarget(in.replyTo)}
 	if chat := encode(m); chat != nil {
+		cr.nextID = m.ID
 		cr.remember(m)
+		cr.keepTarget(quote{ID: m.ID, From: m.From, Text: quoteText(m.Text)})
 		cr.publish(chat)
 	}
+}
+
+// keepTarget adds q to the reply ring, overwriting the oldest entry. Run-only.
+func (cr *Room) keepTarget(q quote) {
+	cr.targets[cr.targetNext] = q
+	cr.targetNext = (cr.targetNext + 1) % replyTargets
+}
+
+// replyTarget returns a copy of the quote for room message id, or nil when id is 0,
+// unknown, evicted or not a room message (CHAT-35). Run-only.
+func (cr *Room) replyTarget(id int64) *quote {
+	if id < 1 {
+		return nil
+	}
+	for i := range cr.targets {
+		if cr.targets[i].ID == id {
+			q := cr.targets[i]
+			return &q
+		}
+	}
+	return nil
 }
 
 // dispatch routes a classified frame from a current member. Run-only.
@@ -212,7 +243,11 @@ func (cr *Room) direct(in inbound) {
 		cr.dmError(in.from, in.to, reasonOffline)
 		return
 	}
-	if f := encode(dmFrame{typeDM, in.from.nickname, to.nickname, in.text, time.Now().UnixMilli()}); f != nil {
+	// reply_to is forwarded without lookup: nothing about a DM is kept (CHAT-24).
+	d := dmFrame{Type: typeDM, From: in.from.nickname, To: to.nickname, Text: in.text, TS: time.Now().UnixMilli(),
+		ID: cr.nextID + 1, ReplyTo: in.replyTo}
+	if f := encode(d); f != nil {
+		cr.nextID = d.ID
 		cr.deliverPrivate(f, to, in.from)
 	}
 }

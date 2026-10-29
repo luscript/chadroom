@@ -44,6 +44,8 @@
   const convKey = (room, nick) => room.id + '\n' + nick;
   const current = () => activeConv || active; // the pane on screen
   const ownerRoom = (pane) => pane.room || pane; // conversation -> its room; room -> itself
+  let replyTarget = null; // {pane, id, from, text}: the message the composer replies to
+  const validId = (v) => Number.isSafeInteger(v) && v >= 1;
   let typingPane = null; // pane our last typing signal was for; null = the next edit signals at once
   let typingSentAt = 0; // performance.now() of that signal
 
@@ -145,6 +147,7 @@
       status: 'connecting', myName: '', users: new Set(), lastAuthor: null, unread: 0,
       avatars: new Map(), // nick -> image url, only for members with a picture
       typing: new Map(), // nick -> timeout id of who is typing here now
+      msgs: new Map(), // message id -> {li, from, text}: what can be quoted or jumped to
     };
     tab.addEventListener('click', () => {
       if (room === active && !activeConv) return;
@@ -192,7 +195,7 @@
     list.setAttribute('aria-live', 'polite');
     list.hidden = true;
 
-    const conv = { room, peer, tab, unreadEl, list, open: true, unread: 0, lastAuthor: null, typing: new Map() };
+    const conv = { room, peer, tab, unreadEl, list, open: true, unread: 0, lastAuthor: null, typing: new Map(), msgs: new Map() };
     tab.addEventListener('click', () => {
       if (conv !== activeConv) activate(room, conv);
     });
@@ -232,6 +235,7 @@
 
   // The same nickname may now belong to someone else, so the divider says so.
   function reopenConversation(conv) {
+    forgetIds(conv);
     conv.open = true;
     addSystem(conv, 'Nueva conversación con ' + conv.peer + ': puede ser otra persona.');
     renderConvTab(conv);
@@ -241,6 +245,7 @@
   function closeConversation(conv, notice) {
     if (!conv.open) return;
     conv.open = false;
+    for (const b of conv.list.querySelectorAll('.msg-reply')) b.remove(); // startReply refuses a closed conversation
     clearAllTyping(conv);
     addSystem(conv, notice);
     renderConvTab(conv);
@@ -255,6 +260,7 @@
     for (const [key, conv] of conversations) {
       if (conv.room !== room) continue;
       clearAllTyping(conv);
+      if (replyTarget?.pane === conv) cancelReply();
       conv.tab.remove();
       conv.list.remove();
       conversations.delete(key);
@@ -278,6 +284,7 @@
   function joinRoom(room) {
     room.joined = true;
     room.list.replaceChildren();
+    forgetIds(room);
     room.users = new Set();
     room.avatars = new Map();
     room.myName = '';
@@ -295,6 +302,7 @@
   function activate(room, conv = null) {
     active = room;
     activeConv = conv;
+    if (replyTarget && replyTarget.pane !== current()) cancelReply();
     const shown = current();
     for (const pane of [...rooms.values(), ...conversations.values()]) {
       pane.tab.setAttribute('aria-selected', String(pane === shown));
@@ -326,6 +334,7 @@
     clearAllTyping(room);
     removeConversations(room);
     room.list.replaceChildren();
+    forgetIds(room);
     room.users = new Set();
     room.avatars = new Map();
     room.myName = '';
@@ -560,6 +569,7 @@
 
   // — messages —
   // The server sends JSON frames {type, from, text, ts}; ts is Unix milliseconds.
+  // chat frames may add id and reply {id, from, text}; dm frames add id and may add reply_to.
   // Frames carry no room: the socket (and so the closure) identifies it.
   function addRaw(room, data) {
     let msg;
@@ -614,7 +624,7 @@
       case 'chat':
         if (typeof msg.text === 'string') {
           clearTyping(room, msg.from);
-          addChat(room, msg.from, msg.text, msg.ts, msg.avatar);
+          addChat(room, msg.from, msg.text, msg.ts, msg.avatar, validId(msg.id) ? msg.id : 0, parseReply(msg.reply));
           if (room !== current() && msg.from !== room.myName) bumpUnread(room);
           if (msg.from !== room.myName) notify(room === current());
         }
@@ -627,7 +637,9 @@
         const conv = conversations.get(convKey(room, peer)) || createConversation(room, peer);
         if (!conv.open) reopenConversation(conv);
         if (!own) clearTyping(conv, msg.from);
-        addChat(conv, msg.from, msg.text, msg.ts, room.avatars.get(msg.from));
+        // Looked up before addChat registers the new id.
+        const quote = validId(msg.reply_to) ? dmQuote(conv, msg.reply_to) : null;
+        addChat(conv, msg.from, msg.text, msg.ts, room.avatars.get(msg.from), validId(msg.id) ? msg.id : 0, quote);
         if (conv !== current() && !own) bumpUnread(conv);
         if (!own) notify(conv === current());
         break;
@@ -730,10 +742,11 @@
     list.setAttribute('aria-busy', 'true');
     try {
       list.replaceChildren();
+      forgetIds(room);
       room.lastAuthor = null;
       for (const m of messages) {
         if (m && m.type === 'chat' && typeof m.from === 'string' && typeof m.text === 'string') {
-          addChat(room, m.from, m.text, m.ts, m.avatar);
+          addChat(room, m.from, m.text, m.ts, m.avatar, validId(m.id) ? m.id : 0, parseReply(m.reply));
         }
       }
     } finally {
@@ -774,6 +787,69 @@
     }));
   }
 
+  // — replies —
+  // A reply quote from the server, or null when it is missing or malformed.
+  function parseReply(r) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+    if (!validId(r.id) || typeof r.from !== 'string' || typeof r.text !== 'string') return null;
+    return { id: r.id, from: r.from, text: r.text };
+  }
+
+  // DM quotes come from this conversation's own copy of the messages: the server keeps none.
+  function dmQuote(conv, id) {
+    const m = conv.msgs.get(id);
+    return m ? { id, from: m.from, text: Array.from(m.text).slice(0, 100).join('').trimEnd() } : { id, missing: true };
+  }
+
+  // A quoted image is shown as a label, never as an <img>. The path is not checked: the
+  // server cuts quotes at 100 runes, so the file extension may be gone.
+  // Host only, on purpose: room quotes are cut at 100 runes and may lose the file extension.
+  function isImageQuote(text) {
+    if (/\s/.test(text)) return false;
+    let url;
+    try { url = new URL(text); } catch { return false; }
+    return url.protocol === 'https:' && IMAGE_HOSTS.has(url.hostname);
+  }
+
+  const quoteLabel = (text) => (isImageQuote(text) ? '🖼 GIF' : text);
+
+  // Message ids are only valid for the transcript they came from.
+  function forgetIds(pane) {
+    pane.msgs = new Map();
+    if (pane.room) for (const b of pane.list.querySelectorAll('.msg-reply')) b.remove();
+    if (replyTarget?.pane === pane) cancelReply();
+  }
+
+  function startReply(pane, id) {
+    if (pane !== current() || (pane.room && !pane.open)) return;
+    const m = pane.msgs.get(id);
+    if (!m) return;
+    replyTarget = { pane, id, from: m.from, text: m.text };
+    renderReplyPreview();
+    draft.focus();
+  }
+
+  function cancelReply() {
+    replyTarget = null;
+    renderReplyPreview();
+  }
+
+  function renderReplyPreview() {
+    $('reply-preview').hidden = !replyTarget;
+    if (!replyTarget) return;
+    $('reply-preview-author').textContent = 'Respondiendo a ' + replyTarget.from;
+    $('reply-preview-text').textContent = quoteLabel(replyTarget.text);
+  }
+
+  function jumpTo(pane, id) {
+    const m = pane.msgs.get(id);
+    if (!m || !m.li.isConnected) return;
+    m.li.scrollIntoView({ block: 'center' });
+    clearTimeout(m.flashTimer);
+    m.li.classList.add('msg-flash');
+    m.flashTimer = setTimeout(() => m.li.classList.remove('msg-flash'), 1500);
+  }
+
   // addSystem, addChat and append take a pane: a room or a conversation (both have list and lastAuthor).
   function addSystem(pane, text) {
     pane.lastAuthor = null;
@@ -783,7 +859,7 @@
     append(pane, li);
   }
 
-  function addChat(pane, author, text, ts, avatarUrl) {
+  function addChat(pane, author, text, ts, avatarUrl, id = 0, quote = null) {
     const own = author === ownerRoom(pane).myName;
     const showHead = author !== pane.lastAuthor;
     pane.lastAuthor = author;
@@ -820,6 +896,28 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
+    if (quote) {
+      let q;
+      if (quote.missing) {
+        q = document.createElement('div');
+        q.className = 'msg-quote missing';
+        q.textContent = 'Mensaje no disponible';
+      } else {
+        q = document.createElement('button');
+        q.type = 'button';
+        q.className = 'msg-quote';
+        q.setAttribute('aria-label', 'Ir al mensaje de ' + quote.from);
+        const qa = document.createElement('span');
+        qa.className = 'msg-quote-author';
+        qa.textContent = quote.from;
+        const qt = document.createElement('span');
+        qt.className = 'msg-quote-text';
+        qt.textContent = quoteLabel(quote.text);
+        q.append(qa, qt);
+        q.addEventListener('click', () => jumpTo(pane, quote.id));
+      }
+      bubble.append(q);
+    }
     if (isAllowedImage(text)) {
       bubble.classList.add('media');
       const img = document.createElement('img');
@@ -829,15 +927,26 @@
       img.referrerPolicy = 'no-referrer';
       img.onload = () => { if (pane === current()) scrollToBottom(); };
       // Fall back to the plain link text if the image can't be loaded.
-      img.onerror = () => { bubble.classList.remove('media'); bubble.textContent = text; };
+      img.onerror = () => { bubble.classList.remove('media'); img.replaceWith(document.createTextNode(text)); };
       bubble.append(img);
     } else {
       if (EMOJI_ONLY.test(text)) bubble.classList.add('emoji-only');
-      bubble.textContent = text;
+      bubble.append(text);
     }
     body.append(bubble);
 
     li.append(slot, body);
+    if (validId(id)) {
+      pane.msgs.set(id, { li, from: author, text });
+      const reply = document.createElement('button');
+      reply.type = 'button';
+      reply.className = 'btn btn-ghost msg-reply';
+      reply.title = 'Responder';
+      reply.setAttribute('aria-label', 'Responder a ' + author);
+      reply.textContent = '↩';
+      reply.addEventListener('click', () => startReply(pane, id));
+      li.append(reply);
+    }
     append(pane, li);
   }
 
@@ -886,13 +995,16 @@
     const room = composerRoom();
     if (!room) return false;
     // Always an envelope, so text that merely looks like a DM envelope stays room chat.
-    const frame = JSON.stringify(activeConv ? { type: 'dm', to: activeConv.peer, text } : { type: 'chat', text });
+    const env = activeConv ? { type: 'dm', to: activeConv.peer, text } : { type: 'chat', text };
+    if (replyTarget && replyTarget.pane === current()) env.reply_to = replyTarget.id;
+    const frame = JSON.stringify(env);
     // The server limit applies to the whole encoded frame. The echo renders the message.
     if (new TextEncoder().encode(frame).length > MAX_MESSAGE_BYTES) {
       addSystem(current(), 'El mensaje es demasiado largo.');
       return false;
     }
     room.ws.send(frame);
+    cancelReply();
     typingPane = null; // receivers clear us on this message, so the next edit signals again
     return true;
   }
@@ -933,7 +1045,12 @@
   panels.emoji.btn.addEventListener('click', () => togglePanel('emoji'));
   panels.gif.btn.addEventListener('click', () => togglePanel('gif'));
   panels.users.btn.addEventListener('click', () => togglePanel('users'));
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanels(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (Object.values(panels).some((p) => !p.panel.hidden)) closePanels();
+    else if (replyTarget) cancelReply();
+  });
+  $('reply-cancel').addEventListener('click', () => { cancelReply(); draft.focus(); });
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.popover, .tool')) closePanels();
   });
