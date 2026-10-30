@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -10,7 +11,6 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -550,23 +550,77 @@ func TestWebSocketAvatarWiring(t *testing.T) {
 	}
 }
 
-// The join form must offer the avatar field (mirrors maxAvatarBytes) and the profile card its image.
-func TestIndexHasAvatarField(t *testing.T) {
+// The join form no longer asks for a picture (CHAT-29): it is edited in the profile editor, and the
+// old localStorage entry is removed on start. The profile card keeps its image.
+func TestIndexHasNoAvatarField(t *testing.T) {
 	html := string(indexHTML)
-	nick := strings.Index(html, `id="nick"`)
-	avatar := strings.Index(html, `id="avatar-url"`)
-	if nick < 0 || avatar < 0 || nick >= avatar {
-		t.Fatalf(`id="avatar-url" must come after id="nick" (nick=%d avatar=%d)`, nick, avatar)
-	}
-	start := strings.LastIndex(html[:avatar], "<")
-	tag := html[start : avatar+strings.Index(html[avatar:], ">")]
-	for _, want := range []string{`type="url"`, `maxlength="` + strconv.Itoa(maxAvatarBytes) + `"`} {
-		if !strings.Contains(tag, want) {
-			t.Errorf("#avatar-url start tag missing %s: %s", want, tag)
-		}
+	if strings.Contains(html, `id="avatar-url"`) {
+		t.Error(`index.html still has id="avatar-url"`)
 	}
 	if !strings.Contains(html, `id="profile-avatar"`) {
 		t.Error(`index.html missing id="profile-avatar"`)
+	}
+	js := string(appJS)
+	if !strings.Contains(js, "removeItem(LEGACY_AVATAR_KEY)") {
+		t.Error("app.js must remove the legacy avatar key on start")
+	}
+	if strings.Contains(js, "setItem(LEGACY_AVATAR_KEY") {
+		t.Error("app.js must not store the avatar in localStorage")
+	}
+}
+
+// startTagOf returns the start tag of the element with the given id.
+func startTagOf(t *testing.T, html, id string) string {
+	t.Helper()
+	at := strings.Index(html, `id="`+id+`"`)
+	if at < 0 {
+		t.Fatalf(`index.html missing id="%s"`, id)
+	}
+	start := strings.LastIndex(html[:at], "<")
+	return html[start : at+strings.Index(html[at:], ">")]
+}
+
+// CHAT-39: the profile editor lives in the composer bar; the bio limit mirrors maxBioRunes.
+func TestIndexHasProfileEditor(t *testing.T) {
+	html := string(indexHTML)
+	for _, id := range []string{"profile-btn", "profile-panel", "profile-preview", "profile-pick", "profile-clear",
+		"profile-bio-input", "profile-bio-count", "profile-save", "gif-paste", "profile-bio", "profile-card-edit"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf(`index.html missing id="%s"`, id)
+		}
+	}
+	if tag := startTagOf(t, html, "profile-bio-input"); !strings.Contains(tag, `maxlength="160"`) {
+		t.Errorf("#profile-bio-input start tag missing maxlength=160: %s", tag)
+	}
+	bar := strings.Index(html, `class="composer-bar"`)
+	panel := strings.Index(html, `id="profile-panel"`)
+	if bar < 0 || panel < bar {
+		t.Errorf("#profile-panel must sit inside .composer-bar (bar=%d panel=%d)", bar, panel)
+	}
+	js := string(appJS)
+	for _, want := range []string{"type: 'profile'", "const MAX_BIO = 160", "&bio="} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+}
+
+// CHAT-40: one page-level user popup, opened from buttons with class user-trigger.
+func TestIndexHasUserPopup(t *testing.T) {
+	html := string(indexHTML)
+	for _, id := range []string{"user-popup", "user-popup-avatar", "user-popup-nick", "user-popup-bio", "user-popup-dm", "user-popup-edit"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf(`index.html missing id="%s"`, id)
+		}
+	}
+	if tag := startTagOf(t, html, "user-popup"); !strings.Contains(tag, `role="dialog"`) {
+		t.Errorf("#user-popup start tag missing role=dialog: %s", tag)
+	}
+	js := string(appJS)
+	for _, want := range []string{"'Sin descripción'", "user-trigger"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
 	}
 }
 
@@ -834,5 +888,20 @@ func TestPlaylistIDMirroredInJS(t *testing.T) {
 	want := "const YT_LIST_ID = /" + playlistID.String() + "/;"
 	if !strings.Contains(string(appJS), want) {
 		t.Errorf("app.js does not contain %q", want)
+	}
+}
+
+// The request log never carries the query string: /ws puts the nickname, avatar and bio there.
+func TestRequestLogOmitsQuery(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var buf bytes.Buffer
+	r := newRouterLogging(newChatServer(nil), nil, nil, &buf)
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ws?nickname=x&bio=secreto", nil))
+	out := buf.String()
+	if !strings.Contains(out, `"/ws"`) {
+		t.Fatalf("log = %q, want the /ws path", out)
+	}
+	if strings.Contains(out, "secreto") || strings.Contains(out, "nickname") {
+		t.Fatalf("log leaks the query string: %q", out)
 	}
 }

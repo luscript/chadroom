@@ -4,6 +4,8 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -145,7 +147,21 @@ func serveRooms(c *gin.Context) {
 // /gifs and /playlist are registered only when gifs / playlists are non-nil, so without their key
 // they are a plain 404.
 func newRouter(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport) *gin.Engine {
-	r := gin.Default()
+	return newRouterLogging(chatSrv, gifs, playlists, gin.DefaultWriter)
+}
+
+// logFormatter is gin's default log line but without the query string: /ws carries the
+// nickname, avatar and bio there, and none of it belongs in the logs.
+func logFormatter(p gin.LogFormatterParams) string {
+	path, _, _ := strings.Cut(p.Path, "?")
+	return fmt.Sprintf("[GIN] %s | %3d | %13v | %15s | %-7s %#v\n%s",
+		p.TimeStamp.Format("2006/01/02 - 15:04:05"), p.StatusCode, p.Latency, p.ClientIP, p.Method, path, p.ErrorMessage)
+}
+
+// newRouterLogging is newRouter writing its request log to logw.
+func newRouterLogging(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport, logw io.Writer) *gin.Engine {
+	r := gin.New()
+	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{Output: logw, Formatter: logFormatter}), gin.Recovery())
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("set trusted proxies: %v", err)
 	}

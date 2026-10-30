@@ -58,6 +58,22 @@ El sonido se genera en la página con la Web Audio API (sin archivos ni cambios 
 navegador solo deja reproducir audio después de un gesto del usuario, así que se habilita al
 entrar al chat.
 
+### ✦ Perfil
+
+Cada persona tiene un perfil con una foto y una descripción corta (hasta 160 caracteres).
+Es efímero: vive solo en la memoria de la página y del servidor, no se guarda en ningún lado, y
+se pierde al salir (**Salir**) o al cerrar la pestaña. El formulario de entrada solo pide el
+apodo.
+
+- **Mi perfil** (botón del header) abre el editor sobre el compositor: **Elegir GIF** abre el
+  selector de GIFs para usar uno como foto (no se envía ningún mensaje), **Quitar foto** la saca,
+  y **Guardar** publica los cambios en todas las salas en las que estás. Si el servidor no tiene
+  `GIPHY_API_KEY` no hay selector y no se puede cambiar la foto.
+- Al tocar la foto o el nombre de alguien (en un mensaje o en la lista de conectados) se abre su
+  tarjeta con foto y descripción, y un botón **Mensaje privado** que abre la conversación. En tu
+  propia tarjeta el botón es **Editar perfil**.
+- Los mensajes ya enviados conservan la foto con la que salieron; los nuevos usan la actual.
+
 ### ✦ Configuración
 
 | Variable          | Default | Descripción |
@@ -81,7 +97,7 @@ todas las conexiones.
 | `GET /playlist?list=<id>` | Videos de una playlist de YouTube (solo con `YOUTUBE_API_KEY`). `200` `{"videos":["dQw4w9WgXcQ",…]}` (hasta 50 ids, solo la primera página, sin los privados, no procesados o no embebibles), `400` si `list` falta o es inválido, `404` `{"error":"not_found"}` si la playlist no existe o es privada (y `404` sin JSON si no hay clave), `502` `{"error":"unavailable"}` si YouTube falla o tarda más de 5 s. Resultados en caché 10 min. |
 | `GET /rooms` | Lista de salas: `{"rooms":["general","juegos","musica"]}` (`application/json`, `nosniff`, `Cache-Control: no-cache`). |
 | `GET /gifs?q=<texto>` | Búsqueda de GIFs en Giphy (solo con `GIPHY_API_KEY`). Sin `q` devuelve los trending. `200` `{"gifs":[{"url":"…","preview":"…"}]}` (hasta 24, solo URLs `https` de la lista permitida, sin query), `400` `{"error":"query_too_long"}` si `q` pasa de 50 caracteres, `404` si no hay clave, `502` `{"error":"unavailable"}` si Giphy falla o tarda más de 5 s. Resultados en caché 10 min. |
-| `GET /ws?nickname=<nombre>&room=<sala>&avatar=<url>` | Upgrade a WebSocket a una sala. `avatar` es opcional (foto de perfil, ver abajo). Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
+| `GET /ws?nickname=<nombre>&room=<sala>&avatar=<url>&bio=<texto>` | Upgrade a WebSocket a una sala. `avatar` y `bio` son opcionales (foto y descripción del perfil, ver abajo). Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
 
 <details>
 <summary><b>♡ Protocolo WebSocket completo</b> (salas, entrada, salida, mensajes privados, nicknames)</summary>
@@ -106,8 +122,9 @@ Cada frame se interpreta así:
 | `{"type":"dm","to":"bob","text":"dale","reply_to":7}` | Respuesta a un mensaje privado con `id` 7 (ver Respuestas). |
 | `{"type":"typing"}` | "Escribiendo…" para toda la sala (ver abajo). |
 | `{"type":"typing","to":"bob"}` | "Escribiendo…" solo para `bob` (ver abajo). |
+| `{"type":"profile","avatar":"https://i.imgur.com/a.png","bio":"hola"}` | Reemplaza tu foto y tu descripción (ver Foto de perfil y descripción). Nunca es chat. |
 | `{"type":"music","action":"add","video":"dQw4w9WgXcQ"}`, `add_many`, `remove`, `skip`, `ended`, `play`, `pause` o `{"type":"music","action":"seek","pos":60000}` | Control del reproductor compartido (ver Música compartida). Nunca es chat. |
-| Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido (`typing` y `music` ya no cuentan), `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
+| Cualquier otra cosa (texto plano, JSON que no es un sobre, `type` desconocido (`typing`, `music` y `profile` ya no cuentan), `chat` con `text` que no es string) | Mensaje a la sala con el frame completo como texto. |
 
 Los campos extra se ignoran; `from` nunca se toma del cliente. Un texto en blanco se descarta sin
 respuesta, también en un `dm`.
@@ -127,17 +144,40 @@ respuesta, también en un `dm`.
 | `dm`      | Mensaje privado de `from` para `to`: solo lo reciben ambos (ver Mensajes privados). | el mensaje |
 | `dm_error`| Un `dm` no se pudo entregar; solo lo recibe el remitente (ver Mensajes privados). | no lleva `text`; trae `to` y `reason` |
 | `typing`  | `from` está escribiendo: lo reciben todos menos `from`, o solo `to` si fue privado (ver Escribiendo…). | no lleva `text`; `to` solo en el privado |
+| `profile` | `from` cambió su perfil: lo reciben todos, incluido `from` (ver Foto de perfil y descripción). | no lleva `text`; trae `avatar` y `bio` solo si no están vacíos |
 | `music`   | Estado del reproductor compartido de `musica`: lo reciben todos, incluido quien lo cambió (ver Música compartida). | no lleva `from` ni `text`; trae `video`, `playing`, `pos`, `by`, `seq` y `queue` |
 
 `ts` es el momento del evento en Unix milisegundos.
 
-**Foto de perfil:** `avatar` es opcional y se fija al conectarse; nunca se toma de un frame de
-entrada. Debe ser una URL `https` de un host de imágenes permitido (Giphy, Tenor o Imgur, sin
-puerto ni usuario ni `#`), terminar en `.gif`, `.webp`, `.png`, `.jpg` o `.jpeg` y pesar hasta
-512 bytes. Si no cumple, se ignora en silencio: la conexión se acepta igual, sin foto. Los
-sobres `welcome`, `join` y `chat` (y sus entradas en `history`) llevan `"avatar":"<url>"` solo
-cuando quien los origina tiene foto; sin foto el frame no cambia. `leave`, `dm`, `dm_error` y
-`typing` nunca lo llevan.
+**Foto de perfil y descripción:** `avatar` y `bio` son opcionales y se fijan al conectarse
+(`?avatar=`, `?bio=`) o después con un frame `profile`. El `avatar` debe ser una URL `https` de un
+host de imágenes permitido (Giphy, Tenor o Imgur, sin puerto ni usuario ni `#`), terminar en
+`.gif`, `.webp`, `.png`, `.jpg` o `.jpeg` y pesar hasta 512 bytes. Si no cumple al conectarse, se
+ignora en silencio: la conexión se acepta igual, sin foto. La `bio` se limpia como un nickname
+(sin caracteres de control ni de dirección, saltos de línea incluidos, sin espacios en los
+bordes) y se corta a 160 caracteres; vacía significa sin descripción.
+
+- Los sobres `welcome` y `join` llevan `"avatar":"<url>"` y `"bio":"<texto>"` solo cuando quien
+  entra los tiene; sin ellos el frame no cambia. `chat` (y sus entradas en `history`) lleva solo
+  `avatar`, con el valor que tenía cuando se envió; `bio` nunca. `leave`, `dm`, `dm_error` y
+  `typing` no llevan ninguno de los dos.
+- `{"type":"profile","avatar":"…","bio":"…"}` **reemplaza el perfil completo**: un campo ausente
+  (o `""`) lo borra. Cada campo debe ser un string o faltar; cualquier otro valor (`null`, número,
+  arreglo, objeto) descarta el frame entero, sin respuesta y sin caer a chat. Si el `avatar` no
+  vacío no pasa la misma validación de la conexión, también se descarta todo el frame y el perfil
+  queda como estaba. `from`, `text` y `ts` del frame se ignoran.
+- Se acepta como máximo un `profile` por segundo por conexión; el resto se descarta sin cerrar
+  nada (los frames inválidos no gastan cupo).
+- El servidor responde difundiendo a toda la sala, incluido quien lo envió, un frame que no se
+  guarda en el `history`:
+
+```json
+{"type":"profile","from":"Alice","ts":1792684800123,"avatar":"https://i.imgur.com/a.png","bio":"hola"}
+```
+
+  `avatar` y `bio` se omiten cuando están vacíos (un perfil borrado llega solo con `type`, `from`
+  y `ts`). Los clientes ya conectados reemplazan lo que sabían de `from`; los mensajes ya
+  mostrados no cambian.
 
 **Respuestas:** el servidor numera con `id` cada `chat` y cada `dm`, con una sola secuencia por
 sala que empieza en 1 (un frame descartado no gasta número). `welcome`, `join` y `leave` no lo
@@ -240,7 +280,7 @@ Además hay dos frames privados que solo recibe quien se conecta y que no llevan
 
 - `users`: los nicknames conectados (incluido el propio), ordenados sin distinguir mayúsculas.
   Si alguien tiene foto suma `"avatars":{"<nickname>":"<url>"}` solo con quienes la tienen; sin
-  fotos el campo no aparece.
+  fotos el campo no aparece. Igual con `"bios":{"<nickname>":"<texto>"}` para las descripciones.
 - `history`: los últimos 50 mensajes `chat` (con su `id` y `reply`), del más viejo al más nuevo (`[]` si no hay). Vive solo
   en memoria: se pierde al reiniciar el servidor.
 
@@ -296,7 +336,7 @@ internal/chat/
   server.go          Server: elige la sala (`room`), hace el upgrade y aplica la política de orígenes
   room.go            Room: hub que registra clientes y difunde mensajes (uno por sala)
   client.go          Client: readPump / writePump por conexión
-  message.go         Mensajes JSON (type, from, text, ts), `dm`/`dm_error`/`typing`/`music` y la clasificación de la entrada
+  message.go         Mensajes JSON (type, from, text, ts), `dm`/`dm_error`/`typing`/`music`/`profile` y la clasificación de la entrada
   music.go           Reproductor compartido de `musica`: estado, posición y validación de los controles
   nickname.go        Normalización y unicidad de apodos
 ```

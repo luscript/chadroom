@@ -16,6 +16,7 @@ const (
 	defaultMaxMessageSize = 4096
 	sendBufferSize        = 256
 	maxNicknameRunes      = 32
+	maxBioRunes           = 160
 )
 
 // Room manages clients and messages.
@@ -27,11 +28,15 @@ type Room struct {
 	taken      map[string]struct{} // foldKey(nickname) of every registered client
 	history    []message           // last historySize chat messages, oldest first
 	dropped    []*Client           // slow clients removed by a fan-out, not yet announced
-	broadcast  chan inbound        // every inbound kind (chat, direct and typing), so a client's frames stay ordered
+	broadcast  chan inbound        // every inbound kind (chat, direct, typing and profile), so a client's frames stay ordered
 	register   chan *Client
 	unregister chan *Client
 	done       chan struct{} // closed by Run when it exits
 	player     *player       // nil: this room has no shared player (CHAT-30); set only by NewMusicRoom
+
+	// validAvatar is set by NewServer before the room is served and read-only after; Run never
+	// reads it. nil: every avatar is dropped (CHAT-28).
+	validAvatar func(string) bool
 
 	// Run-only (CHAT-35). One id sequence per room, shared by chat and dm frames.
 	nextID     int64               // last id assigned; 0 before the first message
@@ -61,6 +66,12 @@ func NewRoom(id string) *Room {
 		pingPeriod:     defaultPingPeriod,
 		maxMessageSize: defaultMaxMessageSize,
 	}
+}
+
+// allowedAvatar reports whether s is a non-empty avatar this room may show (CHAT-28).
+// Read-only: safe from any goroutine once the room is served.
+func (cr *Room) allowedAvatar(s string) bool {
+	return s != "" && cr.validAvatar != nil && cr.validAvatar(s)
 }
 
 // NewMusicRoom is NewRoom plus a shared player (CHAT-30).
@@ -104,8 +115,10 @@ func (cr *Room) admit(c *Client) {
 	now := time.Now()
 	ts := now.UnixMilli()
 	private := [][]byte{
-		encode(message{Type: typeWelcome, From: name, Avatar: c.avatar, TS: ts}),
-		encode(usersFrame{Type: typeUsers, Users: cr.userNames(), Avatars: cr.avatars(), TS: ts}),
+		encode(message{Type: typeWelcome, From: name, Avatar: c.avatar, Bio: c.bio, TS: ts}),
+		encode(usersFrame{Type: typeUsers, Users: cr.userNames(),
+			Avatars: cr.memberValues(func(m *Client) string { return m.avatar }),
+			Bios:    cr.memberValues(func(m *Client) string { return m.bio }), TS: ts}),
 		encode(historyFrame{typeHistory, cr.history, ts}),
 	}
 	if cr.player != nil && cr.player.video != "" {
@@ -116,7 +129,7 @@ func (cr *Room) admit(c *Client) {
 			return
 		}
 	}
-	if join := encode(message{Type: typeJoin, From: name, Avatar: c.avatar, TS: ts}); join != nil {
+	if join := encode(message{Type: typeJoin, From: name, Avatar: c.avatar, Bio: c.bio, TS: ts}); join != nil {
 		cr.publish(join)
 	}
 }
@@ -132,16 +145,16 @@ func (cr *Room) userNames() []string {
 	return names
 }
 
-// avatars maps members' nicknames to their avatars, only for members that have one.
-// nil when nobody has one, so the users frame omits the field (CHAT-28). Run-only.
-func (cr *Room) avatars() map[string]string {
+// memberValues maps members' nicknames to get(member), only for members whose value is
+// non-empty. nil when nobody has one, so the users frame omits the field (CHAT-28, CHAT-37). Run-only.
+func (cr *Room) memberValues(get func(*Client) string) map[string]string {
 	var m map[string]string
 	for c := range cr.clients {
-		if c.avatar != "" {
+		if v := get(c); v != "" {
 			if m == nil {
 				m = make(map[string]string)
 			}
-			m[c.nickname] = c.avatar
+			m[c.nickname] = v
 		}
 	}
 	return m
@@ -226,6 +239,8 @@ func (cr *Room) dispatch(in inbound) {
 		cr.typing(in)
 	case inboundMusic:
 		cr.music(in)
+	case inboundProfile:
+		cr.profile(in)
 	default:
 		cr.relay(in)
 	}
@@ -293,6 +308,16 @@ func (cr *Room) music(in inbound) {
 	}
 	if f := encode(cr.player.frame(now)); f != nil {
 		cr.publish(f)
+	}
+}
+
+// profile replaces the sender's whole profile and announces it to the room, sender
+// included (CHAT-38). Must-have delivery; never stored. Run-only.
+func (cr *Room) profile(in inbound) {
+	f := profileFrame{Type: typeProfile, From: in.from.nickname, TS: time.Now().UnixMilli(), Avatar: in.avatar, Bio: in.bio}
+	if b := encode(f); b != nil { // encode first: state changes only if the update can be announced
+		in.from.avatar, in.from.bio = in.avatar, in.bio
+		cr.publish(b)
 	}
 }
 
@@ -401,8 +426,8 @@ func (cr *Room) announceDropped() {
 
 // serveConn registers a client for conn and starts its pumps. The caller has
 // already upgraded the connection and validated the room.
-func (cr *Room) serveConn(conn *websocket.Conn, nickname, avatar string) {
-	client := &Client{conn: conn, send: make(chan []byte, sendBufferSize), registered: make(chan struct{}), nickname: nickname, avatar: avatar}
+func (cr *Room) serveConn(conn *websocket.Conn, nickname, avatar, bio string) {
+	client := &Client{conn: conn, send: make(chan []byte, sendBufferSize), registered: make(chan struct{}), nickname: nickname, avatar: avatar, bio: bio}
 	select {
 	case cr.register <- client:
 	case <-cr.done:

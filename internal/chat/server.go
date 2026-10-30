@@ -18,14 +18,15 @@ type Server struct {
 	rooms          map[string]*Room
 	defaultRoom    *Room // first room passed to NewServer; used when ?room is missing or empty
 	allowedOrigins map[string]struct{}
-	validAvatar    func(string) bool // nil: every ?avatar is dropped
 	upgrader       websocket.Upgrader
 }
 
 // NewServer builds a Server over rooms. allowedOrigins lists extra origins
 // (e.g. "https://example.com") accepted besides same-host requests.
-// validAvatar reports whether a requested avatar URL may be shown to others; nil
-// disables avatars (CHAT-28). The chat package treats avatars as opaque strings.
+// validAvatar reports whether an avatar URL (?avatar= or a profile frame) may be shown to
+// others; nil disables avatars (CHAT-28). The chat package treats avatars as opaque strings.
+// NewServer sets it on each room, so a room must belong to one Server and must not be
+// running yet.
 // It panics if rooms is empty or an id is empty or repeated (programmer error).
 func NewServer(allowedOrigins []string, validAvatar func(string) bool, rooms ...*Room) *Server {
 	if len(rooms) == 0 {
@@ -35,7 +36,6 @@ func NewServer(allowedOrigins []string, validAvatar func(string) bool, rooms ...
 		rooms:          make(map[string]*Room, len(rooms)),
 		defaultRoom:    rooms[0],
 		allowedOrigins: make(map[string]struct{}, len(allowedOrigins)),
-		validAvatar:    validAvatar,
 	}
 	for _, r := range rooms {
 		if r.id == "" {
@@ -45,6 +45,7 @@ func NewServer(allowedOrigins []string, validAvatar func(string) bool, rooms ...
 			panic("chat: duplicate room id " + r.id)
 		}
 		s.rooms[r.id] = r
+		r.validAvatar = validAvatar
 	}
 	for _, o := range allowedOrigins {
 		s.allowedOrigins[o] = struct{}{}
@@ -85,10 +86,11 @@ func (s *Server) HandleWebSocket(c *gin.Context) {
 		return
 	}
 	avatar := c.Query("avatar")
-	if avatar != "" && (s.validAvatar == nil || !s.validAvatar(avatar)) {
+	if !room.allowedAvatar(avatar) {
 		avatar = "" // invalid or disabled: join without a picture, never reject (CHAT-28)
 	}
-	room.serveConn(conn, normalizeNickname(c.Query("nickname")), avatar)
+	bio := cleanText(c.Query("bio"), maxBioRunes) // CHAT-37: blank or absent means no bio, never reject
+	room.serveConn(conn, normalizeNickname(c.Query("nickname")), avatar, bio)
 }
 
 // checkOrigin accepts same-host origins, requests without Origin (non-browser
