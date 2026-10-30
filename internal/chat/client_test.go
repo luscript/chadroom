@@ -901,6 +901,23 @@ func TestParseInbound(t *testing.T) {
 		{"music add_many url instead of id", `{"type":"music","action":"add_many","videos":["https://youtu.be/dQw4w9WgXcQ"]}`, inbound{}, true},
 		{"music key case sensitive", `{"TYPE":"music","action":"play"}`, inbound{text: `{"TYPE":"music","action":"play"}`}, false},
 		{"music value case sensitive", `{"type":"MUSIC","action":"play"}`, inbound{text: `{"type":"MUSIC","action":"play"}`}, false},
+		{"profile both", `{"type":"profile","avatar":"https://x/a.png","bio":"hola"}`, inbound{kind: inboundProfile, avatar: "https://x/a.png", bio: "hola"}, false},
+		{"profile empty clears", `{"type":"profile"}`, inbound{kind: inboundProfile}, false},
+		{"profile only bio", `{"type":"profile","bio":"hola"}`, inbound{kind: inboundProfile, bio: "hola"}, false},
+		{"profile only avatar", `{"type":"profile","avatar":"u"}`, inbound{kind: inboundProfile, avatar: "u"}, false},
+		{"profile empty strings", `{"type":"profile","avatar":"","bio":""}`, inbound{kind: inboundProfile}, false},
+		{"profile bio number", `{"type":"profile","bio":5}`, inbound{}, true},
+		{"profile bio null", `{"type":"profile","bio":null}`, inbound{}, true},
+		{"profile avatar null", `{"type":"profile","avatar":null}`, inbound{}, true},
+		{"profile avatar array", `{"type":"profile","avatar":[]}`, inbound{}, true},
+		{"profile avatar object", `{"type":"profile","avatar":{}}`, inbound{}, true},
+		{"profile bad bio with valid avatar", `{"type":"profile","avatar":"u","bio":false}`, inbound{}, true},
+		{"profile bio cleaned", `{"type":"profile","bio":"  a\u202eb\nc\td  "}`, inbound{kind: inboundProfile, bio: "abcd"}, false},
+		{"profile bio truncated", `{"type":"profile","bio":"` + strings.Repeat("x", 200) + `"}`, inbound{kind: inboundProfile, bio: strings.Repeat("x", 160)}, false},
+		{"profile bio only control", `{"type":"profile","bio":"\n\t"}`, inbound{kind: inboundProfile}, false},
+		{"profile forged fields ignored", `{"type":"profile","from":"C","text":"hi","ts":1,"bio":"b"}`, inbound{kind: inboundProfile, bio: "b"}, false},
+		{"profile key case sensitive", `{"TYPE":"profile","bio":"b"}`, inbound{text: `{"TYPE":"profile","bio":"b"}`}, false},
+		{"chat avatar and bio ignored", `{"type":"chat","text":"hi","avatar":"u","bio":"b"}`, inbound{text: "hi"}, false},
 		{"empty frame", ``, inbound{}, true},
 		{"spaces frame", `  `, inbound{}, true},
 	}
@@ -1324,5 +1341,35 @@ func TestMusicEndedNotThrottledOverWebSocket(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+// CHAT-37: cleanText is the nickname rule with a caller-chosen limit.
+func TestCleanText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"plain", "hola", 32, "hola"},
+		{"trim", "  hola  ", 32, "hola"},
+		{"control and newline", "a\nb\tc\x00d", 32, "abcd"},
+		{"bidi", "a\u202eb\u2066c", 32, "abc"},
+		{"invalid utf8", "a\xffb", 32, "a\ufffdb"},
+		{"only controls", "\n\t", 32, ""},
+		{"nickname limit", strings.Repeat("ñ", 40), 32, strings.Repeat("ñ", 32)},
+		{"bio limit multibyte", strings.Repeat("ñ", 200), maxBioRunes, strings.Repeat("ñ", 160)},
+		{"cut trims trailing space", strings.Repeat("x", 159) + " yyy", maxBioRunes, strings.Repeat("x", 159)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cleanText(tt.in, tt.max); got != tt.want {
+				t.Fatalf("cleanText(%q, %d) = %q, want %q", tt.in, tt.max, got, tt.want)
+			}
+		})
+	}
+	if got := cleanNickname(strings.Repeat("ñ", 40)); got != strings.Repeat("ñ", maxNicknameRunes) {
+		t.Fatalf("cleanNickname = %q", got)
 	}
 }

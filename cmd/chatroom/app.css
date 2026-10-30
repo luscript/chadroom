@@ -281,3 +281,55 @@ body{height:auto;min-height:100vh;background-color:#f9dfeb;background-image:line
 .reply-preview-body{flex:1;min-width:0}
 .reply-preview-author{display:block;font-weight:bold;color:var(--color-accent-700)}
 .reply-preview-text{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* Profiles (CHAT-39, CHAT-40) */
+.user-trigger { border: 0; background: none; padding: 0; margin: 0; font: inherit; color: inherit; text-align: inherit; cursor: pointer; }
+.user-trigger:focus-visible { outline: 2px solid var(--color-accent-600); outline-offset: 2px; }
+.users-list .users-who { display: flex; align-items: center; gap: var(--space-3); flex: 1; min-width: 0; }
+.avatar-slot .user-trigger { display: block; }
+.users-list .users-who span { overflow-wrap: anywhere; }
+/* Profile editor (and the GIF picker while choosing a picture) float centered on screen,
+   like the user popup, instead of hanging off the composer. */
+.popover.profile-editor, .popover.gif.picking {
+  position: fixed; left: 50%; top: 50%; bottom: auto; transform: translate(-50%, -50%); z-index: 20;
+  max-height: calc(100dvh - 32px); overflow-y: auto; box-sizing: border-box;
+  border: 1px solid var(--color-divider);
+}
+.profile-editor { width: min(320px, calc(100vw - 32px)); }
+.popover.gif.picking { width: min(380px, calc(100vw - 32px)); }
+.profile-editor-title { font-weight: bold; color: var(--color-accent); }
+.profile-editor-pic { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
+.profile-preview .avatar { width: 56px; height: 56px; font-size: 24px; }
+.profile-editor textarea { resize: none; width: 100%; height: auto; box-sizing: border-box; }
+.profile-count { font-size: 12px; text-align: right; }
+.profile-error { margin: 0; font-size: 13px; color: var(--color-accent-300); }
+.profile-bio { overflow-wrap: anywhere; }
+/* Own row: inline, it shared a line with (and overlapped) the "disponible" tag. */
+.profile-card .tool { display: block; margin: 0 auto var(--space-3); padding: 4px 8px; font-size: 11px; }
+.profile-card .mood { display: inline-block; }
+/* The edit button and bio made the card taller; tighten the aside so the stamp stays visible. */
+.profile-card p { margin: 4px 0 8px; }
+.scrapbook .sticky { margin: 18px 0 14px; }
+.scrapbook .sticky p { font-size: 15px; }
+.user-popup {
+  position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 20;
+  width: min(300px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto;
+  box-sizing: border-box; padding: var(--space-4); border: 1px solid var(--color-divider);
+  border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column; align-items: center; gap: var(--space-3); text-align: center;
+}
+.user-popup-avatar .avatar { width: 72px; height: 72px; font-size: 30px; }
+.user-popup-nick { overflow-wrap: anywhere; }
+.user-popup-bio { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.user-popup-bio.empty { font-style: italic; color: var(--color-neutral-500); }
+@media (max-width: 800px) {
+  .tool-profile { font-size: 12px; white-space: nowrap; }
+}
+
+/* The stamp sits at the bottom of the aside, away from the sticky note. */
+@media (min-width: 801px) {
+  .scrapbook { display: flex; flex-direction: column; }
+  .scrapbook .mini-stamp { margin-top: auto; }
+}
+.scrapbook .sticky { margin-bottom: 28px; }
+.note-text { overflow-wrap: anywhere; }

@@ -13,6 +13,9 @@ import (
 // typingInterval is the minimum time between two typing signals forwarded from one connection (CHAT-26).
 const typingInterval = time.Second
 
+// profileInterval is the minimum time between two profile updates from one connection (CHAT-38).
+const profileInterval = time.Second
+
 // rateGate admits at most one event per interval. It belongs to a single readPump
 // goroutine, so it needs no lock. A discarded event does not move the window.
 type rateGate struct {
@@ -36,7 +39,8 @@ type Client struct {
 	send       chan []byte
 	registered chan struct{} // closed by Run once nickname is final
 	nickname   string        // requested until registered is closed, final after
-	avatar     string        // validated URL or ""; set before register and never changed (CHAT-28)
+	avatar     string        // allowed URL or ""; set before register, then written only by Room.Run (CHAT-28, CHAT-38)
+	bio        string        // cleanText(..., maxBioRunes) or ""; same ownership as avatar (CHAT-37)
 }
 
 // logError logs abnormal connection errors with the room and nickname, skipping the
@@ -99,6 +103,7 @@ func (c *Client) readPump(cr *Room) {
 		return c.conn.SetReadDeadline(time.Now().Add(cr.pongWait))
 	})
 	typing := rateGate{interval: typingInterval}
+	profile := rateGate{interval: profileInterval}
 	music := rateGate{interval: musicInterval}
 	ended := rateGate{interval: musicInterval} // CHAT-30: its own budget, so a click can't starve an end report
 	for {
@@ -131,6 +136,14 @@ func (c *Client) readPump(cr *Room) {
 			}
 			if !gate.allow(time.Now()) {
 				continue // CHAT-30: over the per-connection budget; connection stays open
+			}
+		}
+		if in.kind == inboundProfile {
+			if in.avatar != "" && !cr.allowedAvatar(in.avatar) {
+				continue // CHAT-38: an invalid picture discards the whole update, no reply
+			}
+			if !profile.allow(time.Now()) {
+				continue // CHAT-38: over the per-connection budget; connection stays open
 			}
 		}
 		in.from = c

@@ -404,3 +404,352 @@ func TestReplyFrameLargerThanLimit(t *testing.T) {
 		t.Fatalf("reply = %+v", m)
 	}
 }
+
+// dialProfile connects with a same-host Origin and the given ?avatar and ?bio (each
+// omitted when empty), returning without reading.
+func dialProfile(t *testing.T, srv *httptest.Server, nick, avatar, bio string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?nickname=" + url.QueryEscape(nick)
+	if avatar != "" {
+		wsURL += "&avatar=" + url.QueryEscape(avatar)
+	}
+	if bio != "" {
+		wsURL += "&bio=" + url.QueryEscape(bio)
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{srv.URL}})
+	if err != nil {
+		t.Fatalf("dial %s with profile: %v", nick, err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+// joinProfile is dialProfile plus the welcome, users and history frames, which it
+// returns raw so profile fields can be inspected (decode would reject a missing text).
+func joinProfile(t *testing.T, srv *httptest.Server, nick, avatar, bio string) (conn *websocket.Conn, welcome, users []byte) {
+	t.Helper()
+	conn = dialProfile(t, srv, nick, avatar, bio)
+	welcome = readRaw(t, conn)
+	users = readRaw(t, conn)
+	decodeHistory(t, readRaw(t, conn))
+	return conn, welcome, users
+}
+
+// frameType returns the "type" of a raw frame.
+func frameType(t *testing.T, raw []byte) string {
+	t.Helper()
+	var f struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("invalid JSON %q: %v", raw, err)
+	}
+	return f.Type
+}
+
+// readType skips frames until one of type typ arrives and returns it raw.
+func readType(t *testing.T, conn *websocket.Conn, typ string) []byte {
+	t.Helper()
+	for {
+		if raw := readRaw(t, conn); frameType(t, raw) == typ {
+			return raw
+		}
+	}
+}
+
+// readChatNoProfile reads until a chat frame, failing if a profile frame comes first.
+func readChatNoProfile(t *testing.T, conn *websocket.Conn) message {
+	t.Helper()
+	for {
+		raw := readRaw(t, conn)
+		switch frameType(t, raw) {
+		case typeProfile:
+			t.Fatalf("unexpected profile frame %s", raw)
+		case typeChat:
+			return decode(t, raw)
+		}
+	}
+}
+
+const (
+	profileGood  = "https://i.imgur.com/a.png"
+	profileGood2 = "https://i.imgur.com/b.png"
+)
+
+// profileServer starts one room whose validator allows only profileGood and profileGood2.
+func profileServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv, _ := startAvatarRooms(t, func(s string) bool { return s == profileGood || s == profileGood2 }, nil, NewRoom("general"))
+	return srv
+}
+
+// CHAT-37: ?bio is announced on welcome and join, cleaned and cut; a blank one means no bio.
+func TestBioQueryParam(t *testing.T) {
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", "", "")
+
+	_, welcome, _ := joinProfile(t, srv, "B", "", "  hi\n‮ there  ")
+	f := exactFields(t, welcome, "type", "from", "text", "ts", "bio")
+	if string(f["bio"]) != `"hi there"` {
+		t.Fatalf("welcome bio = %s, want cleaned", f["bio"])
+	}
+	readType(t, a, typeJoin) // A's own join
+	join := readType(t, a, typeJoin)
+	if string(exactFields(t, join, "type", "from", "text", "ts", "bio")["bio"]) != `"hi there"` {
+		t.Fatalf("join = %s", join)
+	}
+
+	long := strings.Repeat("ñ", 200)
+	_, welcome, _ = joinProfile(t, srv, "C", "", long)
+	var w message
+	if err := json.Unmarshal(welcome, &w); err != nil || w.Bio != strings.Repeat("ñ", maxBioRunes) {
+		t.Fatalf("welcome bio = %d runes (err %v), want %d", len([]rune(w.Bio)), err, maxBioRunes)
+	}
+
+	_, welcome, _ = joinProfile(t, srv, "D", "", "   ")
+	decode(t, welcome) // blank bio: exactly four fields
+}
+
+// CHAT-37: a nickname reused after its owner left inherits no bio.
+func TestReusedNicknameHasNoStaleBio(t *testing.T) {
+	srv := profileServer(t)
+	obs, _, _ := joinProfile(t, srv, "Obs", "", "")
+	first, _, _ := joinProfile(t, srv, "Ana", "", "soy ana")
+	readType(t, obs, typeJoin) // obs' own join
+	readType(t, obs, typeJoin) // Ana's join
+	first.Close()
+	readUntil(t, obs, typeLeave, "Ana", "")
+
+	_, welcome, users := joinProfile(t, srv, "Ana", "", "")
+	decode(t, welcome)
+	exactFields(t, users, "type", "users", "ts")
+}
+
+// CHAT-38: a valid update reaches every member, sender included, and later joiners see it in users.
+func TestProfileUpdateOverWebSocket(t *testing.T) {
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", "", "")
+	b, _, _ := joinProfile(t, srv, "B", "", "")
+
+	send(t, a, `{"type":"profile","avatar":"`+profileGood+`","bio":"hola"}`)
+	for _, c := range []*websocket.Conn{a, b} {
+		raw := readType(t, c, typeProfile)
+		f := exactFields(t, raw, "type", "from", "ts", "avatar", "bio")
+		if string(f["from"]) != `"A"` || string(f["avatar"]) != `"`+profileGood+`"` || string(f["bio"]) != `"hola"` {
+			t.Fatalf("profile = %s", raw)
+		}
+	}
+
+	_, _, users := joinProfile(t, srv, "C", "", "")
+	f := exactFields(t, users, "type", "users", "avatars", "bios", "ts")
+	if got := stringMap(t, f["avatars"]); got["A"] != profileGood {
+		t.Fatalf("avatars = %v", got)
+	}
+	if got := stringMap(t, f["bios"]); got["A"] != "hola" {
+		t.Fatalf("bios = %v", got)
+	}
+}
+
+// CHAT-38: an invalid avatar discards the whole update, with no reply and the profile unchanged.
+func TestProfileInvalidAvatarDiscarded(t *testing.T) {
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", "", "hola")
+	b, _, _ := joinProfile(t, srv, "B", "", "")
+
+	send(t, a, `{"type":"profile","avatar":"https://evil.example/x.png","bio":"pwned"}`)
+	send(t, a, "sentinel")
+	if m := readChatNoProfile(t, b); m.Text != "sentinel" {
+		t.Fatalf("B got %+v, want the sentinel chat", m)
+	}
+	if m := readChatNoProfile(t, a); m.Text != "sentinel" {
+		t.Fatalf("A got %+v, want the sentinel chat", m)
+	}
+
+	_, _, users := joinProfile(t, srv, "C", "", "")
+	f := exactFields(t, users, "type", "users", "bios", "ts")
+	if got := stringMap(t, f["bios"]); got["A"] != "hola" {
+		t.Fatalf("bios = %v, want A=hola unchanged", got)
+	}
+}
+
+// CHAT-28, CHAT-38: without a validator a non-empty avatar is dropped, but a bio-only update works.
+func TestProfileAvatarsDisabled(t *testing.T) {
+	srv, _ := startRooms(t, nil, NewRoom("general"))
+	a, _, _ := joinProfile(t, srv, "A", "", "")
+	b, _, _ := joinProfile(t, srv, "B", "", "")
+
+	send(t, a, `{"type":"profile","avatar":"`+profileGood+`","bio":"dropped"}`)
+	send(t, a, `{"type":"profile","bio":"x"}`) // the dropped frame did not use the budget
+	raw := readType(t, b, typeProfile)
+	exactFields(t, raw, "type", "from", "ts", "bio")
+	if !strings.HasSuffix(string(raw), `"bio":"x"}`) {
+		t.Fatalf("profile = %s, want the bio-only update", raw)
+	}
+}
+
+// CHAT-38: at most one update per second per connection; the excess is dropped silently.
+func TestProfileRateLimited(t *testing.T) {
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", "", "")
+	b, _, _ := joinProfile(t, srv, "B", "", "")
+
+	send(t, a, `{"type":"profile","bio":"uno"}`)
+	send(t, a, `{"type":"profile","bio":"dos"}`)
+	send(t, a, "sentinel")
+	raw := readType(t, b, typeProfile)
+	if !strings.HasSuffix(string(raw), `"bio":"uno"}`) {
+		t.Fatalf("profile = %s, want the first update", raw)
+	}
+	if m := readChatNoProfile(t, b); m.Text != "sentinel" {
+		t.Fatalf("B got %+v, want the sentinel chat", m)
+	}
+}
+
+// CHAT-21 rule 2b: an invalid profile frame is discarded and never becomes chat.
+func TestProfileInvalidIsNotChat(t *testing.T) {
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", "", "")
+	b, _, _ := joinProfile(t, srv, "B", "", "")
+
+	send(t, a, `{"type":"profile","bio":5}`)
+	send(t, a, "sentinel")
+	if m := readChatNoProfile(t, b); m.Text != "sentinel" {
+		t.Fatalf("B got %+v, want the sentinel as first chat", m)
+	}
+}
+
+// CHAT-38: from is the connection's own nickname whatever the frame says.
+func TestProfileForgedFromIgnored(t *testing.T) {
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", "", "")
+	b, _, _ := joinProfile(t, srv, "B", "", "")
+
+	send(t, a, `{"type":"profile","from":"B","text":"x","bio":"mine"}`)
+	raw := readType(t, b, typeProfile)
+	f := exactFields(t, raw, "type", "from", "ts", "bio")
+	if string(f["from"]) != `"A"` {
+		t.Fatalf("profile = %s, want from A", raw)
+	}
+}
+
+// CHAT-38: updates racing with joins and leaves are safe under -race, and the
+// observer sees the joins and leaves around its own updates.
+func TestProfileConcurrentWithJoins(t *testing.T) {
+	const minEvents = 3
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", "", "")
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/ws?nickname=J"+strconv.Itoa(i)+"&bio=x", http.Header{"Origin": []string{srv.URL}})
+			if err != nil {
+				t.Errorf("dial J%d: %v", i, err)
+				return
+			}
+			conn.SetReadDeadline(time.Now().Add(testDeadline))
+			_, _, err = conn.ReadMessage() // welcome: the client is registered
+			conn.Close()
+			if err != nil {
+				t.Errorf("read welcome of J%d: %v", i, err)
+				return
+			}
+			time.Sleep(50 * time.Millisecond) // keeps A's send buffer from filling with join/leave frames
+		}
+	})
+
+	joins, leaves := 0, 0
+	// observe reads frames from A until one satisfies stop, counting other members' joins and leaves.
+	observe := func(stop func(raw []byte) bool) {
+		t.Helper()
+		for {
+			raw := readRaw(t, a)
+			if stop(raw) {
+				return
+			}
+			var m message
+			if err := json.Unmarshal(raw, &m); err != nil || m.From == "A" {
+				continue
+			}
+			switch m.Type {
+			case typeJoin:
+				joins++
+			case typeLeave:
+				leaves++
+			}
+		}
+	}
+	for i := range 3 {
+		bio := "bio" + strconv.Itoa(i)
+		send(t, a, `{"type":"profile","avatar":"`+profileGood+`","bio":"`+bio+`"}`)
+		observe(func(raw []byte) bool {
+			if frameType(t, raw) != typeProfile {
+				return false
+			}
+			if !strings.HasSuffix(string(raw), `"bio":"`+bio+`"}`) {
+				t.Fatalf("profile = %s, want bio %s", raw, bio)
+			}
+			return true
+		})
+		time.Sleep(profileInterval + 100*time.Millisecond)
+	}
+	close(done)
+	wg.Wait()
+	observe(func([]byte) bool { return joins >= minEvents && leaves >= minEvents })
+}
+
+// CHAT-37: a bio inside a chat, dm or typing frame is ignored: nothing carries it.
+func TestForgedInboundBioIgnored(t *testing.T) {
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", "", "")
+	b, _, _ := joinProfile(t, srv, "B", "", "")
+
+	send(t, a, `{"type":"typing","bio":"x"}`)
+	send(t, a, `{"type":"chat","text":"hi","bio":"x"}`)
+	send(t, a, `{"type":"dm","to":"B","text":"psst","bio":"x"}`)
+	for _, c := range []*websocket.Conn{a, b} {
+		for _, want := range []string{"hi", "psst"} {
+			raw := readType(t, c, map[string]string{"hi": typeChat, "psst": typeDM}[want])
+			var m message
+			if err := json.Unmarshal(raw, &m); err != nil || m.Text != want || m.Bio != "" {
+				t.Fatalf("frame = %s (err %v), want text %s without bio", raw, err, want)
+			}
+		}
+	}
+
+	_, welcome, users := joinProfile(t, srv, "C", "", "")
+	decode(t, welcome)
+	exactFields(t, users, "type", "users", "ts")
+}
+
+// CHAT-37: control characters and bidi marks are stripped, then the bio is cut to 160 runes.
+func TestBioCleanedAndTruncatedOverQuery(t *testing.T) {
+	srv := profileServer(t)
+	_, welcome, _ := joinProfile(t, srv, "A", "", "  a\u202eb\nc"+strings.Repeat("x", 200))
+	var w message
+	if err := json.Unmarshal(welcome, &w); err != nil {
+		t.Fatal(err)
+	}
+	if want := "abc" + strings.Repeat("x", 157); w.Bio != want {
+		t.Fatalf("bio = %q, want %q", w.Bio, want)
+	}
+}
+
+// CHAT-38: {"type":"profile"} with no fields clears avatar and bio for later joiners.
+func TestProfileClearOverWebSocket(t *testing.T) {
+	srv := profileServer(t)
+	a, _, _ := joinProfile(t, srv, "A", profileGood, "hola")
+
+	send(t, a, `{"type":"profile"}`)
+	raw := readType(t, a, typeProfile)
+	exactFields(t, raw, "type", "from", "ts")
+
+	_, _, users := joinProfile(t, srv, "C", "", "")
+	exactFields(t, users, "type", "users", "ts")
+}

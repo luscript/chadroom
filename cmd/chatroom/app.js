@@ -2,8 +2,13 @@
   const $ = (id) => document.getElementById(id);
   const MAX_MESSAGE_BYTES = 4096; // defaultMaxMessageSize in internal/chat/room.go
   const MAX_AVATAR_BYTES = 512; // mirrors maxAvatarBytes in cmd/chatroom/main.go
-  const AVATAR_KEY = 'chadroom.avatar'; // localStorage; best effort
+  const LEGACY_AVATAR_KEY = 'chadroom.avatar'; // removed on start: the picture is no longer stored (CHAT-29)
+  const MAX_BIO = 160; // mirrors maxBioRunes in internal/chat/room.go (UTF-16 maxlength <= runes)
+  const PROFILE_GAP_MS = 1100; // > profileInterval in internal/chat/client.go
+  const BIO_PLACEHOLDER = '✿ vibecoder profesional ✿'; // MI PERFIL card without a bio
   const MUTED_KEY = 'chadroom.muted'; // localStorage; best effort
+  const NOTE_KEY = 'chadroom.note'; // localStorage; best effort. The sticky note is private to this browser.
+  const MAX_NOTE = 120; // mirrors maxlength of #profile-note-input
   const BLIP_GAP_MS = 1000; // at most one notification sound per second
   const BLIP_LEAD_S = 0.12; // silent lead-in before the tone (idle audio sinks drop the first ~100-300 ms)
   const FAVICON = '/favicon.svg'; // served by cmd/chatroom/main.go
@@ -32,7 +37,12 @@
   const rooms = new Map(); // id -> room, in /rooms order
   let active = null; // the room whose pane and header are shown
   let requestedNick = ''; // what the user typed; re-sent by every room's socket
-  let requestedAvatar = ''; // validated join value ('' = none); re-sent by every room's socket
+  let myProfile = { avatar: '', bio: '' }; // page memory only (CHAT-39); sent by every room's socket
+  let editorAvatar = ''; // pending picture while the editor is open
+  let gifPick = false; // the GIF panel picks a picture instead of sending a message
+  let profileSaveLocked = false;
+  let profileSaveTimer = null;
+  let popupUser = null; // {room, nick, returnFocus}: whose profile #user-popup shows
   let profileUrl = ''; // what #profile-avatar currently shows
 
   // Direct messages. A conversation rides its room's socket; the page is the only place
@@ -59,11 +69,10 @@
       url.hash === '' && IMAGE_PATH.test(url.pathname);
   }
 
-  // '' (no picture) or an allowed image URL that fits the server's byte limit.
+  // An allowed image URL that fits the server's byte limit.
   // The server compares the host exactly (CHAT-28) while new URL() normalizes case, default port
   // and IDN, so the raw text must also start with the URL's own https://hostname/.
   function validAvatarInput(v) {
-    if (v === '') return true;
     if (!isAllowedImage(v) || new TextEncoder().encode(v).length > MAX_AVATAR_BYTES) return false;
     return v.startsWith('https://' + new URL(v).hostname + '/');
   }
@@ -94,12 +103,23 @@
 
   // The "MI PERFIL" card shows the active room's own picture; on error or none, the placeholder stays.
   function renderProfile() {
+    $('profile-bio').textContent = (active && active.bios.get(active.myName)) || BIO_PLACEHOLDER;
     const url = (active && active.avatars.get(active.myName)) || '';
     if (url === profileUrl) return;
     profileUrl = url;
     const img = $('profile-avatar');
     img.hidden = !url;
     if (url) img.src = url; else img.removeAttribute('src');
+  }
+  // The "nota mental" sticky is local only: never sent to the server. Empty means the default text.
+  const NOTE_DEFAULT = $('note-text').textContent;
+  let myNote = '';
+  try { myNote = (localStorage.getItem(NOTE_KEY) || '').slice(0, MAX_NOTE); } catch { /* blocked: default note */ }
+  $('note-text').textContent = myNote || NOTE_DEFAULT;
+  function saveNote(note) {
+    myNote = note;
+    $('note-text').textContent = note || NOTE_DEFAULT;
+    try { if (note) localStorage.setItem(NOTE_KEY, note); else localStorage.removeItem(NOTE_KEY); } catch { /* blocked: page memory only */ }
   }
   $('profile-avatar').addEventListener('error', () => { $('profile-avatar').hidden = true; });
 
@@ -146,6 +166,8 @@
       joined: false, ws: null, retryTimer: null, attempt: 0, outage: false,
       status: 'connecting', myName: '', users: new Set(), lastAuthor: null, unread: 0,
       avatars: new Map(), // nick -> image url, only for members with a picture
+      bios: new Map(), // nick -> bio text, only for members with one
+      resendProfile: false, // profile saved while the socket was connecting: send it after welcome
       typing: new Map(), // nick -> timeout id of who is typing here now
       msgs: new Map(), // message id -> {li, from, text}: what can be quoted or jumped to
     };
@@ -287,6 +309,8 @@
     forgetIds(room);
     room.users = new Set();
     room.avatars = new Map();
+    room.bios = new Map();
+    room.resendProfile = false;
     room.myName = '';
     room.lastAuthor = null;
     room.attempt = 0;
@@ -300,6 +324,7 @@
 
   // Makes the room's pane (or one of its conversations) and header current. Focus and the draft are left alone.
   function activate(room, conv = null) {
+    closeUserPopup(false);
     active = room;
     activeConv = conv;
     if (replyTarget && replyTarget.pane !== current()) cancelReply();
@@ -337,42 +362,29 @@
     forgetIds(room);
     room.users = new Set();
     room.avatars = new Map();
+    room.bios = new Map();
+    room.resendProfile = false;
     room.myName = '';
     room.lastAuthor = null;
     room.unread = 0;
     room.outage = false;
+    if (popupUser?.room === room) closeUserPopup(false);
     renderTab(room);
     if (room.id === MUSIC_ROOM) resetMusic();
   }
 
   // — join —
   const nickInput = $('nick');
-  const avatarInput = $('avatar-url');
-  try {
-    const saved = localStorage.getItem(AVATAR_KEY);
-    if (typeof saved === 'string') avatarInput.value = saved;
-  } catch { /* storage blocked: start empty */ }
+  try { localStorage.removeItem(LEGACY_AVATAR_KEY); } catch { /* storage blocked: nothing to clean */ }
   const roomsReady = loadRooms();
   roomsReady.catch(() => {}); // handled on submit; avoids an unhandled rejection
   let joining = false;
   nickInput.addEventListener('input', () => { $('join-btn').disabled = !nickInput.value.trim(); });
-  avatarInput.addEventListener('input', () => {
-    avatarInput.removeAttribute('aria-invalid');
-    $('join-error').hidden = true;
-  });
   $('join-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const nick = nickInput.value.trim();
     if (!nick || joining) return;
     unlockAudio(); // inside the gesture, before any await
-    const avatar = avatarInput.value.trim();
-    if (!validAvatarInput(avatar)) {
-      $('join-error').textContent = 'La foto tiene que ser un link https a una imagen (.gif, .png, .jpg o .webp) de Giphy, Tenor o Imgur.';
-      $('join-error').hidden = false;
-      avatarInput.setAttribute('aria-invalid', 'true');
-      avatarInput.focus();
-      return;
-    }
     joining = true;
     try {
       if (rooms.size === 0) {
@@ -390,15 +402,11 @@
       joining = false;
     }
     $('join-error').hidden = true;
-    try {
-      if (avatar) localStorage.setItem(AVATAR_KEY, avatar); else localStorage.removeItem(AVATAR_KEY);
-    } catch { /* storage blocked: the picture just isn't remembered */ }
-    enterChat(nick, avatar);
+    enterChat(nick);
   });
 
-  function enterChat(nick, avatar) {
+  function enterChat(nick) {
     requestedNick = nick;
-    requestedAvatar = avatar;
     const first = rooms.values().next().value;
     $('join-view').hidden = true;
     $('chat-view').hidden = false;
@@ -413,7 +421,8 @@
     const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
     const socket = new WebSocket(scheme + location.host + '/ws?room=' + encodeURIComponent(room.id) +
       '&nickname=' + encodeURIComponent(requestedNick) +
-      (requestedAvatar ? '&avatar=' + encodeURIComponent(requestedAvatar) : ''));
+      (myProfile.avatar ? '&avatar=' + encodeURIComponent(myProfile.avatar) : '') +
+      (myProfile.bio ? '&bio=' + encodeURIComponent(myProfile.bio) : ''));
     room.ws = socket;
     socket.onmessage = (e) => {
       if (room.ws !== socket) return; // late frame from a socket the user already left
@@ -428,6 +437,7 @@
   // Exponential backoff with equal jitter: 0.5-1 s, 1-2 s, 2-4 s ... 15-30 s.
   function scheduleReconnect(room) {
     room.ws = null;
+    if (popupUser?.room === room) closeUserPopup(false);
     clearAllTyping(room);
     setStatus(room, 'reconnecting');
     if (!room.outage) {
@@ -466,6 +476,12 @@
     rooms.forEach((room) => { if (room.joined) teardown(room); });
     updateLeaveBtn();
     closePanels();
+    myProfile = { avatar: '', bio: '' };
+    editorAvatar = '';
+    $('profile-bio-input').value = '';
+    closeUserPopup(false);
+    clearTimeout(profileSaveTimer);
+    profileSaveLocked = false;
     $('draft').value = '';
     $('chat-view').hidden = true;
     $('join-view').hidden = false;
@@ -570,6 +586,7 @@
   // — messages —
   // The server sends JSON frames {type, from, text, ts}; ts is Unix milliseconds.
   // chat frames may add id and reply {id, from, text}; dm frames add id and may add reply_to.
+  // welcome and join may add avatar and bio; profile {from, avatar?, bio?} replaces a member's profile.
   // Frames carry no room: the socket (and so the closure) identifies it.
   function addRaw(room, data) {
     let msg;
@@ -580,12 +597,21 @@
       if (Array.isArray(msg.users)) {
         room.users = new Set(msg.users.filter((n) => typeof n === 'string'));
         room.avatars = new Map();
+        room.bios = new Map();
         if (msg.avatars && typeof msg.avatars === 'object' && !Array.isArray(msg.avatars)) {
           for (const [nick, url] of Object.entries(msg.avatars)) {
             if (room.users.has(nick) && typeof url === 'string' && isAllowedImage(url)) room.avatars.set(nick, url);
           }
         }
+        if (msg.bios && typeof msg.bios === 'object' && !Array.isArray(msg.bios)) {
+          for (const [nick, bio] of Object.entries(msg.bios)) {
+            if (room.users.has(nick) && typeof bio === 'string' && bio.trim() !== '') room.bios.set(nick, bio);
+          }
+        }
         if (room === active) { renderUsers(); renderProfile(); }
+        if (popupUser?.room === room) {
+          if (room.users.has(popupUser.nick)) renderUserPopup(); else closeUserPopup(false);
+        }
       }
       return;
     }
@@ -608,8 +634,7 @@
     switch (msg.type) {
       case 'welcome':
         room.myName = msg.from;
-        if (typeof msg.avatar === 'string' && isAllowedImage(msg.avatar)) room.avatars.set(msg.from, msg.avatar);
-        else room.avatars.delete(msg.from);
+        setMemberProfile(room, msg.from, msg.avatar, msg.bio);
         if (room === active) {
           $('me').textContent = room.myName;
           $('profile-nick').textContent = room.myName;
@@ -618,6 +643,7 @@
           renderProfile();
         }
         room.attempt = 0;
+        if (room.resendProfile) { room.resendProfile = false; sendProfile(room); }
         if (room.id === MUSIC_ROOM) music.awaitSnapshot = true; // a snapshot, if any, comes before our own join
         setStatus(room, 'online');
         break;
@@ -658,9 +684,8 @@
       }
       case 'join':
         room.users.add(msg.from);
-        // A reused nickname must not inherit the previous owner's picture.
-        if (typeof msg.avatar === 'string' && isAllowedImage(msg.avatar)) room.avatars.set(msg.from, msg.avatar);
-        else room.avatars.delete(msg.from);
+        // A reused nickname must not inherit the previous owner's picture or bio.
+        setMemberProfile(room, msg.from, msg.avatar, msg.bio);
         if (room === active) renderUsers();
         addSystem(room, msg.from + ' se unió 🎉');
         // Our own join closes the snapshot slot: no snapshot means the server has no track (it may have restarted).
@@ -679,6 +704,8 @@
       case 'leave':
         room.users.delete(msg.from);
         room.avatars.delete(msg.from);
+        room.bios.delete(msg.from);
+        if (popupUser?.room === room && popupUser.nick === msg.from) closeUserPopup(false);
         clearTyping(room, msg.from);
         if (room === active) renderUsers();
         addSystem(room, msg.from + ' salió 👋');
@@ -687,7 +714,34 @@
           if (conv) closeConversation(conv, msg.from + ' se desconectó');
         }
         break;
+      case 'profile':
+        if (!room.users.has(msg.from)) break;
+        setMemberProfile(room, msg.from, msg.avatar, msg.bio);
+        if (msg.from === room.myName) adoptOwnProfile(room);
+        if (room === active) { renderUsers(); renderProfile(); }
+        if (popupUser?.room === room && popupUser.nick === msg.from) renderUserPopup();
+        break;
       // Unknown types are ignored so newer servers don't break this page.
+    }
+  }
+
+  // A frame's avatar/bio replace what the page knows about nick; absent or invalid means none.
+  function setMemberProfile(room, nick, avatar, bio) {
+    if (typeof avatar === 'string' && isAllowedImage(avatar)) room.avatars.set(nick, avatar); else room.avatars.delete(nick);
+    if (typeof bio === 'string' && bio.trim() !== '') room.bios.set(nick, bio); else room.bios.delete(nick);
+  }
+
+  // The server's cleaned/accepted values are the truth for our own profile: copy them back so the
+  // page and future /ws URLs match. An open editor follows unless the user has pending edits.
+  function adoptOwnProfile(room) {
+    const next = { avatar: room.avatars.get(room.myName) || '', bio: room.bios.get(room.myName) || '' };
+    const editorOpen = !panels.profile.panel.hidden && !gifPick;
+    const dirty = editorAvatar !== myProfile.avatar || bioInput.value !== myProfile.bio;
+    myProfile = next;
+    if (editorOpen && !dirty) {
+      editorAvatar = next.avatar;
+      bioInput.value = next.bio;
+      renderEditor();
     }
   }
 
@@ -768,7 +822,11 @@
       const li = document.createElement('li');
       const label = document.createElement('span');
       label.textContent = name;
-      li.append(avatarEl(name, room.avatars.get(name)), label);
+      // The row is rebuilt when the panel closes, so focus returns to the "en línea" button.
+      const who = userTrigger(room, name, panels.users.btn);
+      who.classList.add('users-who');
+      who.append(avatarEl(name, room.avatars.get(name)), label);
+      li.append(who);
       if (name === room.myName) {
         const tag = document.createElement('span');
         tag.className = 'tag tag-accent';
@@ -873,12 +931,15 @@
     body.className = 'msg-body';
 
     if (showHead) {
-      slot.append(avatarEl(author, avatarUrl));
+      const pic = userTrigger(ownerRoom(pane), author);
+      pic.tabIndex = -1; // the name next to it is the tab stop
+      pic.append(avatarEl(author, avatarUrl));
+      slot.append(pic);
 
       const head = document.createElement('div');
       head.className = 'msg-head';
-      const name = document.createElement('span');
-      name.className = 'author';
+      const name = userTrigger(ownerRoom(pane), author);
+      name.classList.add('author');
       name.textContent = author;
       head.append(name);
       if (own) {
@@ -1024,15 +1085,23 @@
     emoji: { panel: $('emoji-panel'), btn: $('emoji-btn') },
     gif: { panel: $('gif-panel'), btn: $('gif-btn') },
     users: { panel: $('users-panel'), btn: $('users-btn') },
+    profile: { panel: $('profile-panel'), btn: $('profile-btn') },
   };
 
   function togglePanel(key) {
     const opening = panels[key].panel.hidden;
     closePanels();
     if (!opening) return;
+    if (key === 'profile') { openProfileEditor(); return; }
+    showPanel(key);
+    if (key === 'gif') openGifPanel();
+  }
+
+  // Shows one panel and hides the rest (closePanels also leaves GIF pick mode).
+  function showPanel(key) {
+    closePanels();
     panels[key].panel.hidden = false;
     panels[key].btn.setAttribute('aria-expanded', 'true');
-    if (key === 'gif') openGifPanel();
   }
 
   function closePanels() {
@@ -1040,20 +1109,166 @@
       panel.hidden = true;
       btn.setAttribute('aria-expanded', 'false');
     }
+    gifPick = false;
+    panels.gif.panel.classList.remove('picking');
+    $('gif-paste').hidden = false;
+    relabelGifItems();
   }
 
   panels.emoji.btn.addEventListener('click', () => togglePanel('emoji'));
   panels.gif.btn.addEventListener('click', () => togglePanel('gif'));
   panels.users.btn.addEventListener('click', () => togglePanel('users'));
+  panels.profile.btn.addEventListener('click', () => togglePanel('profile'));
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (Object.values(panels).some((p) => !p.panel.hidden)) closePanels();
+    if (popupUser) closeUserPopup(true);
+    else if (gifPick && !panels.gif.panel.hidden) endAvatarPick(null);
+    else if (Object.values(panels).some((p) => !p.panel.hidden)) closePanels();
     else if (replyTarget) cancelReply();
   });
   $('reply-cancel').addEventListener('click', () => { cancelReply(); draft.focus(); });
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('.popover, .tool')) closePanels();
+    if (!e.target.closest('.popover, .tool, #user-popup')) closePanels();
   });
+  document.addEventListener('click', (e) => {
+    if (popupUser && !e.target.closest('#user-popup, .user-trigger')) closeUserPopup(false);
+  });
+
+  // — profile editor (CHAT-39) —
+  const bioInput = $('profile-bio-input');
+  const noteInput = $('profile-note-input');
+  const ownName = () => active?.myName || requestedNick;
+
+  function showProfileError(text) {
+    $('profile-error').textContent = text;
+    $('profile-error').hidden = text === '';
+  }
+
+  function openProfileEditor() {
+    closeUserPopup(false);
+    editorAvatar = myProfile.avatar;
+    bioInput.value = myProfile.bio;
+    noteInput.value = myNote;
+    showProfileError('');
+    showPanel('profile');
+    renderEditor();
+    bioInput.focus();
+  }
+
+  function renderEditor() {
+    $('profile-preview').replaceChildren(avatarEl(ownName(), editorAvatar));
+    $('profile-clear').disabled = !editorAvatar;
+    $('profile-pick').disabled = gifSearchOff;
+    $('profile-save').disabled = profileSaveLocked;
+    $('profile-bio-count').textContent = bioInput.value.length + '/' + MAX_BIO;
+    $('profile-note-count').textContent = noteInput.value.length + '/' + MAX_NOTE;
+  }
+
+  // The GIF panel takes the editor's place; a click on a GIF sets the pending picture.
+  function startAvatarPick() {
+    if (gifSearchOff) { showProfileError('La búsqueda de GIF no está disponible.'); return; }
+    showProfileError('');
+    showPanel('gif');
+    gifPick = true;
+    panels.gif.panel.classList.add('picking'); // centered like the editor it replaces
+    $('gif-paste').hidden = true;
+    relabelGifItems();
+    openGifPanel();
+  }
+
+  // url is null when the user backs out: the editor returns unchanged.
+  function endAvatarPick(url) {
+    showProfileError('');
+    if (url) editorAvatar = url;
+    showPanel('profile');
+    renderEditor();
+    $('profile-pick').focus();
+  }
+
+  function sendProfile(room) {
+    room.ws.send(JSON.stringify({ type: 'profile', avatar: myProfile.avatar, bio: myProfile.bio }));
+  }
+
+  // The page changes only when the echoed profile frame arrives.
+  function saveProfile() {
+    if (profileSaveLocked) return;
+    const bio = bioInput.value.replace(/\s+/g, ' ').trim();
+    myProfile = { avatar: editorAvatar, bio };
+    saveNote(noteInput.value.replace(/\s+/g, ' ').trim());
+    for (const room of joinedRooms()) {
+      if (room.ws?.readyState === WebSocket.OPEN) sendProfile(room);
+      else if (room.ws?.readyState === WebSocket.CONNECTING) room.resendProfile = true;
+    }
+    profileSaveLocked = true;
+    clearTimeout(profileSaveTimer);
+    profileSaveTimer = setTimeout(() => {
+      profileSaveLocked = false;
+      if (!panels.profile.panel.hidden) renderEditor();
+    }, PROFILE_GAP_MS);
+    closePanels();
+    $('profile-btn').focus();
+  }
+
+  $('profile-pick').addEventListener('click', startAvatarPick);
+  $('profile-clear').addEventListener('click', () => { editorAvatar = ''; renderEditor(); });
+  $('profile-save').addEventListener('click', saveProfile);
+  $('profile-card-edit').addEventListener('click', openProfileEditor);
+  bioInput.addEventListener('input', renderEditor);
+  noteInput.addEventListener('input', renderEditor);
+  // The editor is inside #send-form: Enter must neither type a newline nor submit the draft.
+  for (const el of [bioInput, noteInput]) {
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) e.preventDefault(); });
+  }
+
+  // — user popup (CHAT-40) —
+  // One page-level card. Nicknames and bios reach the DOM only as text.
+  function userTrigger(room, nick, returnFocus = null) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'user-trigger';
+    b.setAttribute('aria-label', 'Ver perfil de ' + nick);
+    b.addEventListener('click', (e) => openUserPopup(room, nick, returnFocus || e.currentTarget));
+    return b;
+  }
+
+  function openUserPopup(room, nick, returnFocus) {
+    if (!room.joined || !room.users.has(nick)) return;
+    closePanels();
+    popupUser = { room, nick, returnFocus };
+    renderUserPopup();
+    $('user-popup').hidden = false;
+    (nick === room.myName ? $('user-popup-edit') : $('user-popup-dm')).focus();
+  }
+
+  function renderUserPopup() {
+    const { room, nick } = popupUser;
+    const self = nick === room.myName;
+    const bio = room.bios.get(nick);
+    $('user-popup-avatar').replaceChildren(avatarEl(nick, room.avatars.get(nick)));
+    $('user-popup-nick').textContent = nick;
+    $('user-popup-bio').textContent = bio || 'Sin descripción';
+    $('user-popup-bio').classList.toggle('empty', !bio);
+    $('user-popup-dm').hidden = self;
+    $('user-popup-dm').setAttribute('aria-label', 'Mensaje privado a ' + nick);
+    $('user-popup-edit').hidden = !self;
+  }
+
+  function closeUserPopup(restoreFocus) {
+    if (!popupUser) return;
+    const { returnFocus } = popupUser;
+    $('user-popup').hidden = true;
+    popupUser = null;
+    if (!restoreFocus) return;
+    if (returnFocus && returnFocus.isConnected && returnFocus.offsetParent !== null) returnFocus.focus();
+    else draft.focus();
+  }
+
+  $('user-popup-dm').addEventListener('click', () => {
+    const { room, nick } = popupUser;
+    closeUserPopup(false);
+    openConversation(room, nick);
+  });
+  $('user-popup-edit').addEventListener('click', openProfileEditor);
 
   CATS.forEach((cat, i) => {
     const b = document.createElement('button');
@@ -1138,7 +1353,7 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'gif-item';
-      btn.setAttribute('aria-label', 'Enviar GIF');
+      btn.setAttribute('aria-label', gifItemLabel());
       const img = document.createElement('img');
       img.alt = '';
       img.loading = 'lazy';
@@ -1146,12 +1361,24 @@
       img.referrerPolicy = 'no-referrer';
       img.src = preview;
       btn.append(img);
-      btn.addEventListener('click', () => { if (sendText(g.url)) closePanels(); });
+      btn.addEventListener('click', () => {
+        if (gifPick) {
+          if (validAvatarInput(g.url)) endAvatarPick(g.url);
+          else gifStatus.textContent = 'Ese GIF no se puede usar como foto.';
+        } else if (sendText(g.url)) {
+          closePanels();
+        }
+      });
       items.push(btn);
     }
     gifGrid.replaceChildren(...items);
     gifStatus.textContent = items.length === 0 ? 'Sin resultados' : '';
     gifLoaded = true;
+  }
+
+  const gifItemLabel = () => (gifPick ? 'Usar como foto' : 'Enviar GIF');
+  function relabelGifItems() {
+    for (const b of $('gif-grid').children) b.setAttribute('aria-label', gifItemLabel());
   }
 
   function showGifError() {
@@ -1161,6 +1388,10 @@
 
   function disableGifSearch() {
     gifSearchOff = true;
+    if (gifPick) {
+      endAvatarPick(null);
+      showProfileError('La búsqueda de GIF no está disponible.');
+    }
     const hadFocus = document.activeElement === gifSearch;
     $('gif-search-box').hidden = true;
     if (hadFocus) gifUrl.focus();

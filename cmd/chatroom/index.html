@@ -26,12 +26,6 @@
         <!-- maxlength mirrors maxNicknameRunes in internal/chat/room.go -->
         <input id="nick" class="input" type="text" maxlength="32" autofocus placeholder="Ej: xX_Lu_Xx">
       </div>
-      <div class="field">
-        <label for="avatar-url">Foto de perfil (opcional)</label>
-        <!-- maxlength mirrors maxAvatarBytes in cmd/chatroom/main.go -->
-        <input id="avatar-url" class="input" type="url" maxlength="512" placeholder="https://i.imgur.com/….png" aria-describedby="avatar-hint">
-        <p id="avatar-hint" class="field-hint text-muted">Pegá el link de una imagen de Giphy, Tenor o Imgur.</p>
-      </div>
       <div>
         <button id="join-btn" type="submit" class="btn btn-primary" disabled>Conectar →</button>
       </div>
@@ -64,6 +58,7 @@
         <span id="me" class="tag tag-accent"></span>
         <span id="music-now-playing" class="music-now-playing" hidden></span>
         <button id="music-global-mute" type="button" class="btn btn-ghost tool tool-mute" aria-pressed="false" aria-label="Silenciar música" title="Silenciar música" hidden>🎵</button>
+        <button id="profile-btn" type="button" class="btn btn-ghost tool tool-profile" aria-expanded="false" aria-controls="profile-panel">Mi perfil</button>
         <button id="mute-btn" type="button" class="btn btn-ghost tool tool-mute" aria-pressed="false" aria-label="Silenciar avisos" title="Silenciar avisos">🔔</button>
         <button id="leave-btn" type="button" class="btn btn-ghost">Salir</button>
       </div>
@@ -112,6 +107,23 @@
         <button id="reply-cancel" type="button" class="btn btn-ghost reply-cancel" aria-label="Cancelar respuesta" title="Cancelar respuesta">✕</button>
       </div>
       <div class="composer-bar">
+        <div id="profile-panel" class="popover profile-editor" role="dialog" aria-labelledby="profile-title" hidden>
+          <div id="profile-title" class="profile-editor-title">Mi perfil</div>
+          <div class="profile-editor-pic">
+            <div id="profile-preview" class="profile-preview"></div>
+            <button id="profile-pick" type="button" class="btn">Elegir GIF</button>
+            <button id="profile-clear" type="button" class="btn btn-ghost">Quitar foto</button>
+          </div>
+          <label for="profile-bio-input">Descripción</label>
+          <!-- maxlength mirrors maxBioRunes in internal/chat/room.go -->
+          <textarea id="profile-bio-input" class="input" rows="3" maxlength="160" aria-describedby="profile-bio-count"></textarea>
+          <div id="profile-bio-count" class="text-muted profile-count">0/160</div>
+          <label for="profile-note-input">Nota mental</label>
+          <textarea id="profile-note-input" class="input" rows="2" maxlength="120" aria-describedby="profile-note-count"></textarea>
+          <div id="profile-note-count" class="text-muted profile-count">0/120</div>
+          <p id="profile-error" class="profile-error" role="alert" hidden></p>
+          <button id="profile-save" type="button" class="btn btn-primary">Guardar</button>
+        </div>
         <div id="emoji-panel" class="popover" hidden>
           <div id="cats" class="cats" role="tablist"></div>
           <div id="emoji-grid" class="emoji-grid"></div>
@@ -123,10 +135,12 @@
             <div id="gif-grid" class="gif-grid"></div>
             <div class="gif-credit">Powered by GIPHY</div>
           </div>
-          <div class="gif-hint">O pegá la URL de un GIF de Giphy, Tenor o Imgur.</div>
-          <div class="gif-row">
-            <input id="gif-url" class="input" type="url" placeholder="https://media.giphy.com/…/giphy.gif">
-            <button id="gif-send" type="button" class="btn btn-primary" disabled>Enviar</button>
+          <div id="gif-paste">
+            <div class="gif-hint">O pegá la URL de un GIF de Giphy, Tenor o Imgur.</div>
+            <div class="gif-row">
+              <input id="gif-url" class="input" type="url" placeholder="https://media.giphy.com/…/giphy.gif">
+              <button id="gif-send" type="button" class="btn btn-primary" disabled>Enviar</button>
+            </div>
           </div>
         </div>
         <button id="emoji-btn" type="button" class="btn btn-icon btn-ghost tool" aria-label="Emojis" title="Emojis" aria-expanded="false" aria-controls="emoji-panel">
@@ -139,9 +153,16 @@
           <svg width="16" height="16" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M231.4,44.34a15.89,15.89,0,0,0-16.1-3.38L31.5,106.9a16,16,0,0,0-1.8,29.55l82.6,39.25,39.25,82.6A15.87,15.87,0,0,0,166.2,268h.6a15.88,15.88,0,0,0,14.4-11.1L235,72.4A15.89,15.89,0,0,0,231.4,44.34ZM166.5,251.9l-34.7-73a8,8,0,0,0-3.7-3.7l-73-34.7L218.3,57.7Z" transform="translate(0 -12)"/></svg>
         </button>
       </div>
-    </form></div><aside class="scrapbook"><div class="aside-label">✦ MI PERFIL </div><div class="profile-card"><div class="profile-art" aria-hidden="true"><img id="profile-avatar" class="profile-avatar" alt="" referrerpolicy="no-referrer" hidden>♡<span>✧</span></div><b id="profile-nick"></b><p>✿ vibecoder profesional ✿</p><span class="mood">● disponible</span></div><div class="sticky"><span>nota mental:</span><p>Los días son más lindos<br>cuando hay sobra<br>de tokens en claude.</p><i>♡</i></div><div class="mini-stamp">100% buenas prácticas<br>0% vibecodeo</div></aside>
+    </form></div><aside class="scrapbook"><div class="aside-label">✦ MI PERFIL </div><div class="profile-card"><div class="profile-art" aria-hidden="true"><img id="profile-avatar" class="profile-avatar" alt="" referrerpolicy="no-referrer" hidden>♡<span>✧</span></div><b id="profile-nick"></b><p id="profile-bio" class="profile-bio">✿ vibecoder profesional ✿</p><button id="profile-card-edit" type="button" class="btn btn-ghost tool">Editar perfil</button><span class="mood">● disponible</span></div><div class="sticky"><span>nota mental:</span><p id="note-text" class="note-text">Los días son más lindos cuando hay sobra de tokens en claude.</p><i>♡</i></div><div class="mini-stamp">100% buenas prácticas<br>0% vibecodeo</div></aside>
   </section><div class="window-status"><span>✦ este texto sobra</span><span>este también</span></div>
 </div><footer class="desktop-footer"><span>✳ YA NO SÉ QUÉ MÁS PONER</span><span>* espirito de 1999. conexión de hoy xd</span><span>Hecho por luscript</span></footer>
+<div id="user-popup" class="user-popup" role="dialog" aria-labelledby="user-popup-nick" hidden>
+  <div id="user-popup-avatar" class="user-popup-avatar"></div>
+  <b id="user-popup-nick" class="user-popup-nick"></b>
+  <p id="user-popup-bio" class="user-popup-bio"></p>
+  <button id="user-popup-dm" type="button" class="btn btn-primary">Mensaje privado</button>
+  <button id="user-popup-edit" type="button" class="btn" hidden>Editar perfil</button>
+</div>
 <script src="/app.js"></script>
 </body>
 </html>

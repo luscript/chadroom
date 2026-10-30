@@ -76,7 +76,8 @@ func broadcast(t *testing.T, cr *Room, from *Client, text string) {
 
 // decode parses an outbound frame, requiring type, from, text and ts and a known
 // type. A chat also carries id (>= 1) and may carry reply with exactly id, from and
-// text (CHAT-35); avatar is optional; nothing else is allowed.
+// text (CHAT-35); avatar is optional; bio is allowed only on welcome and join (CHAT-10,
+// CHAT-37); nothing else is allowed.
 func decode(t *testing.T, b []byte) message {
 	t.Helper()
 	var fields map[string]json.RawMessage
@@ -102,7 +103,9 @@ func decode(t *testing.T, b []byte) message {
 		if _, ok := fields["reply"]; ok {
 			exactFields(t, fields["reply"], "id", "from", "text")
 		}
-	case typeJoin, typeLeave, typeWelcome:
+	case typeJoin, typeWelcome:
+		allowed["bio"] = true
+	case typeLeave:
 	default:
 		t.Fatalf("unknown type in %q", b)
 	}
@@ -114,11 +117,27 @@ func decode(t *testing.T, b []byte) message {
 	return m
 }
 
-// decodeUsers parses a users frame, requiring exactly type/users/ts and an
-// array (never null).
+// decodeUsers parses a users frame, requiring type/users/ts (users an array, never
+// null) and allowing only the optional avatars and bios objects, whose keys must all
+// be listed in users (CHAT-17).
 func decodeUsers(t *testing.T, b []byte) usersFrame {
 	t.Helper()
-	fields := frameFields(t, b, "users")
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("invalid JSON %q: %v", b, err)
+	}
+	for _, k := range []string{"type", "users", "ts"} {
+		if _, ok := fields[k]; !ok {
+			t.Fatalf("frame %q misses field %q", b, k)
+		}
+	}
+	for k := range fields {
+		switch k {
+		case "type", "users", "ts", "avatars", "bios":
+		default:
+			t.Fatalf("users frame %q has unexpected field %q", b, k)
+		}
+	}
 	if !isJSONArray(fields["users"]) {
 		t.Fatalf("users frame %q: users is not an array", b)
 	}
@@ -128,6 +147,18 @@ func decodeUsers(t *testing.T, b []byte) usersFrame {
 	}
 	if f.Type != typeUsers {
 		t.Fatalf("frame %q: type %q, want users", b, f.Type)
+	}
+	for _, m := range []map[string]string{f.Avatars, f.Bios} {
+		for nick, v := range m {
+			if !slices.Contains(f.Users, nick) || v == "" {
+				t.Fatalf("users frame %q: bad entry %q=%q", b, nick, v)
+			}
+		}
+	}
+	for _, k := range []string{"avatars", "bios"} {
+		if raw, ok := fields[k]; ok && (len(raw) == 0 || raw[0] != '{') {
+			t.Fatalf("users frame %q: %s is not an object", b, k)
+		}
 	}
 	return f
 }
@@ -2692,4 +2723,199 @@ func TestJoinLeaveWelcomeHaveNoID(t *testing.T) {
 	exactFields(t, nextRaw(t, a), "type", "from", "text", "ts") // join B
 	unregister(t, cr, b)
 	exactFields(t, nextRaw(t, a), "type", "from", "text", "ts") // leave B
+}
+
+// bioClient is avatarClient with a bio; the hub treats both as opaque strings.
+func bioClient(nick, avatar, bio string) *Client {
+	c := avatarClient(nick, avatar)
+	c.bio = bio
+	return c
+}
+
+// profileUpdate queues a profile update as if readPump had validated and admitted it.
+func profileUpdate(t *testing.T, cr *Room, from *Client, avatar, bio string) {
+	t.Helper()
+	select {
+	case cr.broadcast <- inbound{from: from, kind: inboundProfile, avatar: avatar, bio: bio}:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout queueing profile")
+	}
+}
+
+// stringMap decodes a JSON object of strings.
+func stringMap(t *testing.T, raw json.RawMessage) map[string]string {
+	t.Helper()
+	var m map[string]string
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("%s: %v", raw, err)
+	}
+	return m
+}
+
+// CHAT-37: welcome and join carry the bio only when the client has one.
+func TestWelcomeAndJoinCarryBio(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs := newTestClient("obs", 16)
+	joinAll(t, cr, obs)
+
+	a := bioClient("a", "", "hola")
+	register(t, cr, a)
+	w := expectAvatarFrame(t, a, "type", "from", "text", "ts", "bio")
+	if string(w["bio"]) != `"hola"` {
+		t.Fatalf("welcome bio = %s", w["bio"])
+	}
+	exactFields(t, nextRaw(t, a), "type", "users", "bios", "ts")
+	decodeHistory(t, nextRaw(t, a))
+	for _, c := range []*Client{a, obs} {
+		j := exactFields(t, nextRaw(t, c), "type", "from", "text", "ts", "bio")
+		if string(j["bio"]) != `"hola"` || string(j["type"]) != `"join"` {
+			t.Fatalf("join = %v", j)
+		}
+	}
+
+	b := newTestClient("b", 16)
+	register(t, cr, b)
+	expectAvatarFrame(t, b, "type", "from", "text", "ts") // no bio key
+	skip(t, b, 2)
+	expectAvatarFrame(t, b, "type", "from", "text", "ts")
+}
+
+// CHAT-17, CHAT-37: bios lists only members that have one and is omitted when nobody does.
+func TestUsersFrameBios(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := bioClient("a", "", "bio-a"), newTestClient("b", 16)
+	register(t, cr, a)
+	register(t, cr, b)
+	skip(t, a, privateFrames+2)
+
+	c := bioClient("c", "pic-c", "bio-c")
+	register(t, cr, c)
+	nextRaw(t, c) // welcome
+	f := exactFields(t, nextRaw(t, c), "type", "users", "avatars", "bios", "ts")
+	if want := map[string]string{"a": "bio-a", "c": "bio-c"}; !maps.Equal(stringMap(t, f["bios"]), want) {
+		t.Fatalf("bios = %s, want %v", f["bios"], want)
+	}
+	if want := map[string]string{"c": "pic-c"}; !maps.Equal(stringMap(t, f["avatars"]), want) {
+		t.Fatalf("avatars = %s, want %v", f["avatars"], want)
+	}
+
+	cr2, _ := startRoom(t)
+	x := newTestClient("x", 16)
+	register(t, cr2, x)
+	nextRaw(t, x)
+	exactFields(t, nextRaw(t, x), "type", "users", "ts") // nobody has a bio
+}
+
+// CHAT-38: an update reaches the whole room, sender included, with the exact shape and key order.
+func TestProfileUpdateBroadcast(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("a", 16), newTestClient("b", 16)
+	joinAll(t, cr, a, b)
+
+	profileUpdate(t, cr, a, "pic", "hola")
+	for _, c := range []*Client{a, b} {
+		raw := nextRaw(t, c)
+		exactFields(t, raw, "type", "from", "ts", "avatar", "bio")
+		s := string(raw)
+		if !strings.HasPrefix(s, `{"type":"profile","from":"a","ts":`) || !strings.HasSuffix(s, `,"avatar":"pic","bio":"hola"}`) {
+			t.Fatalf("profile frame = %s", s)
+		}
+	}
+	expectEmpty(t, a)
+	expectEmpty(t, b)
+}
+
+// CHAT-38: an empty update clears the profile; the frame and later users frames omit the fields.
+func TestProfileClear(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := bioClient("a", "pic", "hola")
+	register(t, cr, a)
+	skip(t, a, privateFrames+1)
+
+	profileUpdate(t, cr, a, "", "")
+	exactFields(t, nextRaw(t, a), "type", "from", "ts")
+
+	late := newTestClient("late", 16)
+	register(t, cr, late)
+	nextRaw(t, late)
+	exactFields(t, nextRaw(t, late), "type", "users", "ts")
+}
+
+// CHAT-28, CHAT-38: history keeps the avatar a chat was relayed with; users shows the new one.
+func TestProfileHistoryKeepsOldAvatar(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := avatarClient("a", "U")
+	register(t, cr, a)
+	skip(t, a, privateFrames+1)
+	broadcast(t, cr, a, "before")
+	skip(t, a, 1)
+	profileUpdate(t, cr, a, "V", "")
+	skip(t, a, 1)
+
+	late := newTestClient("late", 16)
+	register(t, cr, late)
+	nextRaw(t, late)
+	f := exactFields(t, nextRaw(t, late), "type", "users", "avatars", "ts")
+	if got := stringMap(t, f["avatars"]); got["a"] != "V" {
+		t.Fatalf("avatars = %v, want a=V", got)
+	}
+	var hist struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(nextRaw(t, late), &hist); err != nil || len(hist.Messages) != 1 {
+		t.Fatalf("history = %+v, err %v", hist, err)
+	}
+	h := exactFields(t, hist.Messages[0], "type", "from", "text", "ts", "avatar", "id")
+	if string(h["avatar"]) != `"U"` {
+		t.Fatalf("history avatar = %s, want U", h["avatar"])
+	}
+}
+
+// CHAT-28, CHAT-38: after an update the sender's next chat carries the new avatar and never a bio.
+func TestProfileChangesLaterChatAvatar(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := avatarClient("a", "old")
+	register(t, cr, a)
+	skip(t, a, privateFrames+1)
+
+	profileUpdate(t, cr, a, "new", "hola")
+	skip(t, a, 1)
+	broadcast(t, cr, a, "hi")
+	f := expectAvatarFrame(t, a, "type", "from", "text", "ts", "avatar", "id")
+	if string(f["avatar"]) != `"new"` {
+		t.Fatalf("chat avatar = %s, want new", f["avatar"])
+	}
+}
+
+// CHAT-38: an update from a client that is no longer a member publishes nothing.
+func TestProfileFromRemovedClientIgnored(t *testing.T) {
+	cr, _ := startRoom(t)
+	a, b := newTestClient("a", 16), newTestClient("b", 16)
+	joinAll(t, cr, a, b)
+	unregister(t, cr, a)
+	expect(t, b, typeLeave, "a", "")
+
+	profileUpdate(t, cr, a, "pic", "ghost")
+	broadcast(t, cr, b, "marker")
+	expect(t, b, typeChat, "b", "marker") // decode fails on a profile frame
+}
+
+// CHAT-38: profile frames are never stored in history.
+func TestProfileNotInHistory(t *testing.T) {
+	cr, _ := startRoom(t)
+	a := newTestClient("a", 16)
+	joinAll(t, cr, a)
+	profileUpdate(t, cr, a, "pic", "hola")
+	skip(t, a, 1)
+	broadcast(t, cr, a, "hi")
+	skip(t, a, 1)
+
+	late := newTestClient("late", 16)
+	register(t, cr, late)
+	nextRaw(t, late)
+	nextRaw(t, late)
+	hist := decodeHistory(t, nextRaw(t, late))
+	if len(hist.Messages) != 1 || hist.Messages[0].Type != typeChat {
+		t.Fatalf("history = %+v, want only the chat", hist.Messages)
+	}
 }

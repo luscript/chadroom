@@ -19,6 +19,7 @@ const (
 	typeDMError = "dm_error"
 	typeTyping  = "typing"
 	typeMusic   = "music"
+	typeProfile = "profile"
 	historySize = 50 // chat messages kept for newcomers
 
 	replyTargets = 200 // room messages that can still be quoted (CHAT-35)
@@ -39,14 +40,16 @@ type quote struct {
 // message is the outbound JSON envelope. Field order is the JSON order. type, from,
 // text and ts are always present; avatar only when the sender has one (welcome, join,
 // chat and history entries, never leave), so frames without a picture are unchanged
-// (CHAT-28). id and reply are chat-only (CHAT-35), so welcome, join and leave are
-// unchanged. users and history frames have their own shapes below.
+// (CHAT-28). bio only on welcome and join (CHAT-37), never on chat or history. id and
+// reply are chat-only (CHAT-35), so welcome, join and leave are unchanged. users and
+// history frames have their own shapes below.
 type message struct {
 	Type   string `json:"type"` // chat | join | leave | welcome
 	From   string `json:"from"`
 	Text   string `json:"text"` // "" for everything but chat
 	TS     int64  `json:"ts"`   // unix milliseconds
 	Avatar string `json:"avatar,omitempty"`
+	Bio    string `json:"bio,omitempty"`   // welcome/join only (CHAT-37); never chat or history
 	ID     int64  `json:"id,omitempty"`    // chat only (CHAT-35); 0 on welcome/join/leave
 	Reply  *quote `json:"reply,omitempty"` // chat only, when reply_to resolved
 }
@@ -56,6 +59,7 @@ type usersFrame struct {
 	Type    string            `json:"type"`              // always "users"
 	Users   []string          `json:"users"`             // never nil: [] when empty (unreachable: includes the newcomer)
 	Avatars map[string]string `json:"avatars,omitempty"` // nick -> url, only members with one (CHAT-28)
+	Bios    map[string]string `json:"bios,omitempty"`    // nick -> bio, only members with one (CHAT-17/37)
 	TS      int64             `json:"ts"`
 }
 
@@ -113,14 +117,24 @@ type musicFrame struct {
 	TS      int64       `json:"ts"`
 }
 
+// profileFrame announces a member's new profile to the whole room (CHAT-38). Never stored.
+type profileFrame struct {
+	Type   string `json:"type"` // always "profile"
+	From   string `json:"from"`
+	TS     int64  `json:"ts"`
+	Avatar string `json:"avatar,omitempty"`
+	Bio    string `json:"bio,omitempty"`
+}
+
 type inboundKind uint8
 
 const (
-	inboundChat   inboundKind = iota // zero value: inbound{from, text} literals stay room chat
-	inboundDM                        // to and text set
-	inboundBadDM                     // dm envelope with a bad to/text; answered with dm_error invalid
-	inboundTyping                    // typing signal; to == "" is a room signal
-	inboundMusic                     // validated music control (CHAT-30)
+	inboundChat    inboundKind = iota // zero value: inbound{from, text} literals stay room chat
+	inboundDM                         // to and text set
+	inboundBadDM                      // dm envelope with a bad to/text; answered with dm_error invalid
+	inboundTyping                     // typing signal; to == "" is a room signal
+	inboundMusic                      // validated music control (CHAT-30)
+	inboundProfile                    // shape-checked profile update; avatar not yet validated (readPump does it)
 )
 
 // inbound is a classified client text frame on its way to the hub. It travels on
@@ -132,6 +146,8 @@ type inbound struct {
 	text    string
 	replyTo int64    // inboundChat/inboundDM: valid reply_to (>= 1), else 0 (CHAT-21)
 	music   musicCmd // inboundMusic only
+	avatar  string   // inboundProfile: raw requested avatar ("" clears); readPump validates it
+	bio     string   // inboundProfile: cleanText(bio, maxBioRunes) ("" clears)
 }
 
 // parseInbound classifies a size- and UTF-8-checked text frame (CHAT-21). ok is
@@ -171,6 +187,14 @@ func parseInbound(frame []byte) (in inbound, ok bool) {
 				return inbound{}, false
 			}
 			return inbound{kind: inboundMusic, music: cmd}, true
+		case typeProfile:
+			// CHAT-21 rule 2b: never falls back to chat. Absent fields mean "none".
+			avatar, okA := optionalString(env, "avatar")
+			bio, okB := optionalString(env, "bio")
+			if !okA || !okB {
+				return inbound{}, false
+			}
+			return inbound{kind: inboundProfile, avatar: avatar, bio: cleanText(bio, maxBioRunes)}, true
 		case typeChat:
 			// A non-string text intentionally falls through to the plain-text rule (CHAT-21).
 			if textOK {
@@ -250,6 +274,16 @@ func jsonInt(raw json.RawMessage) (int64, bool) {
 	var n int64
 	err := json.Unmarshal(raw, &n)
 	return n, err == nil
+}
+
+// optionalString returns env[key] when it is absent ("", true) or a JSON string; any other
+// JSON value (null included) is reported as invalid.
+func optionalString(env map[string]json.RawMessage, key string) (string, bool) {
+	raw, ok := env[key]
+	if !ok {
+		return "", true
+	}
+	return jsonString(raw)
 }
 
 // jsonString reports whether raw is a JSON string and returns its value ("null" is not a string).
