@@ -103,14 +103,18 @@ api_surface:
     description: "Embedded script, stylesheet and favicons (text/javascript, text/css; charset=utf-8, image/svg+xml) with nosniff and no-cache"
     auth: null
 staleness:
-  status: fresh
-  checked_at: 2026-10-28T18:47:16Z
+  status: stale
+  checked_at: 2026-10-30T15:16:55.542Z
   since_commit: 698a80b
-  head_commit: 698a80b
+  head_commit: ddfb6d9
   threshold: 5
   drift:
     changed_files_in_modules: 0
     dependency_manifests_changed: false
-    modules_added: []
+    modules_added:
+      - cmd
+      - internal
+      - openspec
     modules_removed: []
-  invalidated_by: []
+  invalidated_by:
+    - modules

@@ -179,3 +179,10 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 
 - Respuestas: botón de responder en pantallas táctiles (hoy solo hover/teclado).
 - Respuestas: contador de ids separado para DMs (hoy los huecos en ids de sala revelan que hubo DMs).
+
+## `user-profiles` follow-ups (from verify, 2026-10-30)
+- [ ] `cleanText` keeps zero-width/format chars (Cf, U+2028/2029): blank-looking bios and
+      look-alike nicknames (`foldKey` doesn't fold them). Changes the CHAT-09 nickname rule.
+- [ ] Profile frames use `publish` (slow peers dropped) and no-op updates still broadcast; skip
+      unchanged profiles. Pairs with the connection cap in `rate-limiting`.
+- [ ] `users` frame grows with bios/avatars under join churn; same connection cap.
