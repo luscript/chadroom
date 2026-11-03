@@ -79,7 +79,7 @@ func authRouter(t *testing.T) (*httptest.Server, auth.Config) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	h, cfg := testAuthHandler(t)
-	chatSrv := newChatServer(nil, identityNickname)
+	chatSrv := newChatServer(nil, chatIdentity)
 	ctx, cancel := context.WithCancel(context.Background())
 	go chatSrv.Run(ctx)
 	const dead = "http://127.0.0.1:1"
@@ -258,7 +258,7 @@ func TestWebSocketNicknameFromSession(t *testing.T) {
 	}
 }
 
-func TestIdentityNickname(t *testing.T) {
+func TestChatIdentity(t *testing.T) {
 	cookieReq := func(id *auth.Identity) *http.Request {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		if id == nil {
@@ -275,18 +275,92 @@ func TestIdentityNickname(t *testing.T) {
 		return out
 	}
 	for _, tc := range []struct {
-		name string
-		id   *auth.Identity
-		want string
+		name        string
+		id          *auth.Identity
+		wantAccount string
+		wantNick    string
 	}{
-		{"name", &auth.Identity{Email: "a@crombie.dev", Name: " Ana Pérez "}, "Ana Pérez"},
-		{"blank name", &auth.Identity{Email: "a.b@crombie.dev", Name: "  "}, "a.b"},
-		{"no name", &auth.Identity{Email: "x@y@crombie.dev"}, "x@y"},
-		{"no identity", nil, ""},
+		{"name", &auth.Identity{Email: "a@crombie.dev", Name: " Ana Pérez "}, "a@crombie.dev", "Ana Pérez"},
+		{"blank name", &auth.Identity{Email: "a.b@crombie.dev", Name: "  "}, "a.b@crombie.dev", "a.b"},
+		{"no name", &auth.Identity{Email: "x@y@crombie.dev"}, "x@y@crombie.dev", "x@y"},
+		{"no identity", nil, "", ""},
 	} {
-		if got := identityNickname(cookieReq(tc.id)); got != tc.want {
-			t.Errorf("%s: identityNickname = %q, want %q", tc.name, got, tc.want)
+		account, nick := chatIdentity(cookieReq(tc.id))
+		if account != tc.wantAccount || nick != tc.wantNick {
+			t.Errorf("%s: chatIdentity = (%q, %q), want (%q, %q)", tc.name, account, nick, tc.wantAccount, tc.wantNick)
 		}
+	}
+}
+
+// wsDial opens /ws with the session cookie and consumes welcome, users and history, returning the
+// connection and the welcome's from.
+func wsDial(t *testing.T, ts *httptest.Server, cookie *http.Cookie) (*websocket.Conn, string) {
+	t.Helper()
+	hdr := http.Header{"Origin": []string{ts.URL}}
+	hdr.Add("Cookie", cookie.String())
+	conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", hdr)
+	if err != nil {
+		t.Fatalf("dial: %v (resp %v)", err, resp)
+	}
+	t.Cleanup(func() { conn.Close() })
+	var from string
+	for i, want := range []string{"welcome", "users", "history"} {
+		f := wsFrame(t, conn)
+		if f.Type != want {
+			t.Fatalf("frame %d type = %q, want %q", i, f.Type, want)
+		}
+		if i == 0 {
+			from = f.From
+		}
+	}
+	return conn, from
+}
+
+type wsFrameFields struct{ Type, From string }
+
+func wsFrame(t *testing.T, conn *websocket.Conn) wsFrameFields {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f wsFrameFields
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatalf("frame %q: %v", data, err)
+	}
+	return f
+}
+
+// CHAT-41: two tabs with the same session are one member: same name, no second join.
+func TestSameAccountInTwoTabs(t *testing.T) {
+	ts, cfg := authRouter(t)
+	ana := sessionCookie(t, cfg, auth.Identity{Email: "ana@crombie.dev", Name: "Ana Pérez"})
+	first, from1 := wsDial(t, ts, ana)
+	if f := wsFrame(t, first); f.Type != "join" || f.From != "Ana Pérez" {
+		t.Fatalf("first tab own frame = %+v, want its own join", f)
+	}
+	_, from2 := wsDial(t, ts, ana)
+	if from1 != "Ana Pérez" || from2 != "Ana Pérez" {
+		t.Fatalf("welcomes = %q, %q, want both Ana Pérez", from1, from2)
+	}
+	// A later member's join is the marker: if the second tab had announced itself, it would arrive first.
+	carl := sessionCookie(t, cfg, auth.Identity{Email: "carl@crombie.dev", Name: "Carl"})
+	wsDial(t, ts, carl)
+	if f := wsFrame(t, first); f.Type != "join" || f.From != "Carl" {
+		t.Fatalf("first tab next frame = %+v, want join of Carl", f)
+	}
+}
+
+// CHAT-41: different accounts with the same name are different members.
+func TestDifferentAccountsSameName(t *testing.T) {
+	ts, cfg := authRouter(t)
+	a := sessionCookie(t, cfg, auth.Identity{Email: "ana.perez@crombie.dev", Name: "Ana Pérez"})
+	b := sessionCookie(t, cfg, auth.Identity{Email: "ana.p@crombie.dev", Name: "Ana Pérez"})
+	_, from1 := wsDial(t, ts, a)
+	_, from2 := wsDial(t, ts, b)
+	if from1 != "Ana Pérez" || from2 != "Ana Pérez (2)" {
+		t.Fatalf("welcomes = %q, %q, want Ana Pérez and Ana Pérez (2)", from1, from2)
 	}
 }
 
@@ -408,7 +482,7 @@ func TestNewRouterPanicsWithoutGuards(t *testing.T) {
 					t.Errorf("%s: newRouter did not panic", name)
 				}
 			}()
-			newRouter(newChatServer(nil, queryNickname), nil, nil, g)
+			newRouter(newChatServer(nil, queryIdentity), nil, nil, g)
 		}()
 	}
 }

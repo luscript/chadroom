@@ -67,7 +67,7 @@ func status(code int, body string) http.HandlerFunc {
 
 func newPlaylistTestServer(t *testing.T, p *playlistImport) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewServer(newRouter(newChatServer(nil, queryNickname), nil, p, openGuards()))
+	ts := httptest.NewServer(newRouter(newChatServer(nil, queryIdentity), nil, p, openGuards()))
 	t.Cleanup(ts.Close)
 	return ts
 }

@@ -62,7 +62,7 @@ func foldKey(s string) string {
 }
 
 // assignNickname returns base if free, else the lowest free "base (n)", n >= 2,
-// with base truncated so the result fits maxNicknameRunes. Run-only: reads taken.
+// with base truncated so the result fits maxNicknameRunes. Run-only: reads taken (names of other members).
 func (cr *Room) assignNickname(base string) string {
 	if _, ok := cr.taken[foldKey(base)]; !ok {
 		return base

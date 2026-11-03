@@ -3,12 +3,14 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,13 +30,41 @@ func joinRoom(t *testing.T, srv *httptest.Server, room, nick string) (*websocket
 	return conn, users, history
 }
 
-// queryNickname is the test resolver: it reads ?nickname=, as the server did before CHAT-41.
-func queryNickname(r *http.Request) string { return r.URL.Query().Get("nickname") }
+// connSeq numbers the accounts queryIdentity invents, so by default each connection is its own account.
+var connSeq atomic.Int64
+
+// queryIdentity is the test resolver: the nickname comes from ?nickname=, the account from
+// ?account= or, when absent, a fresh "conn-<n>" (every connection is a different person).
+func queryIdentity(r *http.Request) (account, nickname string) {
+	account = r.URL.Query().Get("account")
+	if account == "" {
+		account = "conn-" + strconv.FormatInt(connSeq.Add(1), 10)
+	}
+	return account, r.URL.Query().Get("nickname")
+}
+
+// dialAccount is dial for a given account: connections sharing it are one member.
+func dialAccount(t *testing.T, srv *httptest.Server, account, nick string) (*websocket.Conn, string) {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?nickname=" + url.QueryEscape(nick) + "&account=" + url.QueryEscape(account)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": []string{srv.URL}})
+	if err != nil {
+		t.Fatalf("dial %s as %s: %v", nick, account, err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	m := readMsg(t, conn)
+	if m.Type != typeWelcome {
+		t.Fatalf("first frame = %+v, want welcome", m)
+	}
+	decodeUsers(t, readRaw(t, conn))
+	decodeHistory(t, readRaw(t, conn))
+	return conn, m.From
+}
 
 // CHAT-41: the injected resolver decides the nickname; ?nickname= is ignored.
-func TestNicknameResolver(t *testing.T) {
+func TestIdentityResolver(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	s := NewServer(nil, nil, func(*http.Request) string { return "Ana Pérez" }, NewRoom("general"))
+	s := NewServer(nil, nil, func(*http.Request) (string, string) { return "ana@x", "Ana Pérez" }, NewRoom("general"))
 	engine := gin.New()
 	engine.GET("/ws", s.HandleWebSocket)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -47,6 +77,36 @@ func TestNicknameResolver(t *testing.T) {
 	var w message
 	if err := json.Unmarshal(readRaw(t, conn), &w); err != nil || w.From != "Ana Pérez" {
 		t.Fatalf("welcome from = %q (err %v), want %q", w.From, err, "Ana Pérez")
+	}
+}
+
+// CHAT-41: a connection without an account key is not admitted: 401, no upgrade, room untouched.
+func TestEmptyAccountRejected(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	room := NewRoom("general")
+	s := NewServer(nil, nil, func(*http.Request) (string, string) { return "", "Ana" }, room)
+	engine := gin.New()
+	engine.GET("/ws", s.HandleWebSocket)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	srv := httptest.NewServer(engine)
+	defer srv.Close()
+
+	_, resp, err := dialOrigin(srv, "Ana", srv.URL)
+	if err == nil {
+		t.Fatal("dial succeeded, want a failed handshake")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("response = %+v, want 401", resp)
+	}
+	if body, _ := io.ReadAll(resp.Body); len(body) != 0 {
+		t.Fatalf("body = %q, want empty", body)
+	}
+	cancel()
+	<-room.done
+	if len(room.clients) != 0 || len(room.members) != 0 {
+		t.Fatalf("room touched: %d clients, %d members", len(room.clients), len(room.members))
 	}
 }
 
@@ -66,7 +126,7 @@ func TestNewServerPanics(t *testing.T) {
 					t.Fatal("expected panic")
 				}
 			}()
-			NewServer(nil, nil, queryNickname, tt.rooms...)
+			NewServer(nil, nil, queryIdentity, tt.rooms...)
 		})
 	}
 	t.Run("nil resolver", func(t *testing.T) {
@@ -188,7 +248,7 @@ func dialOriginRoom(srv *httptest.Server, nick, room, origin string) (*websocket
 // SRV-03: Run returns only after every room has stopped.
 func TestServerRunWaitsForAllRooms(t *testing.T) {
 	r1, r2 := NewRoom("one"), NewRoom("two")
-	s := NewServer(nil, nil, queryNickname, r1, r2)
+	s := NewServer(nil, nil, queryIdentity, r1, r2)
 	ctx, cancel := context.WithCancel(context.Background())
 	returned := make(chan struct{})
 	go func() {
@@ -239,7 +299,7 @@ func TestCheckOrigin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := NewServer(tt.allowed, nil, queryNickname, NewRoom("general"))
+			s := NewServer(tt.allowed, nil, queryIdentity, NewRoom("general"))
 			r := httptest.NewRequest("GET", "http://example.com/ws", nil)
 			if tt.origin != "" {
 				r.Header.Set("Origin", tt.origin)

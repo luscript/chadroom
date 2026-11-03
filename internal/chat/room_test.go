@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -39,11 +40,20 @@ func runRoom(t *testing.T, cr *Room) (*Room, context.CancelFunc) {
 	return cr, cancel
 }
 
-// privateFrames is how many frames a joining client gets first: welcome, users, history.
+// privateFrames is how many frames a joining client gets first: welcome, users, history
+// (+ music in a room with a current video).
 const privateFrames = 3
 
+// testAccounts numbers the accounts newTestClient invents: each client is its own account.
+var testAccounts atomic.Int64
+
 func newTestClient(nick string, buf int) *Client {
-	return &Client{send: make(chan []byte, buf), registered: make(chan struct{}), nickname: nick}
+	return newAccountClient("acct-"+strconv.FormatInt(testAccounts.Add(1), 10), nick, buf)
+}
+
+// newAccountClient is newTestClient for a given account: clients sharing it are one member.
+func newAccountClient(account, nick string, buf int) *Client {
+	return &Client{send: make(chan []byte, buf), registered: make(chan struct{}), account: account, nickname: nick}
 }
 
 func register(t *testing.T, cr *Room, c *Client) {
@@ -260,6 +270,19 @@ func expectWelcome(t *testing.T, c *Client, name string) (usersFrame, historyFra
 		t.Fatalf("private frames differ in ts: welcome %d, users %d, history %d", w.TS, users.TS, hist.TS)
 	}
 	return users, hist
+}
+
+// expectWelcomeMusic is expectWelcome for a joiner of a room with a current video: the private
+// frames are welcome, users, music, history (CHAT-30). It returns the snapshot and the history.
+func expectWelcomeMusic(t *testing.T, c *Client, name, video string, playing bool, by string) (musicFrame, historyFrame) {
+	t.Helper()
+	w := next(t, c)
+	if w.Type != typeWelcome || w.From != name {
+		t.Fatalf("got (%s, %q), want (welcome, %q)", w.Type, w.From, name)
+	}
+	decodeUsers(t, nextRaw(t, c))
+	f := expectMusic(t, c, video, playing, by)
+	return f, decodeHistory(t, nextRaw(t, c))
 }
 
 // expectUsers compares the nicknames of a users frame, in order.
@@ -597,8 +620,7 @@ func TestChatBeforeLeaveOnDisconnect(t *testing.T) {
 	a := newTestClient("a", 8)
 	b := newTestClient("b", 8)
 	for _, c := range []*Client{a, b} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 
 	cr.broadcast <- inbound{from: a, text: "bye"}
@@ -615,8 +637,7 @@ func TestLeaveAfterDrainDroppedClient(t *testing.T) {
 	a := newTestClient("a", 0) // any delivery to a overflows
 	b := newTestClient("b", 8)
 	for _, c := range []*Client{a, b} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 
 	cr.broadcast <- inbound{from: a, text: "bye"}
@@ -813,8 +834,7 @@ func TestSlowDropCascadeAnnounced(t *testing.T) {
 	x := newTestClient("x", 0) // dropped by the chat
 	y := newTestClient("y", 1) // takes the chat, dropped by x's leave
 	for _, c := range []*Client{o, x, y} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 
 	cr.relay(inbound{from: o, text: "hi"})
@@ -979,7 +999,7 @@ func TestAssignNickname(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cr := NewRoom("general")
 			for _, n := range tt.taken {
-				cr.taken[foldKey(n)] = struct{}{}
+				cr.taken[foldKey(n)] = &member{}
 			}
 			got := cr.assignNickname(tt.base)
 			if got != tt.want {
@@ -1213,8 +1233,7 @@ func TestDMBeforeLeaveOnDisconnect(t *testing.T) {
 	cr := NewRoom("general")
 	a, b := newTestClient("a", 8), newTestClient("b", 8)
 	for _, c := range []*Client{a, b} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 
 	cr.broadcast <- inbound{from: a, kind: inboundDM, to: "b", text: "bye"}
@@ -1229,8 +1248,7 @@ func TestDMSlowRecipientDropped(t *testing.T) {
 	cr := NewRoom("general")
 	o, a, x := newTestClient("o", 16), newTestClient("a", 16), newTestClient("x", 0)
 	for _, c := range []*Client{o, a, x} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 
 	cr.dispatch(inbound{from: a, kind: inboundDM, to: "x", text: "hi"})
@@ -1265,8 +1283,7 @@ func TestDMSlowSenderDropped(t *testing.T) {
 	cr := NewRoom("general")
 	o, r, s := newTestClient("o", 16), newTestClient("r", 16), newTestClient("s", 0)
 	for _, c := range []*Client{o, r, s} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 
 	cr.dispatch(inbound{from: s, kind: inboundDM, to: "r", text: "hi"})
@@ -1284,8 +1301,7 @@ func TestDMErrorSlowSenderDropped(t *testing.T) {
 	cr := NewRoom("general")
 	o, s := newTestClient("o", 16), newTestClient("s", 0)
 	for _, c := range []*Client{o, s} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 
 	cr.dispatch(inbound{from: s, kind: inboundDM, to: "Zoe", text: "hi"})
@@ -1305,8 +1321,7 @@ func TestDMNotLogged(t *testing.T) {
 	cr := NewRoom("general")
 	a, b := newTestClient("Ana", 16), newTestClient("Bea", 16)
 	for _, c := range []*Client{a, b} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 	cr.dispatch(inbound{from: a, kind: inboundDM, to: "Bea", text: "texto-secreto"})
 	cr.dispatch(inbound{from: a, kind: inboundDM, to: "Ana", text: "texto-self"})
@@ -1443,8 +1458,7 @@ func TestTypingFullBufferSkips(t *testing.T) {
 	cr := NewRoom("general")
 	o, a, b := newTestClient("o", 16), newTestClient("a", 16), newTestClient("b", 1)
 	for _, c := range []*Client{o, a, b} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 	b.send <- []byte("filler")
 
@@ -1476,8 +1490,7 @@ func TestTypingNotLogged(t *testing.T) {
 	cr := NewRoom("general")
 	a, b := newTestClient("Ana", 16), newTestClient("Bea", 16)
 	for _, c := range []*Client{a, b} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 	cr.dispatch(inbound{from: a, kind: inboundTyping})
 	cr.dispatch(inbound{from: a, kind: inboundTyping, to: "Bea"})
@@ -1492,7 +1505,7 @@ func TestTypingNotLogged(t *testing.T) {
 // avatarClient is newTestClient with an avatar; the hub treats it as an opaque string.
 func avatarClient(nick, avatar string) *Client {
 	c := newTestClient(nick, 16)
-	c.avatar = avatar
+	c.reqAvatar = avatar
 	return c
 }
 
@@ -2294,7 +2307,7 @@ func TestMusicNeedsVideo(t *testing.T) {
 	}
 }
 
-// CHAT-30: a newcomer gets the current state right after history, before its join; none while nothing is loaded.
+// CHAT-30: a newcomer gets the current state after users and before history (then its join), including a later connection; none while nothing is loaded.
 func TestMusicNewcomerSnapshot(t *testing.T) {
 	cr, _ := startMusicRoom(t)
 	a := newTestClient("A", 64)
@@ -2322,8 +2335,7 @@ func TestMusicNewcomerSnapshot(t *testing.T) {
 	joining := time.Now()
 	c := newTestClient("C", 64)
 	register(t, cr, c)
-	expectWelcome(t, c, "C")
-	f := expectMusic(t, c, "dQw4w9WgXcQ", true, "A")
+	f, _ := expectWelcomeMusic(t, c, "C", "dQw4w9WgXcQ", true, "A")
 	if f.Seq != 1 || !slices.Equal(f.Queue, []queueItem{{1, v2, "A"}, {2, v3, "A"}}) {
 		t.Fatalf("snapshot seq %d queue %+v, want seq 1 and the 2 queued tracks", f.Seq, f.Queue)
 	}
@@ -2353,8 +2365,7 @@ func TestMusicEmptyRoomPauses(t *testing.T) {
 
 	b := newTestClient("B", 64)
 	register(t, cr, b)
-	expectWelcome(t, b, "B")
-	f := expectMusic(t, b, "dQw4w9WgXcQ", false, "A")
+	f, _ := expectWelcomeMusic(t, b, "B", "dQw4w9WgXcQ", false, "A")
 	if f.Seq != 1 || !slices.Equal(f.Queue, []queueItem{{1, v2, "A"}}) {
 		t.Fatalf("seq %d queue %+v, want the queue kept", f.Seq, f.Queue)
 	}
@@ -2366,8 +2377,7 @@ func TestMusicEmptyRoomPauses(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // still paused: the position does not advance
 	c := newTestClient("C", 64)
 	register(t, cr, c)
-	expectWelcome(t, c, "C")
-	if g := expectMusic(t, c, "dQw4w9WgXcQ", false, "A"); g.Pos != f.Pos {
+	if g, _ := expectWelcomeMusic(t, c, "C", "dQw4w9WgXcQ", false, "A"); g.Pos != f.Pos {
 		t.Fatalf("paused pos moved from %d to %d", f.Pos, g.Pos)
 	}
 }
@@ -2376,8 +2386,7 @@ func TestMusicEmptyRoomPauses(t *testing.T) {
 func TestMusicLastSlowDropPauses(t *testing.T) {
 	cr := NewMusicRoom("musica")
 	x := newTestClient("x", 0)
-	cr.clients[x] = struct{}{}
-	cr.taken[foldKey("x")] = struct{}{}
+	cr.attach(x)
 	cr.player.apply(addCmd(v1), "x", time.Now().Add(-time.Hour)) // an hour in, so a stale pos stands out
 
 	cr.dispatch(inbound{from: x, kind: inboundMusic, music: playCmd}) // x cannot take the frame
@@ -2425,9 +2434,8 @@ func TestMusicNotInHistory(t *testing.T) {
 
 	b := newTestClient("B", 64)
 	register(t, cr, b)
-	_, hist := expectWelcome(t, b, "B")
+	_, hist := expectWelcomeMusic(t, b, "B", "dQw4w9WgXcQ", true, "A")
 	expectHistory(t, hist, message{Type: typeChat, From: "A", Text: "hola"})
-	expectMusic(t, b, "dQw4w9WgXcQ", true, "A")
 }
 
 // CHAT-21: a control from a client that is no longer a member is ignored.
@@ -2453,8 +2461,7 @@ func TestMusicSlowClientDropped(t *testing.T) {
 	cr := NewMusicRoom("musica")
 	o, a, x := newTestClient("o", 16), newTestClient("a", 16), newTestClient("x", 0)
 	for _, c := range []*Client{o, a, x} {
-		cr.clients[c] = struct{}{}
-		cr.taken[foldKey(c.nickname)] = struct{}{}
+		cr.attach(c)
 	}
 
 	cr.dispatch(inbound{from: a, kind: inboundMusic, music: addCmd(v1)})
@@ -2728,7 +2735,7 @@ func TestJoinLeaveWelcomeHaveNoID(t *testing.T) {
 // bioClient is avatarClient with a bio; the hub treats both as opaque strings.
 func bioClient(nick, avatar, bio string) *Client {
 	c := avatarClient(nick, avatar)
-	c.bio = bio
+	c.reqBio = bio
 	return c
 }
 
@@ -2917,5 +2924,429 @@ func TestProfileNotInHistory(t *testing.T) {
 	hist := decodeHistory(t, nextRaw(t, late))
 	if len(hist.Messages) != 1 || hist.Messages[0].Type != typeChat {
 		t.Fatalf("history = %+v, want only the chat", hist.Messages)
+	}
+}
+
+// discard drops every frame queued on c, so a hub test can assert on what follows.
+func discard(c *Client) {
+	for {
+		select {
+		case <-c.send:
+		default:
+			return
+		}
+	}
+}
+
+// joinLater registers a further connection of an account that is already a member: the
+// private frames only, no join for anybody (CHAT-02).
+func joinLater(t *testing.T, cr *Room, c *Client) {
+	t.Helper()
+	register(t, cr, c)
+	select {
+	case <-c.registered:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout waiting for registration")
+	}
+	expectWelcome(t, c, c.nickname)
+}
+
+// attachAll seats cs as Run would after their admit, with no frames sent.
+func attachAll(cr *Room, cs ...*Client) {
+	for _, c := range cs {
+		cr.attach(c)
+	}
+}
+
+// CHAT-02, CHAT-04, CHAT-17: a second connection of an account shares its member, is not announced
+// and does not add a users entry; both connections receive room chat.
+func TestSameAccountSharesMember(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs, a1 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 16)
+	joinAll(t, cr, obs, a1)
+
+	a2 := newAccountClient("acct-ana", "Other", 16)
+	joinLater(t, cr, a2)
+	if a2.nickname != "Ana" {
+		t.Fatalf("second connection nickname = %q, want Ana", a2.nickname)
+	}
+	broadcast(t, cr, obs, "marker")
+	for _, c := range []*Client{obs, a1, a2} {
+		expect(t, c, typeChat, "obs", "marker") // a join before it would fail here
+	}
+
+	c := newTestClient("c", 16)
+	register(t, cr, c)
+	users, _ := expectWelcome(t, c, "c")
+	expectUsers(t, users, "Ana", "c", "obs")
+}
+
+// CHAT-12: the same account is never suffixed, and a name stays taken while one connection remains.
+func TestSameAccountNeverSuffixed(t *testing.T) {
+	cr, _ := startRoom(t)
+	x1 := newAccountClient("acct-x", "Bob", 16)
+	joinAll(t, cr, x1)
+	x2 := newAccountClient("acct-x", "Bob", 16)
+	joinLater(t, cr, x2)
+	if x2.nickname != "Bob" {
+		t.Fatalf("same account assigned %q, want Bob", x2.nickname)
+	}
+}
+
+func TestNameKeptWhileOneConnectionRemains(t *testing.T) {
+	cr, _ := startRoom(t)
+	x1, y := newAccountClient("acct-x", "Bob", 16), newAccountClient("acct-y", "Bob", 16)
+	joinAll(t, cr, x1, y)
+	x2 := newAccountClient("acct-x", "Bob", 16)
+	joinLater(t, cr, x2)
+	if y.nickname != "Bob (2)" {
+		t.Fatalf("different account assigned %q, want Bob (2)", y.nickname)
+	}
+
+	unregister(t, cr, x1)
+	z := newTestClient("Bob", 16)
+	register(t, cr, z)
+	select {
+	case <-z.registered:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout waiting for registration")
+	}
+	if z.nickname != "Bob (3)" {
+		t.Fatalf("third account assigned %q, want Bob (3)", z.nickname)
+	}
+}
+
+// CHAT-02: leave only when the member's last connection goes, and exactly once.
+func TestLeaveOnlyOnLastConnection(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs, a1 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 16)
+	joinAll(t, cr, obs, a1)
+	a2 := newAccountClient("acct-ana", "Ana", 16)
+	joinLater(t, cr, a2)
+
+	unregister(t, cr, a1)
+	expectClosed(t, a1)
+	broadcast(t, cr, obs, "m1")
+	expect(t, obs, typeChat, "obs", "m1") // a leave before it would fail here
+
+	unregister(t, cr, a2)
+	expect(t, obs, typeLeave, "Ana", "")
+	broadcast(t, cr, obs, "m2")
+	expect(t, obs, typeChat, "obs", "m2") // exactly one leave
+}
+
+// CHAT-02, CHAT-05: dropping one slow connection of a member is silent and the other keeps receiving.
+func TestSlowDropOfOneConnectionIsSilent(t *testing.T) {
+	cr := NewRoom("general")
+	obs, a1, a2 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 16), newAccountClient("acct-ana", "Ana", 1)
+	attachAll(cr, obs, a1, a2)
+	a2.send <- []byte("filler")
+
+	cr.dispatch(inbound{from: obs, text: "m1"})
+
+	expect(t, obs, typeChat, "obs", "m1")
+	expect(t, a1, typeChat, "obs", "m1")
+	expectEmpty(t, obs) // no leave
+	if len(cr.members) != 2 || len(cr.dropped) != 0 || len(a2.member.conns) != 1 {
+		t.Fatalf("members = %d, pending drops = %d, Ana conns = %d, want 2, 0, 1", len(cr.members), len(cr.dropped), len(a2.member.conns))
+	}
+	cr.dispatch(inbound{from: obs, text: "m2"})
+	expect(t, a1, typeChat, "obs", "m2")
+}
+
+// CHAT-02: both connections of a member dropped by one fan-out announce a single leave.
+func TestBothConnectionsDroppedInOneFanOutLeaveOnce(t *testing.T) {
+	cr := NewRoom("general")
+	obs, a1, a2 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 0), newAccountClient("acct-ana", "Ana", 0)
+	attachAll(cr, obs, a1, a2)
+
+	cr.dispatch(inbound{from: obs, text: "m1"})
+
+	expect(t, obs, typeChat, "obs", "m1")
+	expect(t, obs, typeLeave, "Ana", "")
+	expectEmpty(t, obs)
+	expectClosed(t, a1)
+	expectClosed(t, a2)
+	if len(cr.members) != 1 || len(cr.taken) != 1 || len(cr.clients) != 1 {
+		t.Fatalf("members = %d, taken = %d, clients = %d, want 1, 1, 1", len(cr.members), len(cr.taken), len(cr.clients))
+	}
+}
+
+// CHAT-02, CHAT-11: a later connection that cannot take its private frames is removed alone;
+// the member and its name stay and nothing is announced.
+func TestLaterConnectionFailedAdmitIsSilent(t *testing.T) {
+	cr := NewRoom("general")
+	obs, a1 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 16)
+	attachAll(cr, obs, a1)
+	a2 := newAccountClient("acct-ana", "Ana", privateFrames-1) // history overflows
+
+	cr.admit(a2)
+
+	expectClosed(t, a2)
+	expectEmpty(t, obs)
+	expectEmpty(t, a1)
+	if _, named := cr.taken[foldKey("Ana")]; !named || len(cr.members) != 2 || len(cr.clients) != 2 || len(cr.dropped) != 0 {
+		t.Fatalf("name kept = %v, members = %d, clients = %d, drops = %d", named, len(cr.members), len(cr.clients), len(cr.dropped))
+	}
+}
+
+// CHAT-02: a first connection that cannot take its private frames leaves no member behind.
+func TestFailedFirstAdmitLeavesNoMember(t *testing.T) {
+	cr := NewRoom("general")
+	n := newTestClient("n", privateFrames-1)
+
+	cr.admit(n)
+
+	expectClosed(t, n)
+	if len(cr.members) != 0 || len(cr.taken) != 0 || len(cr.clients) != 0 {
+		t.Fatalf("members = %d, taken = %d, clients = %d, want all 0", len(cr.members), len(cr.taken), len(cr.clients))
+	}
+}
+
+// CHAT-11, CHAT-28, CHAT-37: a later connection's requested nickname and profile are ignored; its
+// welcome carries the member's, and nothing is broadcast.
+func TestLaterConnectionInheritsProfile(t *testing.T) {
+	cr := NewRoom("general")
+	obs := newTestClient("obs", 16)
+	a1 := newAccountClient("acct-ana", "Ana", 16)
+	a1.reqAvatar, a1.reqBio = "U", "hola"
+	cr.admit(obs)
+	cr.admit(a1)
+	discard(obs)
+	discard(a1)
+
+	a2 := newAccountClient("acct-ana", "Other", 16)
+	a2.reqAvatar, a2.reqBio = "V", "otra"
+	cr.admit(a2)
+
+	w := next(t, a2)
+	if w.Type != typeWelcome || w.From != "Ana" || w.Avatar != "U" || w.Bio != "hola" {
+		t.Fatalf("welcome = %+v, want Ana with avatar U and bio hola", w)
+	}
+	discard(a2)
+	expectEmpty(t, obs) // no join, no profile
+	expectEmpty(t, a1)
+}
+
+// CHAT-22: a DM reaches every connection of both accounts exactly once, identical, and nobody else.
+func TestDMFanOutToAllConnections(t *testing.T) {
+	cr, _ := startRoom(t)
+	a1, b1, c := newAccountClient("acct-a", "A", 16), newAccountClient("acct-b", "B", 16), newTestClient("C", 16)
+	joinAll(t, cr, a1, b1, c)
+	a2, b2 := newAccountClient("acct-a", "A", 16), newAccountClient("acct-b", "B", 16)
+	joinLater(t, cr, a2)
+	joinLater(t, cr, b2)
+
+	dm(t, cr, a1, "B", "hola")
+	broadcast(t, cr, c, "marker")
+
+	first := nextRaw(t, a1)
+	if d := decodeDM(t, first); d.From != "A" || d.To != "B" || d.Text != "hola" {
+		t.Fatalf("dm = %+v, want A to B: hola", d)
+	}
+	for _, o := range []*Client{a2, b1, b2} {
+		if got := nextRaw(t, o); string(got) != string(first) {
+			t.Fatalf("dm copy = %s, want %s", got, first)
+		}
+	}
+	for _, o := range []*Client{a1, a2, b1, b2, c} {
+		expect(t, o, typeChat, "C", "marker") // no extra dm and none for C
+	}
+}
+
+// CHAT-23: a DM to the sender's own account from another tab is a self error on the originator only.
+func TestDMToOwnAccountFromOtherTab(t *testing.T) {
+	cr, _ := startRoom(t)
+	obs, a1 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 16)
+	joinAll(t, cr, obs, a1)
+	a2 := newAccountClient("acct-ana", "Ana", 16)
+	joinLater(t, cr, a2)
+
+	dm(t, cr, a2, "ANA", "hi")
+	broadcast(t, cr, obs, "marker")
+
+	expectDMError(t, a2, "ANA", reasonSelf)
+	for _, c := range []*Client{obs, a1, a2} {
+		expect(t, c, typeChat, "obs", "marker")
+	}
+}
+
+// CHAT-22, CHAT-05: one recipient connection that cannot take its copy is dropped alone, silently.
+func TestDMSlowRecipientConnection(t *testing.T) {
+	cr := NewRoom("general")
+	obs := newTestClient("obs", 16)
+	a1, a2 := newAccountClient("acct-a", "A", 16), newAccountClient("acct-a", "A", 16)
+	b1, b2 := newAccountClient("acct-b", "B", 16), newAccountClient("acct-b", "B", 1)
+	attachAll(cr, obs, a1, a2, b1, b2)
+	b2.send <- []byte("filler")
+
+	cr.dispatch(inbound{from: a1, kind: inboundDM, to: "B", text: "hi"})
+
+	for _, c := range []*Client{b1, a1, a2} {
+		expectDM(t, c, "A", "B", "hi")
+		expectEmpty(t, c)
+	}
+	expectEmpty(t, obs) // no leave: B keeps b1
+	if len(b2.member.conns) != 1 || len(cr.members) != 3 {
+		t.Fatalf("B conns = %d, members = %d, want 1 and 3", len(b2.member.conns), len(cr.members))
+	}
+}
+
+// CHAT-26: a room typing signal skips every connection of the sender's account.
+func TestTypingExcludesOwnConnections(t *testing.T) {
+	cr := NewRoom("general")
+	obs, a1, a2 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 16), newAccountClient("acct-ana", "Ana", 16)
+	attachAll(cr, obs, a1, a2)
+
+	cr.dispatch(inbound{from: a1, kind: inboundTyping})
+
+	expectTyping(t, obs, "Ana", "")
+	expectEmpty(t, a1)
+	expectEmpty(t, a2)
+}
+
+// CHAT-26: a direct typing signal reaches every connection of the recipient and not the sender's.
+func TestTypingDMReachesAllRecipientConnections(t *testing.T) {
+	cr := NewRoom("general")
+	a1 := newTestClient("A", 16)
+	b1, b2 := newAccountClient("acct-b", "B", 16), newAccountClient("acct-b", "B", 16)
+	attachAll(cr, a1, b1, b2)
+
+	cr.dispatch(inbound{from: a1, kind: inboundTyping, to: "B"})
+
+	expectTyping(t, b1, "A", "B")
+	expectTyping(t, b2, "A", "B")
+	expectEmpty(t, a1)
+}
+
+// CHAT-26: a direct typing signal to the sender's own account is discarded.
+func TestTypingDMToOwnAccountSilent(t *testing.T) {
+	cr := NewRoom("general")
+	a1, a2 := newAccountClient("acct-ana", "Ana", 16), newAccountClient("acct-ana", "Ana", 16)
+	attachAll(cr, a1, a2)
+
+	cr.dispatch(inbound{from: a1, kind: inboundTyping, to: "ana"})
+
+	expectEmpty(t, a1)
+	expectEmpty(t, a2)
+}
+
+// CHAT-38: a profile update changes the member's profile, reaches every connection of the room, and
+// a later connection's welcome shows it.
+func TestProfileSyncAcrossConnections(t *testing.T) {
+	cr := NewRoom("general")
+	obs, a1, a2 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 16), newAccountClient("acct-ana", "Ana", 16)
+	attachAll(cr, obs, a1, a2)
+
+	cr.dispatch(inbound{from: a1, kind: inboundProfile, avatar: "pic", bio: "nueva"})
+
+	for _, c := range []*Client{obs, a1, a2} {
+		var f profileFrame
+		if err := json.Unmarshal(nextRaw(t, c), &f); err != nil || f.Type != typeProfile || f.From != "Ana" || f.Avatar != "pic" || f.Bio != "nueva" {
+			t.Fatalf("profile frame = %+v (err %v)", f, err)
+		}
+	}
+	a3 := newAccountClient("acct-ana", "Ana", 16)
+	cr.admit(a3)
+	if w := next(t, a3); w.Type != typeWelcome || w.Avatar != "pic" || w.Bio != "nueva" {
+		t.Fatalf("welcome = %+v, want the updated profile", w)
+	}
+}
+
+// CHAT-30: the player keeps playing while any connection remains in the room.
+func TestPlayerKeepsPlayingWhileAConnectionRemains(t *testing.T) {
+	cr := NewMusicRoom("musica")
+	a1, a2 := newAccountClient("acct-ana", "Ana", 16), newAccountClient("acct-ana", "Ana", 16)
+	attachAll(cr, a1, a2)
+	cr.player.apply(addCmd(v1), "Ana", time.Now())
+
+	cr.remove(a1)
+	if !cr.player.playing {
+		t.Fatal("player halted while a connection remains")
+	}
+	cr.remove(a2)
+	if cr.player.playing {
+		t.Fatal("player still playing with nobody in the room")
+	}
+}
+
+// CHAT-30: a later connection of a member also gets the snapshot, before its history.
+func TestMusicLaterConnectionGetsSnapshot(t *testing.T) {
+	cr := NewMusicRoom("musica")
+	a1 := newAccountClient("acct-ana", "Ana", 16)
+	cr.admit(a1)
+	cr.player.apply(addCmd(v1), "Ana", time.Now())
+
+	a2 := newAccountClient("acct-ana", "Ana", 16)
+	cr.admit(a2)
+
+	expectWelcomeMusic(t, a2, "Ana", "dQw4w9WgXcQ", true, "Ana")
+}
+
+// CHAT-02: shutdown with a multi-connection member closes every connection and announces nothing.
+func TestShutdownWithTwoConnectionsIsSilent(t *testing.T) {
+	cr, cancel := startRoom(t)
+	obs, a1 := newTestClient("obs", 16), newAccountClient("acct-ana", "Ana", 16)
+	joinAll(t, cr, obs, a1)
+	a2 := newAccountClient("acct-ana", "Ana", 16)
+	joinLater(t, cr, a2)
+
+	cancel()
+	select {
+	case <-cr.done:
+	case <-time.After(testDeadline):
+		t.Fatal("timeout waiting for Run to return")
+	}
+
+	for _, c := range []*Client{obs, a1, a2} {
+		expectClosedSilently(t, c)
+	}
+	if len(cr.members) != 0 || len(cr.taken) != 0 || len(cr.clients) != 0 {
+		t.Fatalf("members = %d, taken = %d, clients = %d, want all 0", len(cr.members), len(cr.taken), len(cr.clients))
+	}
+}
+
+// expectClosedSilently waits until c.send is closed and fails on any leave frame before that.
+func expectClosedSilently(t *testing.T, c *Client) {
+	t.Helper()
+	for {
+		select {
+		case raw, ok := <-c.send:
+			if !ok {
+				return
+			}
+			var peek struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(raw, &peek); err != nil {
+				t.Fatalf("invalid JSON %q: %v", raw, err)
+			}
+			if peek.Type == typeLeave {
+				t.Fatalf("unexpected leave frame on shutdown: %s", raw)
+			}
+		case <-time.After(testDeadline):
+			t.Fatal("timeout waiting for send to close")
+		}
+	}
+}
+
+// CHAT-22, CHAT-05: when a DM drops both connections of the recipient, its leave is announced once.
+func TestDMBothRecipientConnectionsDroppedLeaveOnce(t *testing.T) {
+	cr := NewRoom("general")
+	o, a := newTestClient("o", 16), newTestClient("a", 16)
+	b1, b2 := newAccountClient("acct-b", "B", 0), newAccountClient("acct-b", "B", 0)
+	attachAll(cr, o, a, b1, b2)
+
+	cr.dispatch(inbound{from: a, kind: inboundDM, to: "B", text: "hi"})
+
+	expectClosed(t, b1)
+	expectClosed(t, b2)
+	expectDM(t, a, "a", "B", "hi")
+	expect(t, a, typeLeave, "B", "")
+	expect(t, o, typeLeave, "B", "")
+	expectEmpty(t, a)
+	expectEmpty(t, o)
+	if len(cr.members) != 2 || len(cr.clients) != 2 {
+		t.Fatalf("members = %d, clients = %d, want 2 and 2", len(cr.members), len(cr.clients))
 	}
 }

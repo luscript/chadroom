@@ -19,16 +19,26 @@ const (
 	maxBioRunes           = 160
 )
 
+// member is an account present in a room: the identity shared by all its connections (CHAT-04).
+// Owned by Room.Run. It never holds the account key (that lives only in Room.members' keys and Client.account).
+type member struct {
+	nickname string               // assigned once, on the first connection; fixed while the member lives
+	avatar   string               // allowed URL or "" (CHAT-28, CHAT-38)
+	bio      string               // cleaned or "" (CHAT-37)
+	conns    map[*Client]struct{} // registered connections; empty only after the last one is removed
+}
+
 // Room manages clients and messages.
 // Only Run touches clients and closes client.send, so membership in the map
 // means "send is still open" and a channel can never be closed twice.
 type Room struct {
-	id         string // immutable; used for lookup and logs, never sent on the wire
-	clients    map[*Client]struct{}
-	taken      map[string]struct{} // foldKey(nickname) of every registered client
-	history    []message           // last historySize chat messages, oldest first
-	dropped    []*Client           // slow clients removed by a fan-out, not yet announced
-	broadcast  chan inbound        // every inbound kind (chat, direct, typing and profile), so a client's frames stay ordered
+	id         string               // immutable; used for lookup and logs, never sent on the wire
+	clients    map[*Client]struct{} // every registered connection
+	members    map[string]*member   // account key -> member
+	taken      map[string]*member   // foldKey(nickname) -> member
+	history    []message            // last historySize chat messages, oldest first
+	dropped    []*member            // members whose last connection a fan-out dropped, not yet announced
+	broadcast  chan inbound         // every inbound kind (chat, direct, typing and profile), so a client's frames stay ordered
 	register   chan *Client
 	unregister chan *Client
 	done       chan struct{} // closed by Run when it exits
@@ -55,7 +65,8 @@ func NewRoom(id string) *Room {
 	return &Room{
 		id:             id,
 		clients:        make(map[*Client]struct{}),
-		taken:          make(map[string]struct{}),
+		members:        make(map[string]*member),
+		taken:          make(map[string]*member),
 		history:        make([]message, 0, historySize),
 		broadcast:      make(chan inbound, sendBufferSize),
 		register:       make(chan *Client),
@@ -103,43 +114,62 @@ func (cr *Room) Run(ctx context.Context) {
 	}
 }
 
-// admit registers c and sends it welcome, users and history privately before
-// announcing its join. A newcomer dropped on the way is never announced, so
-// nobody needs a leave for it.
-func (cr *Room) admit(c *Client) {
-	name := cr.assignNickname(c.nickname)
-	c.nickname = name
+// attach registers connection c under its account's member, creating the member (and assigning
+// its nickname) on the account's first connection in the room. Reports whether it did. Run-only.
+func (cr *Room) attach(c *Client) (first bool) {
+	m := cr.members[c.account]
+	if m == nil {
+		name := cr.assignNickname(c.nickname)
+		m = &member{nickname: name, avatar: c.reqAvatar, bio: c.reqBio, conns: make(map[*Client]struct{})}
+		cr.members[c.account] = m
+		cr.taken[foldKey(name)] = m
+		first = true
+	}
+	m.conns[c] = struct{}{}
+	c.member, c.nickname = m, m.nickname
 	cr.clients[c] = struct{}{}
-	cr.taken[foldKey(name)] = struct{}{}
+	return first
+}
+
+// admit registers c and sends it welcome, users, music and history privately. Only the first
+// connection of an account is then announced with a join; a later one inherits the member's
+// nickname and profile. A newcomer dropped on the way is never announced, so nobody needs a
+// leave for it.
+func (cr *Room) admit(c *Client) {
+	first := cr.attach(c)
 	close(c.registered) // publishes the final nickname to the pumps
+	m := c.member
 	now := time.Now()
 	ts := now.UnixMilli()
 	private := [][]byte{
-		encode(message{Type: typeWelcome, From: name, Avatar: c.avatar, Bio: c.bio, TS: ts}),
+		encode(message{Type: typeWelcome, From: m.nickname, Avatar: m.avatar, Bio: m.bio, TS: ts}),
 		encode(usersFrame{Type: typeUsers, Users: cr.userNames(),
-			Avatars: cr.memberValues(func(m *Client) string { return m.avatar }),
-			Bios:    cr.memberValues(func(m *Client) string { return m.bio }), TS: ts}),
-		encode(historyFrame{typeHistory, cr.history, ts}),
+			Avatars: cr.memberValues(func(m *member) string { return m.avatar }),
+			Bios:    cr.memberValues(func(m *member) string { return m.bio }), TS: ts}),
 	}
 	if cr.player != nil && cr.player.video != "" {
-		private = append(private, encode(cr.player.frame(now))) // CHAT-30: state (current track, seq and queue) right after history; no video yet means nothing to send
+		private = append(private, encode(cr.player.frame(now))) // CHAT-30: state (current track, seq and queue) before history; no video yet means nothing to send
 	}
+	private = append(private, encode(historyFrame{typeHistory, cr.history, ts})) // always the last private frame
 	for _, f := range private {
 		if f == nil || !cr.deliver(c, f) {
-			return
+			return // first: member removed, name freed, never announced. later: only c is gone
 		}
 	}
-	if join := encode(message{Type: typeJoin, From: name, Avatar: c.avatar, Bio: c.bio, TS: ts}); join != nil {
+	if !first {
+		return
+	}
+	if join := encode(message{Type: typeJoin, From: m.nickname, Avatar: m.avatar, Bio: m.bio, TS: ts}); join != nil {
 		cr.publish(join)
 	}
 }
 
-// userNames returns the connected nicknames sorted by foldKey (unique among
+// userNames returns the members' nicknames sorted by foldKey (unique among
 // members, so the order is total). Never nil.
 func (cr *Room) userNames() []string {
-	names := make([]string, 0, len(cr.clients))
-	for c := range cr.clients {
-		names = append(names, c.nickname)
+	names := make([]string, 0, len(cr.members))
+	for _, m := range cr.members {
+		names = append(names, m.nickname)
 	}
 	slices.SortFunc(names, func(a, b string) int { return strings.Compare(foldKey(a), foldKey(b)) })
 	return names
@@ -147,17 +177,17 @@ func (cr *Room) userNames() []string {
 
 // memberValues maps members' nicknames to get(member), only for members whose value is
 // non-empty. nil when nobody has one, so the users frame omits the field (CHAT-28, CHAT-37). Run-only.
-func (cr *Room) memberValues(get func(*Client) string) map[string]string {
-	var m map[string]string
-	for c := range cr.clients {
-		if v := get(c); v != "" {
-			if m == nil {
-				m = make(map[string]string)
+func (cr *Room) memberValues(get func(*member) string) map[string]string {
+	var out map[string]string
+	for _, m := range cr.members {
+		if v := get(m); v != "" {
+			if out == nil {
+				out = make(map[string]string)
 			}
-			m[c.nickname] = v
+			out[m.nickname] = v
 		}
 	}
-	return m
+	return out
 }
 
 // remember appends m to the history window, evicting the oldest past historySize. Run-only.
@@ -169,7 +199,7 @@ func (cr *Room) remember(m message) {
 	cr.history = append(cr.history, m)
 }
 
-// leave removes c and announces it. Messages c queued before disconnecting
+// leave removes c and, when it was its member's last connection, announces it. Messages c queued before disconnecting
 // are relayed first: select picks ready cases at random, so without the drain
 // a client's last message could be dropped (no longer a member) or arrive
 // after its leave notice.
@@ -182,7 +212,10 @@ func (cr *Room) leave(c *Client) {
 		return // the drain's publish dropped c and already announced its leave
 	}
 	cr.remove(c)
-	if leave := encode(message{Type: typeLeave, From: c.nickname, TS: time.Now().UnixMilli()}); leave != nil {
+	if len(c.member.conns) > 0 {
+		return // the member is still present through another connection
+	}
+	if leave := encode(message{Type: typeLeave, From: c.member.nickname, TS: time.Now().UnixMilli()}); leave != nil {
 		cr.publish(leave)
 	}
 }
@@ -194,7 +227,7 @@ func (cr *Room) relay(in inbound) {
 	}
 	// The target is resolved before the new message joins the ring, so a reply_to equal
 	// to the message's own id can't match. The id is used only once encode succeeds.
-	m := message{Type: typeChat, From: in.from.nickname, Text: in.text, Avatar: in.from.avatar, TS: time.Now().UnixMilli(),
+	m := message{Type: typeChat, From: in.from.member.nickname, Text: in.text, Avatar: in.from.member.avatar, TS: time.Now().UnixMilli(),
 		ID: cr.nextID + 1, Reply: cr.replyTarget(in.replyTo)}
 	if chat := encode(m); chat != nil {
 		cr.nextID = m.ID
@@ -246,53 +279,60 @@ func (cr *Room) dispatch(in inbound) {
 	}
 }
 
-// direct delivers a DM to its recipient and echoes it to the sender. It never stores or logs it.
+// direct delivers a DM to every connection of its recipient and echoes it to every connection
+// of the sender. It never stores or logs it.
 func (cr *Room) direct(in inbound) {
-	key := foldKey(in.to)
-	if key == foldKey(in.from.nickname) {
-		cr.dmError(in.from, in.to, reasonSelf)
+	from, to := in.from.member, cr.memberByKey(foldKey(in.to))
+	if to == from {
+		cr.dmError(in.from, in.to, reasonSelf) // by member, not name: any tab of the account
 		return
 	}
-	to := cr.memberByKey(key)
 	if to == nil {
 		cr.dmError(in.from, in.to, reasonOffline)
 		return
 	}
 	// reply_to is forwarded without lookup: nothing about a DM is kept (CHAT-24).
-	d := dmFrame{Type: typeDM, From: in.from.nickname, To: to.nickname, Text: in.text, TS: time.Now().UnixMilli(),
+	d := dmFrame{Type: typeDM, From: from.nickname, To: to.nickname, Text: in.text, TS: time.Now().UnixMilli(),
 		ID: cr.nextID + 1, ReplyTo: in.replyTo}
 	if f := encode(d); f != nil {
 		cr.nextID = d.ID
-		cr.deliverPrivate(f, to, in.from)
+		// The members differ, so their connection sets do not overlap: no duplicate frames.
+		cs := make([]*Client, 0, len(to.conns)+len(from.conns))
+		for c := range to.conns {
+			cs = append(cs, c)
+		}
+		for c := range from.conns {
+			cs = append(cs, c)
+		}
+		cr.deliverPrivate(f, cs...)
 	}
 }
 
-// typing relays an ephemeral typing signal: to the room except the sender, or to one
-// recipient. Best effort; never stored, logged, answered or echoed. Run-only.
+// typing relays an ephemeral typing signal: to the room except the sender's own connections, or
+// to every connection of one recipient. Best effort; never stored, logged, answered or echoed. Run-only.
 func (cr *Room) typing(in inbound) {
 	ts := time.Now().UnixMilli()
+	from := in.from.member
 	if in.to == "" {
-		f := encode(typingFrame{typeTyping, in.from.nickname, ts})
+		f := encode(typingFrame{typeTyping, from.nickname, ts})
 		if f == nil {
 			return
 		}
 		for c := range cr.clients {
-			if c != in.from {
+			if c.member != from {
 				cr.offer(c, f)
 			}
 		}
 		return
 	}
-	key := foldKey(in.to)
-	if key == foldKey(in.from.nickname) {
-		return // self: silent (no dm_error)
+	to := cr.memberByKey(foldKey(in.to))
+	if to == nil || to == from {
+		return // offline or self: silent
 	}
-	to := cr.memberByKey(key)
-	if to == nil {
-		return // offline: silent
-	}
-	if f := encode(typingDMFrame{typeTyping, in.from.nickname, to.nickname, ts}); f != nil {
-		cr.offer(to, f)
+	if f := encode(typingDMFrame{typeTyping, from.nickname, to.nickname, ts}); f != nil {
+		for c := range to.conns {
+			cr.offer(c, f)
+		}
 	}
 }
 
@@ -303,7 +343,7 @@ func (cr *Room) music(in inbound) {
 		return // CHAT-21 rule 2a: no shared player in this room
 	}
 	now := time.Now()
-	if !cr.player.apply(in.music, in.from.nickname, now) {
+	if !cr.player.apply(in.music, in.from.member.nickname, now) {
 		return // not applicable in the current state (CHAT-30)
 	}
 	if f := encode(cr.player.frame(now)); f != nil {
@@ -311,12 +351,13 @@ func (cr *Room) music(in inbound) {
 	}
 }
 
-// profile replaces the sender's whole profile and announces it to the room, sender
-// included (CHAT-38). Must-have delivery; never stored. Run-only.
+// profile replaces the sender's member profile and announces it to the room, every
+// connection of the sender included (CHAT-38). Must-have delivery; never stored. Run-only.
 func (cr *Room) profile(in inbound) {
-	f := profileFrame{Type: typeProfile, From: in.from.nickname, TS: time.Now().UnixMilli(), Avatar: in.avatar, Bio: in.bio}
+	m := in.from.member
+	f := profileFrame{Type: typeProfile, From: m.nickname, TS: time.Now().UnixMilli(), Avatar: in.avatar, Bio: in.bio}
 	if b := encode(f); b != nil { // encode first: state changes only if the update can be announced
-		in.from.avatar, in.from.bio = in.avatar, in.bio
+		m.avatar, m.bio = in.avatar, in.bio
 		cr.publish(b)
 	}
 }
@@ -336,26 +377,17 @@ func (cr *Room) dmError(c *Client, to, reason string) {
 	}
 }
 
-// memberByKey returns the member whose foldKey(nickname) is key, or nil. Rooms are
-// small, so a scan is fine; taken short-circuits the offline case.
-func (cr *Room) memberByKey(key string) *Client {
-	if _, ok := cr.taken[key]; !ok {
-		return nil
-	}
-	for c := range cr.clients {
-		if foldKey(c.nickname) == key {
-			return c
-		}
-	}
-	return nil
+// memberByKey returns the member whose foldKey(nickname) is key, or nil. Run-only.
+func (cr *Room) memberByKey(key string) *member {
+	return cr.taken[key]
 }
 
 // deliverPrivate queues msg for each of cs and announces any dropped as slow. Run-only.
 func (cr *Room) deliverPrivate(msg []byte, cs ...*Client) {
 	for _, c := range cs {
 		// An earlier drop in this call may have removed c; its send is closed and a write would panic.
-		if _, ok := cr.clients[c]; ok && !cr.deliver(c, msg) {
-			cr.dropped = append(cr.dropped, c)
+		if _, ok := cr.clients[c]; ok && !cr.deliver(c, msg) && len(c.member.conns) == 0 {
+			cr.dropped = append(cr.dropped, c.member)
 		}
 	}
 	cr.announceDropped()
@@ -373,11 +405,16 @@ func (cr *Room) drainBroadcast() {
 	}
 }
 
-// remove drops c from the registry, releases its nickname and closes send.
-// Run-only; membership guarantees send is still open.
+// remove drops connection c, closes send and, when c was its member's last connection, removes
+// the member and frees its nickname. Run-only; membership guarantees send is still open.
 func (cr *Room) remove(c *Client) {
 	delete(cr.clients, c)
-	delete(cr.taken, foldKey(c.nickname))
+	m := c.member
+	delete(m.conns, c)
+	if len(m.conns) == 0 {
+		delete(cr.members, c.account)
+		delete(cr.taken, foldKey(m.nickname))
+	}
 	close(c.send)
 	if len(cr.clients) == 0 && cr.player != nil {
 		cr.player.halt(time.Now()) // CHAT-30: nobody left to hear it
@@ -396,11 +433,12 @@ func (cr *Room) deliver(c *Client, msg []byte) bool {
 	}
 }
 
-// fanOut delivers msg to every member; slow ones are removed and queued in dropped.
+// fanOut delivers msg to every connection; slow ones are removed, and a member whose last
+// connection that was is queued in dropped (once: it reaches zero connections only once).
 func (cr *Room) fanOut(msg []byte) {
 	for c := range cr.clients {
-		if !cr.deliver(c, msg) {
-			cr.dropped = append(cr.dropped, c)
+		if !cr.deliver(c, msg) && len(c.member.conns) == 0 {
+			cr.dropped = append(cr.dropped, c.member)
 		}
 	}
 }
@@ -411,12 +449,12 @@ func (cr *Room) publish(msg []byte) {
 	cr.announceDropped()
 }
 
-// announceDropped announces a leave for every client dropped as slow, including
-// clients dropped by those announcements, then clears the list. Run-only.
+// announceDropped announces a leave for every member dropped as slow, including
+// members dropped by those announcements, then clears the list. Run-only.
 func (cr *Room) announceDropped() {
 	for i := 0; i < len(cr.dropped); i++ { // fanOut below may append
-		c := cr.dropped[i]
-		if leave := encode(message{Type: typeLeave, From: c.nickname, TS: time.Now().UnixMilli()}); leave != nil {
+		m := cr.dropped[i]
+		if leave := encode(message{Type: typeLeave, From: m.nickname, TS: time.Now().UnixMilli()}); leave != nil {
 			cr.fanOut(leave)
 		}
 	}
@@ -426,8 +464,9 @@ func (cr *Room) announceDropped() {
 
 // serveConn registers a client for conn and starts its pumps. The caller has
 // already upgraded the connection and validated the room.
-func (cr *Room) serveConn(conn *websocket.Conn, nickname, avatar, bio string) {
-	client := &Client{conn: conn, send: make(chan []byte, sendBufferSize), registered: make(chan struct{}), nickname: nickname, avatar: avatar, bio: bio}
+func (cr *Room) serveConn(conn *websocket.Conn, account, nickname, avatar, bio string) {
+	client := &Client{conn: conn, send: make(chan []byte, sendBufferSize), registered: make(chan struct{}),
+		account: account, nickname: nickname, reqAvatar: avatar, reqBio: bio}
 	select {
 	case cr.register <- client:
 	case <-cr.done:

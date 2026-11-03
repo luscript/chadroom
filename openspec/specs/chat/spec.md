@@ -34,11 +34,13 @@ whose `from` is the sender's assigned nickname and whose `text` is the received 
 ### Requirement: CHAT-02 Join and leave notices
 
 The system MUST broadcast a `join` envelope to all registered clients, including the
-newcomer, when a client registers, and a `leave` envelope when a registered client
-disconnects or is dropped as a slow client (CHAT-05); `from` is the affected client's
-assigned nickname. For the newcomer, its `join` MUST arrive after its `welcome`, `users` and
-`history` frames (CHAT-11, CHAT-17, CHAT-18). A leave notice MUST be broadcast at most once
-per client, and never to the client that left. Room shutdown (CHAT-08) is silent: no leave
+newcomer, when a connection registers and its account had no other registered connection in
+the room (the account becomes a member, CHAT-04), and a `leave` envelope when the **last**
+registered connection of a member disconnects or is dropped as a slow client (CHAT-05); `from`
+is the member's assigned nickname. Registering or removing any other connection of a member
+MUST NOT broadcast `join` or `leave`. For the newcomer, its `join` MUST arrive after its
+`welcome`, `users` and `history` frames (CHAT-11, CHAT-17, CHAT-18). A leave notice MUST be
+broadcast at most once per member presence, and never to a connection of the account that left. Room shutdown (CHAT-08) is silent: no leave
 notice is broadcast for it. A newcomer dropped before its `join` was broadcast gets no leave
 notice either.
 
@@ -68,6 +70,28 @@ notice either.
 - THEN `A` receives one `leave` for `S1` and one for `S2`
 - AND the hub keeps processing events
 
+#### Scenario: Second connection of an account is not announced
+
+- GIVEN `A` and account `Ana` (one connection, `Ana1`) are connected
+- WHEN `Ana` opens a second connection `Ana2` in the same room
+- THEN no client receives a `join` for it
+- AND `Ana2` receives its `welcome`, `users` and `history`
+
+#### Scenario: Leave only on the last connection
+
+- GIVEN `A` and account `Ana` with connections `Ana1` and `Ana2` are connected
+- WHEN `Ana1` closes
+- THEN no client receives a `leave`
+- AND WHEN `Ana2` then closes
+- THEN `A` receives `type` = `leave`, `from` = `Ana` exactly once
+
+#### Scenario: Slow drop of one connection of a member
+
+- GIVEN `A` and account `Ana` with connections `Ana1` and a slow `Ana2`
+- WHEN `Ana2` is dropped for a full outbound buffer
+- THEN no client receives a `leave`
+- AND `Ana1` stays registered and keeps receiving messages
+
 ### Requirement: CHAT-03 Hub never blocks on itself
 
 The hub MUST NOT send to any channel that it alone consumes. Joins, leaves and broadcasts
@@ -80,23 +104,39 @@ MUST continue to be processed while the broadcast queue is saturated.
 - THEN every registration and unregistration completes
 - AND the hub keeps delivering messages (no deadlock)
 
-### Requirement: CHAT-04 Client identity is independent of nickname
+### Requirement: CHAT-04 Client identity is the account
 
-The system MUST identify clients by connection, not by nickname. Because requested
-nicknames may collide, clients requesting the same nickname MUST all be admitted and
-coexist without affecting each other, each under a distinct assigned nickname (CHAT-12).
+Every connection belongs to an **account**: the authenticated identity given by the server-side
+account key (the session email, CHAT-41). The account key MUST NOT be sent to any client and
+MUST NOT be logged. A **member** is an account present in a room, i.e. with one or more registered
+connections in it; each room keeps its own members (CHAT-19).
 
-#### Scenario: Two clients request the same nickname
+The system MUST identify room members by account, not by nickname nor by connection. Every
+registered connection of the same account in a room MUST share one member: the same assigned
+nickname and profile (CHAT-28, CHAT-37). Different accounts requesting the same nickname MUST
+all be admitted and coexist without affecting each other, each under a distinct assigned
+nickname (CHAT-12). Every connection of a member MUST receive the frames broadcast to the room
+(CHAT-01). Connections stay independent for transport: each has its own outbound buffer,
+liveness and slow-client drop (CHAT-05, CHAT-07).
 
-- GIVEN two clients connected without a nickname, assigned `Anonymous` and `Anonymous (2)`
+#### Scenario: Two accounts request the same nickname
+
+- GIVEN two different accounts with no name, assigned `Anonymous` and `Anonymous (2)`
 - WHEN a third client sends `hi`
 - THEN both of them receive the message
 
 #### Scenario: One duplicate leaves
 
-- GIVEN clients assigned `Anonymous` and `Anonymous (2)`
+- GIVEN two different accounts assigned `Anonymous` and `Anonymous (2)`
 - WHEN `Anonymous` disconnects
 - THEN `Anonymous (2)` remains registered, keeps its nickname and keeps receiving messages
+
+#### Scenario: Two connections of one account share the nickname
+
+- GIVEN account `Ana` is connected to `general` as `Ana`
+- WHEN the same account connects to `general` again
+- THEN the new connection's `welcome` has `from` = `Ana`
+- AND both connections receive every room `chat`
 
 ### Requirement: CHAT-05 Clean client teardown
 
@@ -329,10 +369,12 @@ for the originating connection and MUST NOT be taken from a `chat`, `dm` or `typ
 
 ### Requirement: CHAT-11 Welcome message
 
-When a client registers, the server MUST send that client — and only that client — a
-`welcome` envelope whose `from` is the nickname the server assigned to it (which MAY differ
-from the requested one, see CHAT-09 and CHAT-12). The `welcome` envelope MUST be the first
-data frame the client receives, followed by its `users` (CHAT-17) and `history` (CHAT-18)
+When a connection registers, the server MUST send that connection — and only that connection —
+a `welcome` envelope whose `from` is the nickname of its member (which MAY differ from the
+requested one, see CHAT-09 and CHAT-12). When the account is already a member of the room, the
+`welcome` MUST carry the member's current nickname, `avatar` and `bio`, not values requested by
+the new connection. The `welcome` envelope MUST be the first data frame the connection
+receives, followed by its `users` (CHAT-17) and `history` (CHAT-18)
 frames.
 
 #### Scenario: Welcome is first and private
@@ -348,16 +390,25 @@ frames.
 - WHEN a client connects with `?nickname=bob`
 - THEN its first data frame is `type` = `welcome`, `from` = `bob (2)`
 
+#### Scenario: Later connection inherits the profile
+
+- GIVEN account `Ana` is connected with avatar `U` and bio `hola`
+- WHEN the same account connects again with `?avatar=` empty and no `bio`
+- THEN its `welcome` has `from` = `Ana`, `avatar` = `U`, `bio` = `hola`
+- AND no `profile` frame is broadcast
+
 ### Requirement: CHAT-12 Unique nicknames
 
-Nicknames of connected clients MUST be unique under case-insensitive comparison using
-Unicode case folding (so `Bob`, `bob` and `BOB` are the same name). The casing the client
-requested MUST be preserved in the assigned nickname. When the normalized requested
-nickname (CHAT-09) is already taken, the server MUST assign `<base> (<n>)`, where `n` is the
+Nicknames of room members MUST be unique under case-insensitive comparison using Unicode case
+folding (so `Bob`, `bob` and `BOB` are the same name). A nickname is assigned when an account
+becomes a member of the room (its first registered connection) and kept by all its connections
+while it stays a member. The casing requested MUST be preserved in the assigned nickname. When
+the normalized requested nickname (CHAT-09) is already taken **by a different member**, the
+server MUST assign `<base> (<n>)`, where `n` is the
 lowest integer ≥ 2 that yields a free name, and `<base>` is the normalized nickname
 truncated so the result is at most 32 runes, with trailing whitespace of the truncated base
 removed. A nickname MUST become available again as soon
-as its owner is removed from the room, by any removal path.
+as its member's last connection is removed from the room, by any removal path.
 
 #### Scenario: Case-insensitive collision
 
@@ -402,6 +453,19 @@ as its owner is removed from the room, by any removal path.
 - GIVEN a client connected without a nickname (assigned `Anonymous`)
 - WHEN another client connects without a nickname
 - THEN it is assigned `Anonymous (2)`
+
+#### Scenario: Same account is never suffixed
+
+- GIVEN account `Bob` is connected
+- WHEN the same account connects again requesting `Bob`
+- THEN the new connection is assigned `Bob`, not `Bob (2)`
+
+#### Scenario: Name kept while one connection remains
+
+- GIVEN account `Bob` with two connections, and a different account requesting `Bob`
+  connects and is assigned `Bob (2)`
+- WHEN one of `Bob`'s connections closes and a third account requests `Bob`
+- THEN the third account is assigned `Bob (3)`
 
 ### Requirement: CHAT-13 Empty messages are ignored
 
@@ -604,7 +668,8 @@ fields:
 | `bios`    | object           | **optional**: maps the nickname of each registered client that has a bio (CHAT-37) to it; omitted when no registered client has one |
 | `ts`      | number           | server time, integer Unix milliseconds |
 
-`users` MUST be sorted case-insensitively and contain each registered client exactly once.
+`users` MUST be sorted case-insensitively and contain each member (CHAT-04) exactly once,
+however many connections it has; `avatars` and `bios` map member nicknames to the member's profile.
 Every key of `avatars` and of `bios` MUST appear in `users`. The snapshot MUST reflect the
 current profiles, including changes made with `profile` frames (CHAT-38). After the snapshot, the list is kept current by
 `join` and `leave` envelopes (CHAT-02).
@@ -646,6 +711,12 @@ and remove it on `leave`. Nicknames MUST be rendered as text.
 - WHEN client `Carla` connects without an avatar
 - THEN `Carla` receives `type` = `users`, `users` = `["Ana", "bob", "Carla"]`,
   `avatars` = `{"Ana": U}`
+
+#### Scenario: One entry per account
+
+- GIVEN `A` and account `Ana` with two connections are connected
+- WHEN a new client connects
+- THEN its `users` frame lists `A` and `Ana` once each
 
 ### Requirement: CHAT-18 Recent message history
 
@@ -960,8 +1031,9 @@ resulting `text` of room messages and direct messages.
 For a valid direct message attempt from a registered client (the sender), the server MUST
 look up the recipient by comparing the normalized `to` case-insensitively (as in CHAT-12)
 with the **assigned** nicknames of the room's registered clients. If the recipient is a
-different registered client, the server MUST send exactly one `dm` frame to the recipient and
-the same frame to the sender, and to no other client. The frame is a JSON object with exactly
+member of a different account, the server MUST send exactly one `dm` frame to each registered
+connection of the recipient and the same frame to each registered connection of the sender (the
+originating connection included), and to no other client. The frame is a JSON object with exactly
 these fields:
 
 | Field  | JSON type | Value |
@@ -976,7 +1048,7 @@ these fields:
 
 Delivery MUST follow the same non-blocking rules as every other outbound frame (CHAT-03): a
 copy that cannot be queued drops that client as a slow client (CHAT-05) and does not affect
-the other copy. A direct message only reaches clients of the sender's room (CHAT-19).
+the other copies. A direct message only reaches clients of the sender's room (CHAT-19).
 
 The server MUST NOT look up, validate or keep the target of a DM `reply_to` (CHAT-24).
 
@@ -1019,6 +1091,13 @@ The server MUST NOT look up, validate or keep the target of a DM `reply_to` (CHA
 - THEN `A` and `B` each receive one `dm` frame with `from` = `A`, `to` = `B`, `text` = `ok`,
   the same `ts` and `id`, and `reply_to` = 7
 
+#### Scenario: DM reaches every connection of both accounts
+
+- GIVEN `A` with connections `A1`, `A2`, `B` with connections `B1`, `B2`, and `C`
+- WHEN `A1` sends `{"type":"dm","to":"B","text":"hola"}`
+- THEN `A1`, `A2`, `B1` and `B2` each receive exactly one identical `dm` frame
+- AND `C` receives no frame
+
 ### Requirement: CHAT-23 Direct message errors
 
 When a direct message cannot be delivered, the server MUST send the sender — and only the
@@ -1029,7 +1108,7 @@ a JSON object with exactly these fields:
 |----------|-----------|-------|
 | `type`   | string    | `dm_error` |
 | `to`     | string    | the normalized requested recipient; `""` for `invalid` |
-| `reason` | string    | `invalid` (CHAT-21), `self` (the recipient is the sender), or `offline` (no registered client in the room has that nickname) |
+| `reason` | string    | `invalid` (CHAT-21), `self` (the recipient is the sender's own account, from any of its connections), or `offline` (no member of the room has that nickname) |
 | `ts`     | number    | server time, integer Unix milliseconds |
 
 A `dm_error` MUST NOT close the connection.
@@ -1052,6 +1131,12 @@ A `dm_error` MUST NOT close the connection.
 - GIVEN client `Ana` is connected
 - WHEN `Ana` sends `{"type":"dm","to":"ANA","text":"hi"}`
 - THEN `Ana` receives `dm_error` with `to` = `ANA`, `reason` = `self`
+
+#### Scenario: DM to yourself from another tab
+
+- GIVEN account `Ana` with two connections
+- WHEN one of them sends `{"type":"dm","to":"ana","text":"hi"}`
+- THEN only that connection receives `dm_error` with `reason` = `self`
 
 ### Requirement: CHAT-24 Direct message privacy
 
@@ -1141,11 +1226,11 @@ The transcript of a direct conversation is kept only in the page's memory.
 For each valid typing signal (CHAT-21) from a registered client, the server MUST:
 
 - for a **room typing signal**, send `{"type":"typing","from":<sender>,"ts":<server time>}` to
-  every registered client of the room **except the sender**;
+  every registered connection of the room **except the connections of the sender's account**;
 - for a **direct typing signal**, send `{"type":"typing","from":<sender>,"to":<recipient>,
-  "ts":<server time>}` **only to the recipient**, found as in CHAT-22 (case-insensitive match
+  "ts":<server time>}` **only to the recipient member's connections**, found as in CHAT-22 (case-insensitive match
   within the room) with `to` set to the recipient's assigned nickname. When the recipient is
-  the sender or is not in the room, the signal MUST be discarded without any reply (no
+  the sender's own account or is not in the room, the signal MUST be discarded without any reply (no
   `dm_error`).
 
 `from` MUST be the sender's assigned nickname, never a value from the payload; `ts` uses the
@@ -1208,6 +1293,13 @@ window. Typing signals still count as received frames for liveness (CHAT-07).
 - GIVEN client `B`'s outbound buffer is full
 - WHEN `A` sends a room typing signal
 - THEN `B` is not removed from the room and no `leave` for `B` is sent
+
+#### Scenario: Own other tab gets no typing
+
+- GIVEN `A` and account `Ana` with connections `Ana1`, `Ana2`
+- WHEN `Ana1` sends a room typing signal
+- THEN `A` receives `typing` with `from` = `Ana`
+- AND neither `Ana1` nor `Ana2` receives it
 
 ### Requirement: CHAT-27 Chat page typing indicator
 
@@ -1435,13 +1527,15 @@ the sender) a `music` frame, a JSON object with exactly these fields:
 | `queue`   | array     | the queue in order, each element an object with exactly `id` (number), `video` (string) and `by` (string, who added it); `[]` when empty |
 | `ts`      | number    | server time, integer Unix milliseconds |
 
-A client that registers while a video is current MUST receive one `music` frame with the current
-state right after its `history` frame (CHAT-11 order: `welcome`, `users`, `history`, `music`).
+A connection that registers while a video is current MUST receive one `music` frame with the
+current state right after its `users` frame and before its `history` frame (order: `welcome`,
+`users`, `music`, `history`), whether or not its account was already a member. `history` is
+therefore always the last of a connection's private join frames.
 No `music` frame is sent while no video is current. `music` frames MUST NOT be kept in history
 (CHAT-18), and a client that is too slow to receive one is handled like any other must-have
 frame (CHAT-03).
 
-When the last client leaves a room while `playing` is true, the server MUST set `playing` to
+When the last connection leaves a room while `playing` is true, the server MUST set `playing` to
 false at the current position. The queue is kept. In a room without a shared player no `music`
 frame is ever sent.
 
@@ -1564,6 +1658,18 @@ frame is ever sent.
   `["dQw4w9WgXcQ","abc"]`, with `["dQw4w9WgXcQ",null]`, with `"dQw4w9WgXcQ"`, or without
   `videos`
 - THEN no client receives any frame
+
+#### Scenario: Snapshot comes before history
+
+- GIVEN a video is current in `musica`
+- WHEN a client joins `musica`
+- THEN it receives `welcome`, `users`, `music`, `history` in that order
+
+#### Scenario: Later connection gets the snapshot
+
+- GIVEN account `Ana` is in `musica` while a video plays
+- WHEN `Ana` connects again
+- THEN the new connection receives a `music` frame before its `history`
 
 ### Requirement: CHAT-31 Chat page shared player
 
@@ -1759,7 +1865,8 @@ fail silently and keep working.
 
 The chat header MUST offer a single global toggle (🔔 on / 🔕 muted, with `aria-pressed`)
 that mutes the sound for every room and private conversation. The choice MUST be remembered
-in the browser (`localStorage`, best effort) and restored on the next visit. Muting MUST NOT
+in the browser (`localStorage`, best effort), restored on the next visit and applied right away
+in the browser's other open tabs of the page. Muting MUST NOT
 affect the tab indicator (CHAT-33) nor the unread badges.
 
 #### Scenario: Message in another room
@@ -1812,6 +1919,12 @@ affect the tab indicator (CHAT-33) nor the unread badges.
 - THEN no sound plays
 - AND after reloading the page and joining again, the toggle still shows 🔕
 
+#### Scenario: Mute follows in the other tab
+
+- GIVEN Ana has the chat open in two tabs of the same browser
+- WHEN she presses 🔔 in one of them
+- THEN the other tab shows 🔕 and plays no sound, without reloading
+
 ### Requirement: CHAT-33 Chat page tab indicator
 
 While the page is unattended, every notifying message (CHAT-32), muted or not and including those
@@ -1846,8 +1959,8 @@ conversation, a toggle (🎵 on / 🔇 muted, with `aria-pressed`) that mutes th
 this browser only. It MUST NOT send any control and MUST NOT affect other users. While muted the
 page MUST keep following the room's state (CHAT-31), so unmuting resumes at the room's current
 position. The toggle and the in-player local mute (CHAT-31) MUST reflect one single state. The
-choice MUST be remembered in the browser (`localStorage`, best effort) and restored on the next
-visit. It is independent of the notification sound toggle (CHAT-32). The toggle MUST NOT be
+choice MUST be remembered in the browser (`localStorage`, best effort), restored on the next
+visit and applied right away in the browser's other open tabs of the page. It is independent of the notification sound toggle (CHAT-32). The toggle MUST NOT be
 shown while the user is not joined to `musica`.
 
 While the user is joined to `musica`, a track is current and the shown pane does not belong to
@@ -1877,6 +1990,12 @@ it (so nothing plays, CHAT-31) it MUST read "Abrí #musica para escuchar". It MU
 - GIVEN Ana muted the music and reloads the page
 - WHEN she joins `musica` and a track plays
 - THEN the music is muted and the toggle shows 🔇
+
+#### Scenario: Music mute follows in the other tab
+
+- GIVEN Ana is joined to `musica` in two tabs of the same browser and a track plays
+- WHEN she presses 🔇 in one of them
+- THEN the music is muted in both tabs and both toggles show 🔇
 
 #### Scenario: Now playing outside musica
 
@@ -2050,16 +2169,16 @@ after the connection ends.
 
 ### Requirement: CHAT-38 Profile update
 
-A valid profile update (CHAT-21 step 2b) from a registered client MUST replace that client's
-whole profile:
+A valid profile update (CHAT-21 step 2b) from any registered connection MUST replace its
+member's whole profile, shared by all the member's connections (CHAT-04):
 
 - `avatar`: absent or empty clears the picture; otherwise it MUST be an allowed avatar URL
   (CHAT-28). If it is not, the whole update MUST be discarded without any reply and the
   profile MUST NOT change.
 - `bio`: absent or empty after cleaning clears the bio; otherwise it is cleaned per CHAT-37.
 
-After applying it, the server MUST send to every client of the room, the sender included, one
-frame:
+After applying it, the server MUST send to every connection of the room, all of the sender's
+included, one frame:
 
 | Field    | JSON type | Value |
 |----------|-----------|-------|
@@ -2108,6 +2227,13 @@ MUST be discarded without any reply.
 - GIVEN `A` and `B` are connected
 - WHEN `A` sends `{"type":"profile","from":"B","bio":"x"}`
 - THEN the `profile` frame everyone receives has `from` = `A`
+
+#### Scenario: Profile change reaches the other tab
+
+- GIVEN `A` and account `Ana` with connections `Ana1`, `Ana2`
+- WHEN `Ana1` sends a valid profile update with bio `nueva`
+- THEN `A`, `Ana1` and `Ana2` receive `type` = `profile`, `from` = `Ana`, `bio` = `nueva`
+- AND a later connection of `Ana` gets `bio` = `nueva` in its `welcome`
 
 ### Requirement: CHAT-39 Chat page profile editor
 
@@ -2193,8 +2319,10 @@ authenticated session (SRV-15), never from client input:
 2. otherwise the local part of the session email (before the last `@`).
 
 The derived value is the "requested nickname" for normalization (CHAT-09) and uniqueness
-(CHAT-12): two connections of the same account in one room, or two people with the same name,
-coexist under suffixed nicknames. The `nickname` query parameter MUST be ignored. Avatar and bio
+(CHAT-12). The session email is the connection's account key (CHAT-04): connections with the
+same session email are the same member; two people with the same name are different members and
+are suffixed. The `nickname` query parameter MUST be ignored. A connection without an account key
+MUST NOT be admitted. Avatar and bio
 (CHAT-28, CHAT-37) keep their existing rules.
 
 #### Scenario: Name from the session
@@ -2213,7 +2341,14 @@ coexist under suffixed nicknames. The `nickname` query parameter MUST be ignored
 
 - GIVEN `Ana Pérez` is connected to `general`
 - WHEN the same session connects to `general` again
-- THEN the new connection is assigned `Ana Pérez (2)` and both stay connected
+- THEN the new connection is assigned `Ana Pérez` and both stay connected
+- AND no `join` is broadcast for it
+
+#### Scenario: Different accounts with the same name
+
+- GIVEN `ana.perez@crombie.dev` named `Ana Pérez` is connected to `general`
+- WHEN `ana.p@crombie.dev`, also named `Ana Pérez`, connects to `general`
+- THEN it is assigned `Ana Pérez (2)`
 
 ### Requirement: CHAT-42 Chat page session handling
 
@@ -2242,3 +2377,29 @@ cookie is `HttpOnly`).
 - GIVEN the session has expired
 - WHEN the user searches GIFs and `/gifs` responds 401
 - THEN the page navigates to `/` and the login page is shown
+
+### Requirement: CHAT-43 Chat page with several connections of one account
+
+The chat page MUST work when its account already has other connections in the room:
+
+- it MUST NOT depend on receiving its own `join` to finish joining; in particular, in the shared
+  player room (CHAT-31) it MUST apply the `player` snapshot and follow later player frames even
+  though no own `join` arrives;
+- `dm` frames whose `from` is its own nickname, and `profile` frames for its own nickname, MUST be
+  handled as its own (DM shown in the conversation with `to`, own profile and editor updated),
+  whichever connection originated them;
+- on connecting, it MUST adopt the profile in its `welcome` as its own, unless a local profile
+  edit made while the socket was not open is pending, which it sends instead.
+
+#### Scenario: Second window in the player room follows playback
+
+- GIVEN account `Ana` has a window in `musica` where a video is playing
+- WHEN `Ana` opens a second window and it joins `musica`
+- THEN the second window shows the current video and position
+- AND a later pause from any member is applied in both windows
+
+#### Scenario: DM sent from the other window
+
+- GIVEN account `Ana` has windows `W1` and `W2`, and `B` is online
+- WHEN `Ana` sends a DM to `B` from `W1`
+- THEN `W2` shows it in its conversation with `B`, as sent by `Ana`, without an unread mark

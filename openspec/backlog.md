@@ -193,7 +193,8 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 
 ## `google-oidc-login` follow-ups
 - [ ] Close open WebSockets on logout / session expiry (today the session is only validated at
-      the upgrade).
+      the upgrade). With `account-sessions`, decide: only that session's sockets or every
+      connection of the account.
 - [ ] The revocation set is in memory: lost on restart, so logged-out cookies are valid again
       until they expire.
 - [ ] Rate limiter and IP detection behind Caddy (trusted proxies). Until then the whole site
@@ -214,15 +215,23 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       domain.
 - [ ] Split the callback in `internal/auth/oidc.go` into steps if it grows.
 
-## `account-sessions` (next change, after `google-oidc-login` is merged)
-One identity per Google account instead of per connection: a second window or device of the same
-account is the same user, not `Name (2)`. Changes CHAT-04 (identity by connection) and CHAT-12
-(suffixes only for different people with the same name). Sync, don't force a single window.
-- [ ] Room keys users by session email with a set of connections per account (hub pattern, no
-      locks; only `Room.Run` touches the registry).
-- [ ] `join` only on the account's first connection, `leave` only on its last one; one entry per
+## `account-sessions` — done, archived 2026-11-03 (manual UI check pending)
+One identity per Google account instead of per connection (CHAT-04, CHAT-12, CHAT-43).
+- [x] Room keys users by session email with a set of connections per account (`member`).
+- [x] `join` only on the account's first connection, `leave` only on its last one; one entry per
       person in `users`.
-- [ ] DMs delivered to every connection of the recipient and echoed to the sender's other
-      connections (today a DM reaches only the first window).
-- [ ] Profile (avatar/bio) shared across the account's connections; decide typing behaviour.
-- [ ] Tests: two connections of one account in a room, DM fan-out, leave on last close.
+- [x] DMs delivered to every connection of the recipient and echoed to the sender's other connections.
+- [x] Profile (avatar/bio) shared across the account's connections; typing not shown to own tabs.
+- [x] Tests: two connections of one account, DM fan-out, leave on last close.
+
+## `account-sessions-polish` (deferred from `account-sessions` verify — low priority)
+- [ ] Manual two-window checklist (CHAT-43): `musica` snapshot + pause in the second window; a
+      server restart with two tabs clears the stale track; a DM from W1 shows in W2 without an
+      unread mark; a profile edit in W1 updates W2's editor; a fresh W2 does not wipe the profile.
+- [ ] Rate gates (typing, profile, music) are per connection: N tabs × budget. Optional per-member
+      gate (Run-only) or a cap on connections per account. Belongs with `rate-limiting`.
+- [ ] Profiles live per room: a fresh window can adopt different profiles from different rooms'
+      `welcome`s until the next save converges them.
+- [ ] Nickname is frozen while the account is online in a room (a renamed Google profile applies
+      after all its connections close).
+- [ ] No JS test harness: CHAT-43 is covered only manually (see `chat-notifications` follow-ups).

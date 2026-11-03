@@ -137,13 +137,19 @@ func serveAuthPage(status int, body []byte) gin.HandlerFunc {
 	}
 }
 
-// identityNickname is the chat nickname of the authenticated user: the display name, or the email
-// local part when the account has none. Empty without an identity (unreachable behind Require).
-func identityNickname(r *http.Request) string {
+// chatIdentity is the chat identity of the authenticated user: the session email as the private
+// account key and the nickname from identityNickname. Both empty without an identity (unreachable
+// behind Require; the chat server answers 401 to an empty account).
+func chatIdentity(r *http.Request) (account, nickname string) {
 	id, ok := auth.IdentityFrom(r.Context())
 	if !ok {
-		return ""
+		return "", ""
 	}
+	return id.Email, identityNickname(id)
+}
+
+// identityNickname is the display name, or the email local part when the account has none.
+func identityNickname(id auth.Identity) string {
 	// CHAT-41: the name counts only if something is left of it once the chat's nickname rules apply.
 	if name := strings.TrimSpace(id.Name); chat.CleanNickname(name) != "" {
 		return name
@@ -178,7 +184,7 @@ func serveAsset(contentType string, body []byte) gin.HandlerFunc {
 }
 
 // newChatServer builds one Room per roomIDs entry behind a shared origin policy.
-func newChatServer(allowedOrigins []string, nickname chat.NicknameFunc) *chat.Server {
+func newChatServer(allowedOrigins []string, identity chat.IdentityFunc) *chat.Server {
 	rooms := make([]*chat.Room, len(roomIDs))
 	for i, id := range roomIDs {
 		if id == musicRoom {
@@ -187,7 +193,7 @@ func newChatServer(allowedOrigins []string, nickname chat.NicknameFunc) *chat.Se
 			rooms[i] = chat.NewRoom(id)
 		}
 	}
-	return chat.NewServer(allowedOrigins, validAvatar, nickname, rooms...)
+	return chat.NewServer(allowedOrigins, validAvatar, identity, rooms...)
 }
 
 // serveRooms returns the room list as {"rooms":[...]}.
@@ -341,7 +347,7 @@ func run(ctx context.Context, ln net.Listener, cfg config) int {
 		ln.Close()
 		return 1
 	}
-	chatSrv := newChatServer(parseAllowedOrigins(cfg.allowedOrigins), identityNickname)
+	chatSrv := newChatServer(parseAllowedOrigins(cfg.allowedOrigins), chatIdentity)
 	var gifs *gifSearch
 	if cfg.giphyKey != "" {
 		gifs = newGifSearch(giphyAPI, cfg.giphyKey)

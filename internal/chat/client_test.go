@@ -36,7 +36,7 @@ func startRooms(t *testing.T, allowed []string, rooms ...*Room) (srv *httptest.S
 func startAvatarRooms(t *testing.T, valid func(string) bool, allowed []string, rooms ...*Room) (srv *httptest.Server, cancel context.CancelFunc) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	s := NewServer(allowed, valid, queryNickname, rooms...)
+	s := NewServer(allowed, valid, queryIdentity, rooms...)
 	engine := gin.New()
 	engine.GET("/ws", s.HandleWebSocket)
 
@@ -429,7 +429,7 @@ func TestNicknameNormalization(t *testing.T) {
 // the pumps started: writePump must see the closed channel and close the connection.
 func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 	room := NewRoom("general")
-	s := NewServer(nil, nil, queryNickname, room)
+	s := NewServer(nil, nil, queryIdentity, room)
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.GET("/ws", s.HandleWebSocket)
@@ -439,7 +439,7 @@ func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 		if err != nil {
 			return
 		}
-		slow := &Client{conn: conn, send: make(chan []byte, privateFrames+1), registered: make(chan struct{}), nickname: "slow"}
+		slow := &Client{conn: conn, send: make(chan []byte, privateFrames+1), registered: make(chan struct{}), account: "slow", nickname: "slow"}
 		room.register <- slow
 		slowCh <- slow
 	})
@@ -1254,7 +1254,7 @@ func TestInvalidMusicDiscarded(t *testing.T) {
 	}
 }
 
-// CHAT-30: the newcomer's frames are welcome, users, history, music, then its join.
+// CHAT-30: the newcomer's frames are welcome, users, music, history, then its join.
 func TestMusicNewcomerOverWebSocket(t *testing.T) {
 	srv, _ := startServer(t, NewMusicRoom("musica"))
 	a, _ := dial(t, srv, "A")
@@ -1266,10 +1266,10 @@ func TestMusicNewcomerOverWebSocket(t *testing.T) {
 		t.Fatalf("frame 1 = %+v, want welcome", m)
 	}
 	decodeUsers(t, readRaw(t, conn))
-	decodeHistory(t, readRaw(t, conn))
 	if f := decodeMusic(t, readRaw(t, conn)); f.Video != "dQw4w9WgXcQ" || !f.Playing || f.By != "A" {
-		t.Fatalf("frame 4 = %+v, want the loaded state by A", f)
+		t.Fatalf("frame 3 = %+v, want the loaded state by A", f)
 	}
+	decodeHistory(t, readRaw(t, conn))
 	if m := readMsg(t, conn); m.Type != typeJoin || m.From != "C" {
 		t.Fatalf("frame 5 = %+v, want join C", m)
 	}
@@ -1371,5 +1371,38 @@ func TestCleanText(t *testing.T) {
 	}
 	if got := cleanNickname(strings.Repeat("ñ", 40)); got != strings.Repeat("ñ", maxNicknameRunes) {
 		t.Fatalf("cleanNickname = %q", got)
+	}
+}
+
+// CHAT-02, CHAT-04: two real connections of one account are one member; the observer sees a join
+// once and a leave only when the second one closes.
+func TestTwoTabsOverWebSocket(t *testing.T) {
+	srv, _ := startServer(t, NewRoom("general"))
+	obs, _ := dial(t, srv, "Obs")
+	tab1, name1 := dialAccount(t, srv, "acct-ana", "Ana")
+	tab2, name2 := dialAccount(t, srv, "acct-ana", "Ana")
+	if name1 != "Ana" || name2 != "Ana" {
+		t.Fatalf("names = %q, %q, want Ana twice", name1, name2)
+	}
+	for _, want := range []string{"Obs", "Ana"} { // its own join, then Ana's single join
+		if m := readMsg(t, obs); m.Type != typeJoin || m.From != want {
+			t.Fatalf("observer frame = %+v, want join %s", m, want)
+		}
+	}
+
+	tab1.Close()
+	time.Sleep(100 * time.Millisecond) // pacing only: either order of close/chat yields "no leave"
+	send(t, tab2, "still here")
+	if m := readMsg(t, obs); m.Type != typeChat || m.From != "Ana" || m.Text != "still here" {
+		t.Fatalf("observer frame = %+v, want chat from Ana (no leave or second join)", m)
+	}
+
+	tab2.Close()
+	if m := readMsg(t, obs); m.Type != typeLeave || m.From != "Ana" {
+		t.Fatalf("observer frame = %+v, want leave Ana", m)
+	}
+	send(t, obs, "end")
+	if m := readMsg(t, obs); m.Type != typeChat || m.Text != "end" {
+		t.Fatalf("observer frame = %+v, want its own chat (exactly one leave)", m)
 	}
 }
