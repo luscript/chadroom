@@ -128,10 +128,15 @@ func (h *Handler) login(c *gin.Context) {
 	}
 	http.SetCookie(c.Writer, newFlowCookie(value, h.secure))
 	// hd is only a hint for Google's account picker; the callback re-checks it.
-	authURL := h.oauth.AuthCodeURL(state,
+	opts := []oauth2.AuthCodeOption{
 		oauth2.S256ChallengeOption(verifier),
 		oidc.Nonce(nonce),
-		oauth2.SetAuthURLParam("hd", h.cfg.AllowedDomain))
+		oauth2.SetAuthURLParam("hd", h.cfg.AllowedDomain),
+	}
+	if c.Query("switch") == "1" { // "use another account" links from the denied/signed-out pages
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", "select_account"))
+	}
+	authURL := h.oauth.AuthCodeURL(state, opts...)
 	c.Redirect(http.StatusFound, authURL)
 }
 
@@ -157,14 +162,14 @@ func (h *Handler) callback(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	http.SetCookie(c.Writer, clearFlowCookie(h.secure)) // every outcome
 
-	fc, err := c.Request.Cookie(flowCookieName(h.secure))
-	var fs flowState
-	if err != nil || h.flow.open(fc.Value, &fs) != nil || fs.V != cookieVersion || !h.now().Before(time.Unix(fs.Exp, 0)) {
+	flowCookie, err := c.Request.Cookie(flowCookieName(h.secure))
+	var flow flowState
+	if err != nil || h.flow.open(flowCookie.Value, &flow) != nil || flow.V != cookieVersion || !h.now().Before(time.Unix(flow.Exp, 0)) {
 		h.reject(c, "flow")
 		return
 	}
 	q := c.Request.URL.Query()
-	if got := q.Get("state"); got == "" || fs.State == "" || subtle.ConstantTimeCompare([]byte(got), []byte(fs.State)) != 1 {
+	if got := q.Get("state"); got == "" || flow.State == "" || subtle.ConstantTimeCompare([]byte(got), []byte(flow.State)) != 1 {
 		h.reject(c, "state")
 		return
 	}
@@ -183,7 +188,7 @@ func (h *Handler) callback(c *gin.Context) {
 	}
 
 	ctx := context.WithValue(c.Request.Context(), oauth2.HTTPClient, h.client)
-	token, err := h.oauth.Exchange(ctx, code, oauth2.VerifierOption(fs.Verifier))
+	token, err := h.oauth.Exchange(ctx, code, oauth2.VerifierOption(flow.Verifier))
 	if err != nil {
 		// err.Error() may embed the response body: log fixed fields only.
 		var re *oauth2.RetrieveError
@@ -208,7 +213,7 @@ func (h *Handler) callback(c *gin.Context) {
 		h.reject(c, "verify")
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(fs.Nonce)) != 1 || fs.Nonce == "" {
+	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(flow.Nonce)) != 1 || flow.Nonce == "" {
 		h.reject(c, "nonce")
 		return
 	}
@@ -251,7 +256,7 @@ func (h *Handler) callback(c *gin.Context) {
 		return
 	}
 	http.SetCookie(c.Writer, cookie)
-	c.Redirect(http.StatusFound, safeNext(fs.Next))
+	c.Redirect(http.StatusFound, safeNext(flow.Next))
 }
 
 // displayName trims the name claim and caps it at maxDisplayName runes. An

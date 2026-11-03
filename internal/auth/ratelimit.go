@@ -3,6 +3,7 @@ package auth
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -14,6 +15,8 @@ const (
 	loginLimit   = 20 // requests per IP per window, shared by /auth/login and /auth/callback
 	loginWindow  = time.Minute
 	maxTrackedIP = 4096
+
+	sweepMinInterval = time.Second
 )
 
 type windowCount struct {
@@ -24,18 +27,18 @@ type windowCount struct {
 // rateLimiter is a fixed-window per-key counter with bounded memory. The mutex
 // is fine here: this is not the chat hub.
 type rateLimiter struct {
-	limit  int
-	window time.Duration
-	max    int
-	now    func() time.Time
+	limit   int
+	window  time.Duration
+	maxKeys int
+	now     func() time.Time
 
 	mu        sync.Mutex
 	hits      map[string]*windowCount
 	lastSweep time.Time
 }
 
-func newRateLimiter(limit int, window time.Duration, max int) *rateLimiter {
-	return &rateLimiter{limit: limit, window: window, max: max, now: time.Now, hits: make(map[string]*windowCount)}
+func newRateLimiter(limit int, window time.Duration, maxKeys int) *rateLimiter {
+	return &rateLimiter{limit: limit, window: window, maxKeys: maxKeys, now: time.Now, hits: make(map[string]*windowCount)}
 }
 
 // allow counts one request for key. It fails closed: when the table is full of
@@ -50,9 +53,12 @@ func (l *rateLimiter) allow(key string) bool {
 	}
 	w, ok := l.hits[key]
 	if !ok {
-		if len(l.hits) >= l.max {
-			l.sweep(now)
-			if len(l.hits) >= l.max {
+		if len(l.hits) >= l.maxKeys {
+			// A full table must not cost an O(n) sweep per request: sweep at most once a second.
+			if now.Sub(l.lastSweep) >= sweepMinInterval {
+				l.sweep(now)
+			}
+			if len(l.hits) >= l.maxKeys {
 				return false
 			}
 		}
@@ -87,7 +93,7 @@ func (l *rateLimiter) middleware() gin.HandlerFunc {
 		if err != nil {
 			ip = c.Request.RemoteAddr
 		}
-		if !l.allow(ip) {
+		if !l.allow(clientKey(ip)) {
 			c.Header("Retry-After", retryAfter)
 			c.Header("Cache-Control", "no-store")
 			c.String(http.StatusTooManyRequests, "Demasiados intentos. Probá de nuevo en un minuto.")
@@ -96,4 +102,20 @@ func (l *rateLimiter) middleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// clientKey buckets IPv6 clients by /64 (one subscriber typically owns a whole
+// /64, so per-address keys would be free to rotate). IPv4, IPv4-mapped IPv6
+// and unparsable values stay per-address.
+func clientKey(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || addr.Is4() || addr.Is4In6() {
+		return ip
+	}
+	addr = addr.WithZone("")
+	p, err := addr.Prefix(64)
+	if err != nil {
+		return ip
+	}
+	return p.String()
 }

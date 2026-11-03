@@ -5,6 +5,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -87,7 +88,7 @@ func (c Config) validate() error {
 		bad("SESSION_SECRET", fmt.Sprintf("required, at least %d bytes", minSecretLen))
 	}
 	if !validRedirectURL(c.RedirectURL) {
-		bad("OIDC_REDIRECT_URL", "must be an absolute http or https URL with a host and path "+callbackPath)
+		bad("OIDC_REDIRECT_URL", "must be an absolute https URL (http only for a loopback host) with path "+callbackPath)
 	}
 	if !validDomain(c.AllowedDomain) {
 		bad("ALLOWED_EMAIL_DOMAIN", "must be a bare ASCII domain without '@' or spaces")
@@ -103,7 +104,19 @@ func validRedirectURL(raw string) bool {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
 		return false
 	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return false
+	}
 	return u.Path == callbackPath && u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
+}
+
+// isLoopbackHost: "localhost" or a loopback IP literal (127.0.0.0/8, ::1).
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 func validDomain(d string) bool {

@@ -403,8 +403,9 @@ func (l *lockedBuf) String() string {
 
 func TestCallbackLogsNoSecrets(t *testing.T) {
 	var logs lockedBuf
+	prev := log.Writer()
 	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(io.Discard) })
+	t.Cleanup(func() { log.SetOutput(prev) })
 
 	type run struct{ secrets []string }
 	var runs run
@@ -479,19 +480,25 @@ func TestOpenRedirectNextIgnored(t *testing.T) {
 	}
 }
 
-func TestCallbackRevalidatesNext(t *testing.T) {
+// A validly signed flow cookie carrying a hostile next must still redirect to
+// "/": the callback re-validates next instead of trusting the cookie.
+func TestCallbackRedirectRevalidatesNext(t *testing.T) {
 	g := newRig(t)
-	cb, _ := g.begin(t, "")
-	var q url.Values = cb.Query()
-	v, err := g.h.flow.seal(flowState{V: cookieVersion, State: q.Get("state"), Nonce: "n", Verifier: "v", Next: "//evil.com", Exp: g.clock.Now().Add(time.Minute).Unix()})
+	cb, flowCookie := g.begin(t, "")
+	var st flowState
+	if err := g.h.flow.open(flowCookie.Value, &st); err != nil {
+		t.Fatal(err)
+	}
+	st.Next = "//evil.com"
+	v, err := g.h.flow.seal(st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A validly signed cookie with a hostile next still never redirects off-site.
-	// (The exchange fails here, so only the reject path is exercised.)
-	resp := g.callback(t, cb, &http.Cookie{Name: "chat_oidc", Value: v})
-	if resp.Header.Get("Location") != "" {
-		t.Errorf("redirected to %q", resp.Header.Get("Location"))
+	forged := *flowCookie
+	forged.Value = v
+	resp := g.callback(t, cb, &forged)
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/" {
+		t.Errorf("got %d %q, want 302 /", resp.StatusCode, resp.Header.Get("Location"))
 	}
 }
 
@@ -537,17 +544,40 @@ func TestLoginRedirect(t *testing.T) {
 		fc.MaxAge <= 0 || fc.MaxAge > 600 || fc.Secure {
 		t.Errorf("flow cookie attributes: %+v", fc)
 	}
-	var fs flowState
-	if err := newSealer([]byte(testSecret), purposeFlow).open(fc.Value, &fs); err != nil {
+	var st flowState
+	if err := newSealer([]byte(testSecret), purposeFlow).open(fc.Value, &st); err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256([]byte(fs.Verifier))
-	if fs.State != q.Get("state") || fs.Nonce != q.Get("nonce") || fs.Next != "/hello" ||
+	sum := sha256.Sum256([]byte(st.Verifier))
+	if st.State != q.Get("state") || st.Nonce != q.Get("nonce") || st.Next != "/hello" ||
 		base64.RawURLEncoding.EncodeToString(sum[:]) != q.Get("code_challenge") {
-		t.Errorf("flow cookie does not match authorize request: %+v", fs)
+		t.Errorf("flow cookie does not match authorize request: %+v", st)
 	}
 	if resp.Header.Get("Cache-Control") != "no-store" {
 		t.Error("missing no-store")
+	}
+	if q.Has("prompt") {
+		t.Errorf("prompt = %q without switch=1", q.Get("prompt"))
+	}
+}
+
+func TestLoginSwitchAccount(t *testing.T) {
+	g := newRig(t)
+	for _, tc := range []struct{ query, prompt string }{
+		{"?switch=1", "select_account"},
+		{"?switch=0", ""},
+		{"?switch=true", ""},
+		{"?switch=", ""},
+		{"", ""},
+	} {
+		resp := g.do(t, "GET", "/auth/login"+tc.query, nil, nil)
+		loc, err := url.Parse(resp.Header.Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := loc.Query().Get("prompt"); got != tc.prompt {
+			t.Errorf("query %q: prompt = %q, want %q", tc.query, got, tc.prompt)
+		}
 	}
 }
 
