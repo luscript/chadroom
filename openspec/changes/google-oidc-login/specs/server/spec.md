@@ -288,8 +288,8 @@ security headers as the chat page (SRV-05) and `Cache-Control: no-store`:
 
 - a **login** page, served by `GET /` without a valid session (SRV-02). It reuses the look of the
   former nickname screen (brand, headline, card), with — instead of the nickname input — a
-  primary "Iniciar sesión con Google" link to `/auth/login` and a secondary "Usar otra cuenta"
-  link to `/auth/login?switch=1`;
+  primary "Iniciar sesión con Google" link to `/auth/login` (account switching is offered only on
+  the access-denied page, where a wrong single Google session would otherwise loop);
 - an **access denied** page, sent with status 403 when authorization fails (SRV-12), saying only
   that the account is not allowed and offering a link to `/auth/login?switch=1`.
 

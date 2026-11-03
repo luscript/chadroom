@@ -114,7 +114,7 @@ servidor lo comprueba por su cuenta: el dominio del email debe coincidir exactam
 
 | Ruta | Descripción |
 |------|-------------|
-| `GET /auth/login?next=<ruta>` | Inicia el login con Google. `next` es opcional y solo se acepta como ruta relativa. Con `?switch=1` fuerza el selector de cuentas de Google (lo usan los links «Usar otra cuenta» de la página de login y «Probar con otra cuenta» de acceso denegado). Limitado a 20 pedidos por minuto por IP. |
+| `GET /auth/login?next=<ruta>` | Inicia el login con Google. `next` es opcional y solo se acepta como ruta relativa. Con `?switch=1` fuerza el selector de cuentas de Google (lo usa solo el link «Probar con otra cuenta» de la página de acceso denegado). Limitado a 20 pedidos por minuto por IP. |
 | `GET /auth/callback` | Retorno de Google: valida el login, crea la sesión y redirige. Responde `400` genérico si falla el flujo, el `state`, el intercambio, el token o el nonce, y `403` con la página de acceso denegado si la cuenta es de otro dominio. Mismo límite que `/auth/login`: 20 pedidos por minuto por IP (IPv6 por /64); al pasarse, `429` con `Retry-After`. |
 | `POST /auth/logout` | Cierra la sesión. `204`. Verifica el `Origin`. |
 | `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. Con sesión válida sirve el chat; sin ella, la página de login (`login.html` embebido, `200`, misma URL, sin redirección) con el botón «Iniciar sesión con Google». Ambas respuestas llevan `Vary: Cookie`. |

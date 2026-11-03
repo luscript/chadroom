@@ -485,12 +485,13 @@ func TestIndexHasSessionMarkup(t *testing.T) {
 	}
 }
 
-// The login and denied pages offer the account chooser.
+// Only the denied page offers the account chooser; the login page has just the primary link.
 func TestAuthPagesLinkToAccountChooser(t *testing.T) {
-	for name, body := range map[string][]byte{"denied": deniedHTML, "login": loginHTML} {
-		if !strings.Contains(string(body), `href="/auth/login?switch=1"`) {
-			t.Errorf("%s page does not link to /auth/login?switch=1", name)
-		}
+	if !strings.Contains(string(deniedHTML), `href="/auth/login?switch=1"`) {
+		t.Error("denied page does not link to /auth/login?switch=1")
+	}
+	if !strings.Contains(string(loginHTML), `href="/auth/login"`) || strings.Contains(string(loginHTML), "switch=1") {
+		t.Error("login page must link to /auth/login only, without switch=1")
 	}
 }
 
@@ -534,10 +535,13 @@ func TestRootLoginPageOrChat(t *testing.T) {
 					t.Errorf("%s = %q, want %q", k, got, want)
 				}
 			}
-			for _, want := range []string{"Iniciar sesión con Google", `href="/auth/login"`, `href="/auth/login?switch=1"`} {
+			for _, want := range []string{"Iniciar sesión con Google", `href="/auth/login"`} {
 				if !strings.Contains(body, want) {
 					t.Errorf("login page misses %q", want)
 				}
+			}
+			if strings.Contains(body, "switch=1") {
+				t.Error("login page links to switch=1")
 			}
 			if strings.Contains(body, `id="start-view"`) || strings.Contains(body, "/app.js") {
 				t.Error("login page carries the chat markup")
