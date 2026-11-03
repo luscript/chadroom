@@ -36,7 +36,6 @@
 
   const rooms = new Map(); // id -> room, in /rooms order
   let active = null; // the room whose pane and header are shown
-  let requestedNick = ''; // what the user typed; re-sent by every room's socket
   let myProfile = { avatar: '', bio: '' }; // page memory only (CHAT-39); sent by every room's socket
   let editorAvatar = ''; // pending picture while the editor is open
   let gifPick = false; // the GIF panel picks a picture instead of sending a message
@@ -128,8 +127,16 @@
   // URLs, so anything outside this shape is dropped.
   const ROOM_ID = /^[a-z0-9-]{1,32}$/;
 
+  // The session cookie is gone or expired: the server's login flow takes over.
+  let loggingIn = false;
+  function toLogin() {
+    loggingIn = true;
+    location.assign('/auth/login');
+  }
+
   async function loadRooms() {
     const res = await fetch('/rooms', { cache: 'no-store' });
+    if (res.status === 401) { toLogin(); throw new Error('rooms: 401'); }
     if (!res.ok) throw new Error('rooms: ' + res.status);
     const body = await res.json();
     if (!body || !Array.isArray(body.rooms)) throw new Error('rooms: bad body');
@@ -335,7 +342,7 @@
     }
     $('scroller').setAttribute('aria-labelledby', shown.tab.id);
     $('room-name').textContent = conv ? '@' + conv.peer + ' · #' + room.id : '#' + room.id;
-    const me = room.myName || requestedNick;
+    const me = room.myName;
     $('me').textContent = me;
     $('profile-nick').textContent = me;
     $('me').title = me;
@@ -373,42 +380,34 @@
     if (room.id === MUSIC_ROOM) resetMusic();
   }
 
-  // — join —
-  const nickInput = $('nick');
+  // — start —
+  // The nickname comes from the session (welcome.from); there is no join form.
   try { localStorage.removeItem(LEGACY_AVATAR_KEY); } catch { /* storage blocked: nothing to clean */ }
-  const roomsReady = loadRooms();
-  roomsReady.catch(() => {}); // handled on submit; avoids an unhandled rejection
-  let joining = false;
-  nickInput.addEventListener('input', () => { $('join-btn').disabled = !nickInput.value.trim(); });
-  $('join-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const nick = nickInput.value.trim();
-    if (!nick || joining) return;
-    unlockAudio(); // inside the gesture, before any await
-    joining = true;
-    try {
-      if (rooms.size === 0) {
-        try {
-          await roomsReady;
-        } catch {
-          await loadRooms(); // one retry
-        }
-      }
-    } catch {
-      $('join-error').textContent = 'No pudimos cargar las salas. Probá de nuevo.';
-      $('join-error').hidden = false;
-      return;
-    } finally {
-      joining = false;
-    }
-    $('join-error').hidden = true;
-    enterChat(nick);
-  });
 
-  function enterChat(nick) {
-    requestedNick = nick;
+  // No join gesture anymore: the first interaction unlocks audio (autoplay policy).
+  window.addEventListener('pointerdown', unlockAudio, { once: true });
+  window.addEventListener('keydown', unlockAudio, { once: true });
+
+  function showStartError() {
+    $('start-status').hidden = true;
+    $('start-error').textContent = 'No pudimos cargar las salas. Probá de nuevo.';
+    $('start-error').hidden = false;
+    $('start-retry').hidden = false;
+  }
+
+  function startChat() {
+    if (loggingIn) return;
+    $('start-error').hidden = true;
+    $('start-retry').hidden = true;
+    $('start-status').hidden = false;
+    loadRooms().then(enterChat, showStartError);
+  }
+  $('start-retry').addEventListener('click', startChat);
+
+  function enterChat() {
+    if (loggingIn) return;
     const first = rooms.values().next().value;
-    $('join-view').hidden = true;
+    $('start-view').hidden = true;
     $('chat-view').hidden = false;
     joinRoom(first);
     activate(first);
@@ -420,7 +419,6 @@
     room.retryTimer = null;
     const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
     const socket = new WebSocket(scheme + location.host + '/ws?room=' + encodeURIComponent(room.id) +
-      '&nickname=' + encodeURIComponent(requestedNick) +
       (myProfile.avatar ? '&avatar=' + encodeURIComponent(myProfile.avatar) : '') +
       (myProfile.bio ? '&bio=' + encodeURIComponent(myProfile.bio) : ''));
     room.ws = socket;
@@ -446,9 +444,24 @@
     }
     // The peer's side of the conversation is gone with the socket; the transcript stays.
     closeConversations(room, 'Se perdió la conexión. Esta conversación terminó.');
+    if (room.attempt >= 3) probeSession();
     const d = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** room.attempt);
     room.attempt++;
     room.retryTimer = setTimeout(() => connect(room), d / 2 + Math.random() * d / 2);
+  }
+
+  // After repeated failures, one shared check tells an expired session (401) from a plain outage.
+  let probing = null;
+  function probeSession() {
+    if (probing || loggingIn) return;
+    probing = fetch('/rooms', { cache: 'no-store' })
+      .then((res) => {
+        if (res.status !== 401) return;
+        rooms.forEach((room) => { clearTimeout(room.retryTimer); room.retryTimer = null; });
+        toLogin();
+      })
+      .catch(() => {}) // still offline: keep retrying
+      .finally(() => { probing = null; });
   }
 
   // Cuts a pending wait short, or replaces a retry socket stuck connecting (the browser
@@ -463,7 +476,7 @@
     }
     connect(room);
   }
-  function reconnectAll() { joinedRooms().forEach(reconnectNow); }
+  function reconnectAll() { if (loggingIn) return; joinedRooms().forEach(reconnectNow); }
   window.addEventListener('online', reconnectAll);
   document.addEventListener('visibilitychange', () => {
     if (!unattended()) resetTabIndicator();
@@ -471,21 +484,17 @@
   });
   window.addEventListener('focus', resetTabIndicator);
 
-  $('leave-btn').addEventListener('click', () => {
-    resetTabIndicator();
-    rooms.forEach((room) => { if (room.joined) teardown(room); });
-    updateLeaveBtn();
-    closePanels();
-    myProfile = { avatar: '', bio: '' };
-    editorAvatar = '';
-    $('profile-bio-input').value = '';
-    closeUserPopup(false);
-    clearTimeout(profileSaveTimer);
-    profileSaveLocked = false;
-    $('draft').value = '';
-    $('chat-view').hidden = true;
-    $('join-view').hidden = false;
-    nickInput.focus();
+  $('leave-btn').addEventListener('click', async () => {
+    const btn = $('leave-btn');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/auth/logout', { method: 'POST', cache: 'no-store' });
+      if (!res.ok) throw new Error('logout: ' + res.status);
+      location.replace('/auth/signed-out');
+    } catch {
+      btn.disabled = false;
+      addSystem(active, 'No se pudo cerrar sesión. Probá de nuevo.');
+    }
   });
 
   $('room-leave-btn').addEventListener('click', () => {
@@ -531,7 +540,7 @@
   }
   function resetTabIndicator() { unreadCount = 0; renderTabIndicator(); }
 
-  // Must run inside a user gesture (join submit, unmute click) so autoplay policy allows it.
+  // Must run inside a user gesture (first pointer/key event, unmute click) so autoplay policy allows it.
   function unlockAudio() {
     try {
       if (!audioCtx && window.AudioContext) audioCtx = new AudioContext();
@@ -1137,7 +1146,7 @@
   // — profile editor (CHAT-39) —
   const bioInput = $('profile-bio-input');
   const noteInput = $('profile-note-input');
-  const ownName = () => active?.myName || requestedNick;
+  const ownName = () => active?.myName || '';
 
   function showProfileError(text) {
     $('profile-error').textContent = text;
@@ -1332,6 +1341,7 @@
     try {
       const res = await fetch('/gifs?q=' + encodeURIComponent(q));
       if (seq !== gifSeq) return;
+      if (res.status === 401) { toLogin(); return; }
       if (res.status === 404) { disableGifSearch(); return; }
       if (!res.ok) throw new Error('gifs: ' + res.status);
       const body = await res.json();
@@ -2073,6 +2083,7 @@
     let fail = null;
     try {
       const res = await fetch('/playlist?list=' + encodeURIComponent(list));
+      if (res.status === 401) { toLogin(); return; }
       const body = await res.json().catch(() => null);
       if (seq !== music.importSeq) return;
       if (res.ok && body && Array.isArray(body.videos)) {
@@ -2199,4 +2210,5 @@
     else if (music.srv) reconcile({ seek: true });
     renderMusic();
   });
+  startChat();
 })();
