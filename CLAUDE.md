@@ -75,4 +75,4 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - `gin.Recovery()` se reemplaza por una recovery propia porque la de gin vuelca el header `Cookie`.
 - `newRouter` exige `guards` completos (panic si falta uno): producción los arma siempre con `authGuards(handler)`; los tests usan `openGuards()` (`auth_test.go`).
 - El nickname sale de la sesión (`chat.NicknameFunc`); `?nickname=` se ignora.
-- Cambios con diseño van por SDD en `openspec/changes/`. En curso: `google-oidc-login`. `message-replies` y `user-profiles` ya están mergeados, falta archivarlos.
+- Cambios con diseño van por SDD en `openspec/changes/`. Sin cambios en curso; el próximo es `account-sessions` (ver `openspec/backlog.md`).

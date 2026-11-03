@@ -13,7 +13,8 @@ direct message, a typing signal or a music control (CHAT-21, CHAT-30); outbound 
 objects built only by the server: event envelopes `{"type","from","text","ts"}` with an optional `avatar` (CHAT-10, CHAT-28), the
 `users` (CHAT-17) and `history` (CHAT-18) snapshot frames, the `dm` and `dm_error` frames
 (CHAT-22, CHAT-23) the `typing` frame (CHAT-26) and the `music` state frame (CHAT-30). Frames carry no room field; the
-connection identifies the room. Nicknames are normalized (CHAT-09) and unique
+connection identifies the room. Every connection belongs to a signed-in user (SRV-15); the
+nickname is derived from the session (CHAT-41), normalized (CHAT-09) and unique
 case-insensitively within a room (CHAT-12).
 
 ## Requirements
@@ -512,8 +513,8 @@ The GIF panel MUST enable its send button only for URLs that pass the same check
 
 The page MUST consider itself connected (`online`) only after it receives `welcome`
 (CHAT-11), not when the socket opens. When its WebSocket closes without the user having left,
-the page MUST show the `reconnecting` state and retry automatically, requesting the nickname
-the user originally typed. Retry delays MUST grow exponentially with random jitter, MUST NOT
+the page MUST show the `reconnecting` state and retry automatically with the same session
+cookie; the nickname is derived again by the server (CHAT-41). Retry delays MUST grow exponentially with random jitter, MUST NOT
 exceed 30 seconds, and MUST go back to the initial delay after a `welcome` is received. The
 page MUST keep retrying for as long as the user stays in the chat view; it has no terminal
 `offline` state. It MAY retry sooner when the browser reports the network is back or the tab
@@ -522,8 +523,11 @@ but MUST NOT have more than one socket open at a time. The page MUST show at mos
 one system notice when the connection is lost and one when it is re-established, per outage;
 the "re-established" notice MUST be shown after the replayed history (CHAT-18), so it is not
 erased by it. While not `online` the send button and the GIF panel's send button MUST stay
-disabled. After the user clicks "Salir" the page MUST NOT reconnect, and any pending retry
-MUST be cancelled. On reconnection the messages on screen MUST be replaced by the server's
+disabled. After the user clicks "Cerrar sesión" the page MUST NOT reconnect, and any pending retry
+MUST be cancelled. After **3 consecutive** failed reconnect attempts of a room (closed before
+`welcome`), the page MUST check the session by requesting `GET /rooms`; if it answers 401 the
+page MUST stop every retry and navigate to `/` (the login page). Any other answer keeps retrying
+as before. On reconnection the messages on screen MUST be replaced by the server's
 history (CHAT-18) and the online list by the new `users` snapshot (CHAT-17), so no message is
 shown twice and no departed user stays listed.
 
@@ -564,13 +568,13 @@ from the previous one (e.g. `Lucía (2)` while the server still holds the old co
 #### Scenario: Leaving cancels reconnection
 
 - GIVEN a page in the reconnecting state
-- WHEN the user clicks "Salir"
+- WHEN the user clicks "Cerrar sesión"
 - THEN no further connection attempts are made
 
 #### Scenario: Leaving while connected
 
 - GIVEN a connected page
-- WHEN the user clicks "Salir"
+- WHEN the user clicks "Cerrar sesión"
 - THEN the connection closes and the page does not reconnect
 
 #### Scenario: Renamed after reconnecting
@@ -579,6 +583,12 @@ from the previous one (e.g. `Lucía (2)` while the server still holds the old co
 - WHEN it reconnects and receives `welcome` with `from` = `Lucía (2)`
 - THEN the header shows `Lucía (2)`
 - AND only `chat` envelopes from `Lucía (2)` are marked as its own
+
+#### Scenario: Session expired while reconnecting
+
+- GIVEN the user is in the chat and the session cookie has expired
+- WHEN the room connection drops and 3 reconnect attempts fail
+- THEN the page requests `/rooms`, receives 401 and navigates to `/`
 
 ### Requirement: CHAT-17 Online users list
 
@@ -752,14 +762,14 @@ connection.
 
 ### Requirement: CHAT-20 Chat page joins several rooms
 
-After the user enters a nickname, the chat page MUST fetch the room list (SRV-07), connect to
+When the page loads, the chat page MUST fetch the room list (SRV-07), connect to
 the default room (the first room in the list) and make it the active room. The page MUST:
 
 - show every room of the list by name, marking which rooms are joined, which one is active,
   and, for each joined but inactive room, the number of unread `chat` messages received since
   it was last active (shown only when > 0);
 - when the user selects a room that is not joined, open one connection to `/ws` for that room
-  with the same requested nickname, and make it active;
+  and make it active;
 - when the user selects a joined room, make it active and reset its unread count to 0;
 - keep, per joined room: its connection, its assigned nickname (from that connection's
   `welcome`), its message list, its online users list and its connection status. Frames
@@ -771,20 +781,21 @@ the default room (the first room in the list) and make it the active room. The p
 - let the user leave the active room ("Dejar sala") when more than one room is joined:
   close only its connection, discard its state, and activate another joined room. Leaving
   MUST NOT be offered while only one room is joined;
-- on "Salir", close every connection and return to the nickname screen.
+- on "Cerrar sesión", follow CHAT-42.
 
 Room names MUST be rendered as text. Room ids received from `/rooms` that are not
 lowercase ASCII letters, digits or `-` (1–32 chars) MUST be ignored. Automatic reconnection
 (CHAT-16), including its history re-sync and "Reconectado" notice, MUST apply independently
 to each joined room's connection; a room left by the user MUST NOT reconnect. History
 replayed on (re)connect MUST NOT count as unread. If the room list cannot be fetched (after
-one retry), the page MUST stay on the nickname screen and show an error message instead of
-entering the chat.
+one retry), the page MUST show an error message instead of entering the chat; a 401 MUST
+navigate to `/` (the server then serves the login page). There is no nickname screen and no
+nickname input.
 
 #### Scenario: Enter the chat
 
 - GIVEN the server rooms are `general`, `juegos`, `musica`
-- WHEN the user enters nickname `Ana`
+- WHEN the page of a signed-in user `Ana` loads
 - THEN the page shows the three rooms, with `general` joined and active
 - AND the header shows `general`
 
@@ -792,7 +803,7 @@ entering the chat.
 
 - GIVEN `Ana` is in `general` (active)
 - WHEN she selects `juegos`
-- THEN a second connection to `juegos` is opened with nickname `Ana`
+- THEN a second connection to `juegos` is opened (nickname `Ana` from the session)
 - AND `juegos` becomes active, showing its own history and users
 - AND the `general` connection stays open
 
@@ -819,13 +830,13 @@ entering the chat.
 #### Scenario: Cannot leave the last room
 
 - GIVEN `Ana` is only in `general`
-- THEN "Dejar sala" is disabled and only "Salir" leaves the chat
+- THEN "Dejar sala" is disabled and only "Cerrar sesión" leaves the chat
 
 #### Scenario: Room list unavailable
 
 - GIVEN `GET /rooms` fails twice
-- WHEN the user submits a nickname
-- THEN the page stays on the nickname screen and shows "No pudimos cargar las salas. Probá de nuevo."
+- WHEN the page loads
+- THEN the page shows "No pudimos cargar las salas." with a retry button instead of the chat
 - AND no WebSocket is opened
 
 #### Scenario: Reconnect one room
@@ -2172,3 +2183,62 @@ under the CHAT-29 rules.
 - GIVEN `Ana` sent a message and then left
 - WHEN the user clicks her name on that message
 - THEN no popup opens
+
+### Requirement: CHAT-41 Nickname derived from the session
+
+The nickname requested for a WebSocket connection MUST be derived by the server from the
+authenticated session (SRV-15), never from client input:
+
+1. the session's display name (`name` claim), if it is non-empty after normalization;
+2. otherwise the local part of the session email (before the last `@`).
+
+The derived value is the "requested nickname" for normalization (CHAT-09) and uniqueness
+(CHAT-12): two connections of the same account in one room, or two people with the same name,
+coexist under suffixed nicknames. The `nickname` query parameter MUST be ignored. Avatar and bio
+(CHAT-28, CHAT-37) keep their existing rules.
+
+#### Scenario: Name from the session
+
+- GIVEN a session for `ana.perez@crombie.dev` with name `Ana Pérez`
+- WHEN it connects to `/ws?room=general&nickname=Boss`
+- THEN its `welcome` `from` is `Ana Pérez`
+
+#### Scenario: Fallback to the email local part
+
+- GIVEN a session for `ana.perez@crombie.dev` with an empty name
+- WHEN it connects
+- THEN its nickname is `ana.perez`
+
+#### Scenario: Same account in two tabs
+
+- GIVEN `Ana Pérez` is connected to `general`
+- WHEN the same session connects to `general` again
+- THEN the new connection is assigned `Ana Pérez (2)` and both stay connected
+
+### Requirement: CHAT-42 Chat page session handling
+
+The page MUST NOT ask for a nickname: on load it fetches the room list and enters the chat
+(CHAT-20). The header's "Salir" button is replaced by "Cerrar sesión", which MUST:
+
+1. send `POST /auth/logout` (same origin);
+2. leave the page on success (which closes every connection and pending retry);
+3. on a successful response, navigate to `/` (which then shows the login page); otherwise re-enable the button and
+   show a system notice ("No se pudo cerrar sesión. Probá de nuevo.") — the page MUST NOT claim the
+   user is signed out when the server did not confirm it.
+
+A 401 response from `/rooms`, `/gifs` or `/playlist` MUST navigate to `/` instead of
+showing a generic error. The page MUST NOT read, store or send any session data itself (the
+cookie is `HttpOnly`).
+
+#### Scenario: Sign out
+
+- GIVEN the user is in the chat
+- WHEN they click "Cerrar sesión"
+- THEN every room connection closes, `/auth/logout` is posted and the browser shows the
+  login page
+
+#### Scenario: Expired session on GIF search
+
+- GIVEN the session has expired
+- WHEN the user searches GIFs and `/gifs` responds 401
+- THEN the page navigates to `/` and the login page is shown
