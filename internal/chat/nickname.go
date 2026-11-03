@@ -26,6 +26,9 @@ func cleanNickname(s string) string {
 	return cleanText(s, maxNicknameRunes)
 }
 
+// CleanNickname applies the nickname rules without the "Anonymous" fallback: "" means nothing usable is left.
+func CleanNickname(s string) string { return cleanNickname(s) }
+
 // normalizeNickname is cleanNickname with "Anonymous" for an empty result.
 func normalizeNickname(s string) string {
 	if s = cleanNickname(s); s == "" {

@@ -20,6 +20,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"chatroom/internal/auth"
 	"chatroom/internal/chat"
 
 	"github.com/gin-gonic/gin"
@@ -35,6 +36,12 @@ var appJS []byte
 
 //go:embed app.css
 var appCSS []byte
+
+//go:embed denied.html
+var deniedHTML []byte
+
+//go:embed login.html
+var loginHTML []byte
 
 //go:embed favicon.svg
 var faviconSVG []byte
@@ -99,6 +106,10 @@ func buildCSP(hosts []string) string {
 	}, "; ")
 }
 
+// authPageCSP is for the login and denied pages: plain markup, a stylesheet and links, no
+// script, no connections, no frames.
+const authPageCSP = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
 // setStaticHeaders applies the headers every embedded response shares.
 func setStaticHeaders(c *gin.Context) {
 	c.Header("X-Content-Type-Options", "nosniff")
@@ -114,6 +125,50 @@ func servePage(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 }
 
+// serveAuthPage serves an embedded auth page with its CSP. Never cached: it follows a login attempt.
+func serveAuthPage(status int, body []byte) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		setStaticHeaders(c)
+		c.Header("Cache-Control", "no-store")
+		c.Header("Content-Security-Policy", authPageCSP)
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Data(status, "text/html; charset=utf-8", body)
+	}
+}
+
+// identityNickname is the chat nickname of the authenticated user: the display name, or the email
+// local part when the account has none. Empty without an identity (unreachable behind Require).
+func identityNickname(r *http.Request) string {
+	id, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		return ""
+	}
+	// CHAT-41: the name counts only if something is left of it once the chat's nickname rules apply.
+	if name := strings.TrimSpace(id.Name); chat.CleanNickname(name) != "" {
+		return name
+	}
+	if i := strings.LastIndexByte(id.Email, '@'); i > 0 {
+		return id.Email[:i]
+	}
+	return id.Email
+}
+
+// recoverPanics turns a handler panic into a 500. gin.Recovery dumps the request headers, Cookie
+// included, so this logs only the panic value, the method and the path without its query (SRV-18).
+func recoverPanics(c *gin.Context) {
+	defer func() {
+		if v := recover(); v != nil {
+			if v == http.ErrAbortHandler {
+				panic(v) // net/http's own way to abort a response quietly
+			}
+			log.Printf("panic: %v (%s %s)", v, c.Request.Method, c.Request.URL.Path)
+			c.AbortWithStatus(http.StatusInternalServerError)
+		}
+	}()
+	c.Next()
+}
+
 // serveAsset serves an embedded static file with the given content type.
 func serveAsset(contentType string, body []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -123,7 +178,7 @@ func serveAsset(contentType string, body []byte) gin.HandlerFunc {
 }
 
 // newChatServer builds one Room per roomIDs entry behind a shared origin policy.
-func newChatServer(allowedOrigins []string) *chat.Server {
+func newChatServer(allowedOrigins []string, nickname chat.NicknameFunc) *chat.Server {
 	rooms := make([]*chat.Room, len(roomIDs))
 	for i, id := range roomIDs {
 		if id == musicRoom {
@@ -132,7 +187,7 @@ func newChatServer(allowedOrigins []string) *chat.Server {
 			rooms[i] = chat.NewRoom(id)
 		}
 	}
-	return chat.NewServer(allowedOrigins, validAvatar, rooms...)
+	return chat.NewServer(allowedOrigins, validAvatar, nickname, rooms...)
 }
 
 // serveRooms returns the room list as {"rooms":[...]}.
@@ -143,11 +198,42 @@ func serveRooms(c *gin.Context) {
 	}{roomIDs})
 }
 
-// newRouter registers the HTML page, its static assets, the room list and the WebSocket endpoint.
+// guards is what protects the router: the session checks for pages and APIs and the /auth routes.
+// newRouter panics on a missing field, so no router can run unauthenticated by accident.
+//
+// page picks the handler for "/": chat with a valid session, login otherwise. The chat page is
+// never served by anything but its first argument, and only behind a verified session.
+type guards struct {
+	page     func(chat, login gin.HandlerFunc) gin.HandlerFunc
+	api      gin.HandlerFunc
+	register func(*gin.RouterGroup)
+}
+
+// authGuards builds the guards from the auth handler; run always uses it.
+func authGuards(a *auth.Handler) guards {
+	sessions := a.Sessions()
+	return guards{
+		page: func(chat, login gin.HandlerFunc) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				// Same URL, two bodies: caches must key on the cookie.
+				c.Header("Vary", "Cookie")
+				if _, ok := sessions.Identify(c.Request); ok {
+					chat(c)
+					return
+				}
+				login(c)
+			}
+		},
+		api:      sessions.Require(),
+		register: a.Register,
+	}
+}
+
+// newRouter registers the pages, static assets, room list and WebSocket endpoint behind g.
 // /gifs and /playlist are registered only when gifs / playlists are non-nil, so without their key
 // they are a plain 404.
-func newRouter(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport) *gin.Engine {
-	return newRouterLogging(chatSrv, gifs, playlists, gin.DefaultWriter)
+func newRouter(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport, g guards) *gin.Engine {
+	return newRouterLogging(chatSrv, gifs, playlists, g, gin.DefaultWriter)
 }
 
 // logFormatter is gin's default log line but without the query string: /ws carries the
@@ -159,25 +245,35 @@ func logFormatter(p gin.LogFormatterParams) string {
 }
 
 // newRouterLogging is newRouter writing its request log to logw.
-func newRouterLogging(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport, logw io.Writer) *gin.Engine {
+func newRouterLogging(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport, g guards, logw io.Writer) *gin.Engine {
+	if g.page == nil || g.api == nil || g.register == nil {
+		panic("newRouter: incomplete guards")
+	}
 	r := gin.New()
-	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{Output: logw, Formatter: logFormatter}), gin.Recovery())
+	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{Output: logw, Formatter: logFormatter}), recoverPanics)
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("set trusted proxies: %v", err)
 	}
-	r.GET("/", servePage)
-	r.GET("/app.js", serveAsset("text/javascript; charset=utf-8", appJS))
+	page, api := g.page, g.api
+	// Protected: the session check runs before the handler, so /ws answers 401 before any room 404
+	// or origin 403 (SRV-06). /app.js is a script fetch, which cannot follow a login redirect.
+	// "/" shows the login page instead of a 401 when there is no session.
+	r.GET("/", page(servePage, serveAuthPage(http.StatusOK, loginHTML)))
+	r.GET("/app.js", api, serveAsset("text/javascript; charset=utf-8", appJS))
+	r.GET("/rooms", api, serveRooms)
+	r.GET("/ws", api, chatSrv.HandleWebSocket)
+	if gifs != nil {
+		r.GET("/gifs", api, gifs.handle)
+	}
+	if playlists != nil {
+		r.GET("/playlist", api, playlists.handle)
+	}
+	// Public: the login page itself needs the stylesheet and favicons.
 	r.GET("/app.css", serveAsset("text/css; charset=utf-8", appCSS))
 	r.GET("/favicon.svg", serveAsset("image/svg+xml", faviconSVG))
 	r.GET("/favicon-unread.svg", serveAsset("image/svg+xml", faviconUnreadSVG))
-	r.GET("/rooms", serveRooms)
-	r.GET("/ws", chatSrv.HandleWebSocket)
-	if gifs != nil {
-		r.GET("/gifs", gifs.handle)
-	}
-	if playlists != nil {
-		r.GET("/playlist", playlists.handle)
-	}
+	ag := r.Group("/auth")
+	g.register(ag)
 	return r
 }
 
@@ -204,14 +300,21 @@ type config struct {
 	allowedOrigins string // ALLOWED_ORIGINS, comma-separated
 	giphyKey       string // GIPHY_API_KEY; "" disables /gifs
 	youtubeKey     string // YOUTUBE_API_KEY; "" disables /playlist
+	auth           auth.Config
 }
 
 func main() {
+	authCfg, err := auth.LoadConfig(os.Getenv)
+	if err != nil {
+		log.Printf("invalid auth configuration: %v", err) // names variables, never values
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := serve(ctx, addr, config{
 		allowedOrigins: os.Getenv("ALLOWED_ORIGINS"),
 		giphyKey:       strings.TrimSpace(os.Getenv("GIPHY_API_KEY")),
 		youtubeKey:     strings.TrimSpace(os.Getenv("YOUTUBE_API_KEY")),
+		auth:           authCfg,
 	})
 	stop() // os.Exit skips defers.
 	os.Exit(code)
@@ -231,7 +334,14 @@ func serve(ctx context.Context, addr string, cfg config) int {
 func run(ctx context.Context, ln net.Listener, cfg config) int {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	chatSrv := newChatServer(parseAllowedOrigins(cfg.allowedOrigins))
+	authHandler, err := auth.New(ctx, cfg.auth, serveAuthPage(http.StatusForbidden, deniedHTML))
+	if err != nil {
+		// Discovery errors are generic, but the text is not needed to act: the issuer is in the config.
+		log.Print("auth setup failed: invalid configuration or identity provider unreachable")
+		ln.Close()
+		return 1
+	}
+	chatSrv := newChatServer(parseAllowedOrigins(cfg.allowedOrigins), identityNickname)
 	var gifs *gifSearch
 	if cfg.giphyKey != "" {
 		gifs = newGifSearch(giphyAPI, cfg.giphyKey)
@@ -251,7 +361,7 @@ func run(ctx context.Context, ln net.Listener, cfg config) int {
 	}()
 
 	srv := &http.Server{
-		Handler:           newRouter(chatSrv, gifs, playlists),
+		Handler:           newRouter(chatSrv, gifs, playlists, authGuards(authHandler)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    8 << 10,

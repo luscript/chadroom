@@ -33,6 +33,8 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       `style-src 'self'`, no `font-src`). `app.css` still names `"Inter"` with a `system-ui` fallback.
 - [ ] Reconnect never gives up on permanent failures (403 origin is reported as 1006);
       consider an attempt cap or a "retry" button after N minutes.
+      (Partially addressed by `google-oidc-login`: the session probe stops retrying when the
+      session is gone.)
 - [ ] Trusted Types: `require-trusted-types-for 'script'` in the CSP (no sinks today).
 - [ ] First join that fails shows "Conexión perdida… / Reconectado" without ever having been
       connected; use a `wasOnline` flag for the wording.
@@ -98,6 +100,8 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] gin release mode (`GIN_MODE=release` in deploy, or `gin.SetMode`).
 - [ ] DNS rebinding: optional `ALLOWED_HOSTS` check on `r.Host`, or bind to `127.0.0.1` for
       local use. Revisit missing-Origin allowance if cookie auth is ever added.
+      (Addressed by `google-oidc-login`: cookie auth now exists; an empty Origin is still
+      allowed on `/ws` but a session cookie is required, and logout checks Origin.)
 - [ ] TLS.
 
 ## `chatroom-test-polish` (small follow-ups from verify round 2)
@@ -186,3 +190,39 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Profile frames use `publish` (slow peers dropped) and no-op updates still broadcast; skip
       unchanged profiles. Pairs with the connection cap in `rate-limiting`.
 - [ ] `users` frame grows with bios/avatars under join churn; same connection cap.
+
+## `google-oidc-login` follow-ups
+- [ ] Close open WebSockets on logout / session expiry (today the session is only validated at
+      the upgrade).
+- [ ] The revocation set is in memory: lost on restart, so logged-out cookies are valid again
+      until they expire.
+- [ ] Rate limiter and IP detection behind Caddy (trusted proxies). Until then the whole site
+      shares one login budget behind Caddy (the limiter ignores `X-Forwarded-For`).
+- [ ] Production: add the https redirect URI in Google Cloud; review `ALLOWED_ORIGINS` and
+      scheme detection.
+- [ ] Disambiguate same-name users (e.g. show the email in the user popup).
+- [ ] Google profile picture as default avatar (needs `imageHosts` + `IMAGE_HOSTS`).
+- [ ] Callback 400 is plain text with no link back to login (could reuse the denied page).
+- [ ] `/gifs` and `/playlist` answer 404 without a key even when unauthenticated (minor info
+      leak: whether the keys are configured).
+- [ ] OIDC discovery runs after the port is bound: connections queue until the process exits.
+- [ ] HSTS when served over https (Caddy, or the app when cookies are `Secure`).
+- [ ] `SESSION_SECRET` has no entropy check and no rotation.
+- [ ] `recoverPanics` logs `%v` of the panic value; future values could embed secrets (consider
+      type + truncated message).
+- [ ] The flow cookie can't use `__Host-` (Path=/auth): keep untrusted subdomains off the parent
+      domain.
+- [ ] Split the callback in `internal/auth/oidc.go` into steps if it grows.
+
+## `account-sessions` (next change, after `google-oidc-login` is merged)
+One identity per Google account instead of per connection: a second window or device of the same
+account is the same user, not `Name (2)`. Changes CHAT-04 (identity by connection) and CHAT-12
+(suffixes only for different people with the same name). Sync, don't force a single window.
+- [ ] Room keys users by session email with a set of connections per account (hub pattern, no
+      locks; only `Room.Run` touches the registry).
+- [ ] `join` only on the account's first connection, `leave` only on its last one; one entry per
+      person in `users`.
+- [ ] DMs delivered to every connection of the recipient and echoed to the sender's other
+      connections (today a DM reaches only the first window).
+- [ ] Profile (avatar/bio) shared across the account's connections; decide typing behaviour.
+- [ ] Tests: two connections of one account in a room, DM fan-out, leave on last close.

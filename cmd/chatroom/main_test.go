@@ -15,17 +15,22 @@ import (
 	"testing"
 	"time"
 
+	"chatroom/internal/auth"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
 
+// queryNickname takes the nickname from ?nickname=, as the tests without a session do.
+func queryNickname(r *http.Request) string { return r.URL.Query().Get("nickname") }
+
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	chatSrv := newChatServer(nil)
+	chatSrv := newChatServer(nil, queryNickname)
 	ctx, cancel := context.WithCancel(context.Background())
 	go chatSrv.Run(ctx)
-	ts := httptest.NewServer(newRouter(chatSrv, nil, nil))
+	ts := httptest.NewServer(newRouter(chatSrv, nil, nil, openGuards()))
 	t.Cleanup(func() {
 		cancel()
 		ts.Close()
@@ -216,7 +221,7 @@ func TestIndexHasRoomTabs(t *testing.T) {
 	html := string(indexHTML)
 	for _, want := range []string{
 		`id="room-tabs"`, `role="tablist"`, `id="room-leave-btn"`, `id="room-name"`,
-		`id="join-error"`, `role="tabpanel"`,
+		`id="start-view"`, `id="start-error"`, `id="start-retry"`, `role="tabpanel"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("index.html missing %s", want)
@@ -311,10 +316,12 @@ func TestRunShutdownClosesAllRooms(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	codeCh := make(chan int, 1)
-	go func() { codeCh <- run(ctx, ln, config{}) }()
+	acfg := testAuthConfig(t)
+	go func() { codeCh <- run(ctx, ln, config{auth: acfg}) }()
 
 	addr := ln.Addr().String()
 	hdr := http.Header{"Origin": []string{"http://" + addr}}
+	hdr.Add("Cookie", sessionCookie(t, acfg, auth.Identity{Email: "ana@crombie.dev", Name: "Ana"}).String())
 	var conns []*websocket.Conn
 	for _, room := range []string{"general", "musica"} {
 		conn, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws?room="+room, hdr)
@@ -360,10 +367,12 @@ func TestRunGracefulShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	codeCh := make(chan int, 1)
-	go func() { codeCh <- run(ctx, ln, config{}) }()
+	acfg := testAuthConfig(t)
+	go func() { codeCh <- run(ctx, ln, config{auth: acfg}) }()
 
 	addr := ln.Addr().String()
 	hdr := http.Header{"Origin": []string{"http://" + addr}}
+	hdr.Add("Cookie", sessionCookie(t, acfg, auth.Identity{Email: "ana@crombie.dev", Name: "Ana"}).String())
 	conn, resp, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", hdr)
 	if err != nil {
 		t.Fatalf("dial: %v (resp %v)", err, resp)
@@ -550,7 +559,7 @@ func TestWebSocketAvatarWiring(t *testing.T) {
 	}
 }
 
-// The join form no longer asks for a picture (CHAT-29): it is edited in the profile editor, and the
+// The start view no longer asks for a picture (CHAT-29): it is edited in the profile editor, and the
 // old localStorage entry is removed on start. The profile card keeps its image.
 func TestIndexHasNoAvatarField(t *testing.T) {
 	html := string(indexHTML)
@@ -895,7 +904,7 @@ func TestPlaylistIDMirroredInJS(t *testing.T) {
 func TestRequestLogOmitsQuery(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var buf bytes.Buffer
-	r := newRouterLogging(newChatServer(nil), nil, nil, &buf)
+	r := newRouterLogging(newChatServer(nil, queryNickname), nil, nil, openGuards(), &buf)
 	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ws?nickname=x&bio=secreto", nil))
 	out := buf.String()
 	if !strings.Contains(out, `"/ws"`) {
