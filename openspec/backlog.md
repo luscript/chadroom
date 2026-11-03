@@ -196,8 +196,20 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       the upgrade).
 - [ ] The revocation set is in memory: lost on restart, so logged-out cookies are valid again
       until they expire.
-- [ ] Rate limiter and IP detection behind Caddy (trusted proxies).
+- [ ] Rate limiter and IP detection behind Caddy (trusted proxies). Until then the whole site
+      shares one login budget behind Caddy (the limiter ignores `X-Forwarded-For`).
 - [ ] Production: add the https redirect URI in Google Cloud; review `ALLOWED_ORIGINS` and
       scheme detection.
 - [ ] Disambiguate same-name users (e.g. show the email in the user popup).
 - [ ] Google profile picture as default avatar (needs `imageHosts` + `IMAGE_HOSTS`).
+- [ ] Callback 400 is plain text with no link back to login (could reuse the denied page).
+- [ ] `/gifs` and `/playlist` answer 404 without a key even when unauthenticated (minor info
+      leak: whether the keys are configured).
+- [ ] OIDC discovery runs after the port is bound: connections queue until the process exits.
+- [ ] HSTS when served over https (Caddy, or the app when cookies are `Secure`).
+- [ ] `SESSION_SECRET` has no entropy check and no rotation.
+- [ ] `recoverPanics` logs `%v` of the panic value; future values could embed secrets (consider
+      type + truncated message).
+- [ ] The flow cookie can't use `__Host-` (Path=/auth): keep untrusted subdomains off the parent
+      domain.
+- [ ] Split the callback in `internal/auth/oidc.go` into steps if it grows.

@@ -17,7 +17,7 @@ cookie.
 
 - GIVEN a browser without a session cookie
 - WHEN it requests `GET /`
-- THEN the response is 302 to `/auth/login`
+- THEN the response is 302 to `/auth/login?next=%2F`
 - AND the chat page is not sent
 
 #### Scenario: Public stylesheet
@@ -51,7 +51,7 @@ At startup the server MUST read:
 |----------|---------|------|
 | `GOOGLE_CLIENT_ID` | — | required, non-empty after trimming |
 | `GOOGLE_CLIENT_SECRET` | — | required, non-empty after trimming |
-| `OIDC_REDIRECT_URL` | `http://localhost:8080/auth/callback` | absolute `http` or `https` URL with a host and path `/auth/callback` |
+| `OIDC_REDIRECT_URL` | `http://localhost:8080/auth/callback` | absolute URL with a host and path `/auth/callback`; `https`, or `http` only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`) |
 | `ALLOWED_EMAIL_DOMAIN` | `crombie.dev` | a bare ASCII domain (no `@`), compared case-insensitively |
 | `SESSION_SECRET` | — | required, at least 32 bytes |
 | `SESSION_TTL` | `12h` | Go duration, between 5 minutes and 7 days |
@@ -74,6 +74,12 @@ uses `https`.
 - WHEN the server starts
 - THEN it exits with a non-zero status and the log does not contain the secret
 
+#### Scenario: Plain http outside loopback rejected
+
+- GIVEN `OIDC_REDIRECT_URL=http://chat.example.com/auth/callback`
+- WHEN the server starts
+- THEN it exits with a non-zero status naming `OIDC_REDIRECT_URL`
+
 #### Scenario: Defaults
 
 - GIVEN only `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and a 32-byte `SESSION_SECRET` are set
@@ -94,7 +100,12 @@ uses `https`.
 
 The post-login path comes from the optional `next` query parameter. It MUST be used only if it
 is a relative path of this server: it starts with a single `/`, the second character is
-neither `/` nor `\`, and it contains no control characters; otherwise `/` MUST be used.
+neither `/` nor `\`, it contains no `\`, spaces or control characters, it has no scheme, host or
+user info, it is not under `/auth`, and it is at most 512 bytes; otherwise `/` MUST be used. It
+MUST be re-validated before the post-login redirect.
+
+When the request carries `switch=1`, the authorization request MUST also set
+`prompt=select_account`, so the user can choose another Google account (used by the auth pages).
 
 `GET /auth/callback` MUST:
 
@@ -206,7 +217,7 @@ use distinct MAC contexts, so neither is accepted as the other.
 
 - GIVEN a session cookie whose expiry is in the past
 - WHEN it is sent to `GET /`
-- THEN the response is 302 to `/auth/login`
+- THEN the response is 302 to `/auth/login?next=%2F`
 
 #### Scenario: Flow cookie is not a session
 
@@ -241,7 +252,7 @@ lost on restart (sessions remain stateless otherwise).
 Every route except `/auth/*`, `/app.css`, `/favicon.svg` and `/favicon-unread.svg` MUST require a
 valid session (SRV-13). Without one:
 
-- `GET /` MUST respond 302 to `/auth/login`;
+- `GET /` MUST respond 302 to `/auth/login?next=<escaped request path>` (path only, query dropped);
 - `GET /app.js`, `GET /rooms`, `GET /gifs`, `GET /playlist` and `GET /ws` MUST respond 401 with
   `{"error":"unauthorized"}` and `Cache-Control: no-store`; `/ws` MUST NOT be upgraded and MUST
   NOT reveal whether the room exists.
@@ -275,8 +286,8 @@ The server MUST serve two embedded static pages, without inline script or style 
 same security headers as `GET /` (SRV-05):
 
 - an **access denied** page, sent with status 403 when authorization fails (SRV-12), saying only
-  that the account is not allowed and offering a link to `/auth/login`;
-- a **signed out** page at `GET /auth/signed-out` (200), offering a link to `/auth/login`.
+  that the account is not allowed and offering a link to `/auth/login?switch=1`;
+- a **signed out** page at `GET /auth/signed-out` (200), offering a link to `/auth/login?switch=1`.
 
 Pages for 400 callback errors MAY reuse the access-denied wording. These pages MUST NOT contain
 the email, name or any claim.
@@ -290,7 +301,7 @@ the email, name or any claim.
 ### Requirement: SRV-17 Login rate limit
 
 `GET /auth/login` and `GET /auth/callback` MUST be rate limited per client IP (remote address;
-proxy headers are not trusted, SRV-05). A client exceeding the limit (default: 20 requests per
+proxy headers are not trusted, SRV-05; IPv6 clients are keyed by their `/64` prefix). A client exceeding the limit (default: 20 requests per
 minute, shared by both routes) MUST receive 429 and MUST NOT get a redirect to the provider or a
 token exchange. Limiter state MUST be bounded in memory (entries for idle IPs are dropped).
 
