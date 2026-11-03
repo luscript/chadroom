@@ -41,7 +41,7 @@ cmd/chatroom/        main: router gin, http.Server, señales, CSP y lista de hos
   gifs.go            GET /gifs: proxy a Giphy (trending/búsqueda), caché TTL, validación de URLs
   playlist.go        GET /playlist: proxy a YouTube Data API (expande playlists), caché TTL
   index.html, app.js, app.css   frontend (embebido con go:embed)
-  denied.html, signed-out.html  acceso denegado y sesión cerrada
+  login.html, denied.html  login y acceso denegado
   favicon.svg, favicon-unread.svg   favicons (normal / con no leídos), embebidos
   main_test.go       tests del router, CSP y coherencia de hosts de imágenes (Go vs app.js)
 internal/auth/       config, cookie firmada, sesiones + middleware Require, OIDC login/callback/logout, rate limit

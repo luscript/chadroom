@@ -189,16 +189,16 @@ func TestCookieTooLarge(t *testing.T) {
 	}
 }
 
-func TestRequireModes(t *testing.T) {
+func TestRequire(t *testing.T) {
 	s, now := newTestSessions(false)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	var seen Identity
-	r.GET("/", s.Require(Page), func(c *gin.Context) {
+	r.GET("/", s.Require(), func(c *gin.Context) {
 		seen, _ = IdentityFrom(c.Request.Context())
 		c.String(200, "page")
 	})
-	r.GET("/rooms", s.Require(API), func(c *gin.Context) { c.String(200, "api") })
+	r.GET("/rooms", s.Require(), func(c *gin.Context) { c.String(200, "api") })
 
 	do := func(path string, c *http.Cookie) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
@@ -213,8 +213,8 @@ func TestRequireModes(t *testing.T) {
 	}
 
 	w := do("/", nil)
-	if w.Code != 302 || w.Header().Get("Location") != "/auth/login?next=%2F" || w.Header().Get("Cache-Control") != "no-store" || strings.Contains(w.Body.String(), "page") {
-		t.Fatalf("page: %d %v %q", w.Code, w.Header(), w.Body)
+	if w.Code != 401 || strings.Contains(w.Body.String(), "page") {
+		t.Fatalf("no session: %d %v %q", w.Code, w.Header(), w.Body)
 	}
 	w = do("/rooms", nil)
 	if w.Code != 401 || w.Body.String() != `{"error":"unauthorized"}` || w.Header().Get("Cache-Control") != "no-store" ||
@@ -223,6 +223,12 @@ func TestRequireModes(t *testing.T) {
 	}
 
 	c := mint(t, s)
+	if id, ok := s.Identify(requestWith(c)); !ok || id != (Identity{Email: "ana@crombie.dev", Name: "Ana Pérez"}) {
+		t.Fatalf("Identify = %+v %v", id, ok)
+	}
+	if _, ok := s.Identify(httptest.NewRequest("GET", "/", nil)); ok {
+		t.Fatal("Identify without a cookie")
+	}
 	if w := do("/", c); w.Code != 200 || seen != (Identity{Email: "ana@crombie.dev", Name: "Ana Pérez"}) {
 		t.Fatalf("valid page: %d %+v", w.Code, seen)
 	}
@@ -235,10 +241,19 @@ func TestRequireModes(t *testing.T) {
 		t.Fatalf("tampered: %d", w.Code)
 	}
 	*now = t0.Add(2 * time.Hour)
-	if w := do("/", c); w.Code != 302 {
+	if w := do("/", c); w.Code != 401 {
 		t.Fatalf("expired: %d", w.Code)
+	}
+	if _, ok := s.Identify(requestWith(c)); ok {
+		t.Fatal("Identify accepted an expired session")
 	}
 	if _, ok := IdentityFrom(httptest.NewRequest("GET", "/", nil).Context()); ok {
 		t.Fatal("identity without Require")
 	}
+}
+
+func requestWith(c *http.Cookie) *http.Request {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.AddCookie(c)
+	return r
 }

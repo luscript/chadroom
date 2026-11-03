@@ -40,8 +40,8 @@ var appCSS []byte
 //go:embed denied.html
 var deniedHTML []byte
 
-//go:embed signed-out.html
-var signedOutHTML []byte
+//go:embed login.html
+var loginHTML []byte
 
 //go:embed favicon.svg
 var faviconSVG []byte
@@ -106,7 +106,7 @@ func buildCSP(hosts []string) string {
 	}, "; ")
 }
 
-// authPageCSP is for the denied and signed-out pages: plain markup, a stylesheet and links, no
+// authPageCSP is for the login and denied pages: plain markup, a stylesheet and links, no
 // script, no connections, no frames.
 const authPageCSP = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
@@ -200,16 +200,31 @@ func serveRooms(c *gin.Context) {
 
 // guards is what protects the router: the session checks for pages and APIs and the /auth routes.
 // newRouter panics on a missing field, so no router can run unauthenticated by accident.
+//
+// page picks the handler for "/": chat with a valid session, login otherwise. The chat page is
+// never served by anything but its first argument, and only behind a verified session.
 type guards struct {
-	page, api gin.HandlerFunc
-	register  func(*gin.RouterGroup)
+	page     func(chat, login gin.HandlerFunc) gin.HandlerFunc
+	api      gin.HandlerFunc
+	register func(*gin.RouterGroup)
 }
 
 // authGuards builds the guards from the auth handler; run always uses it.
 func authGuards(a *auth.Handler) guards {
+	sessions := a.Sessions()
 	return guards{
-		page:     a.Sessions().Require(auth.Page),
-		api:      a.Sessions().Require(auth.API),
+		page: func(chat, login gin.HandlerFunc) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				// Same URL, two bodies: caches must key on the cookie.
+				c.Header("Vary", "Cookie")
+				if _, ok := sessions.Identify(c.Request); ok {
+					chat(c)
+					return
+				}
+				login(c)
+			}
+		},
+		api:      sessions.Require(),
 		register: a.Register,
 	}
 }
@@ -242,7 +257,8 @@ func newRouterLogging(chatSrv *chat.Server, gifs *gifSearch, playlists *playlist
 	page, api := g.page, g.api
 	// Protected: the session check runs before the handler, so /ws answers 401 before any room 404
 	// or origin 403 (SRV-06). /app.js is a script fetch, which cannot follow a login redirect.
-	r.GET("/", page, servePage)
+	// "/" shows the login page instead of a 401 when there is no session.
+	r.GET("/", page(servePage, serveAuthPage(http.StatusOK, loginHTML)))
 	r.GET("/app.js", api, serveAsset("text/javascript; charset=utf-8", appJS))
 	r.GET("/rooms", api, serveRooms)
 	r.GET("/ws", api, chatSrv.HandleWebSocket)
@@ -257,7 +273,6 @@ func newRouterLogging(chatSrv *chat.Server, gifs *gifSearch, playlists *playlist
 	r.GET("/favicon.svg", serveAsset("image/svg+xml", faviconSVG))
 	r.GET("/favicon-unread.svg", serveAsset("image/svg+xml", faviconUnreadSVG))
 	ag := r.Group("/auth")
-	ag.GET("/signed-out", serveAuthPage(http.StatusOK, signedOutHTML))
 	g.register(ag)
 	return r
 }

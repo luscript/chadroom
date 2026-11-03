@@ -26,7 +26,8 @@ import (
 // Production code has no such path; newRouter refuses incomplete guards.
 func openGuards() guards {
 	noop := func(*gin.Context) {}
-	return guards{page: noop, api: noop, register: func(*gin.RouterGroup) {}}
+	chatOnly := func(chat, _ gin.HandlerFunc) gin.HandlerFunc { return chat }
+	return guards{page: chatOnly, api: noop, register: func(*gin.RouterGroup) {}}
 }
 
 const (
@@ -98,18 +99,6 @@ var noRedirectClient = &http.Client{
 func TestAuthRoutes(t *testing.T) {
 	ts, _ := authRouter(t)
 
-	resp, err := noRedirectClient.Get(ts.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/auth/login?next=%2F" {
-		t.Fatalf("GET / = %d Location %q, want 302 /auth/login?next=%%2F", resp.StatusCode, resp.Header.Get("Location"))
-	}
-	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
-		t.Errorf("GET / Cache-Control = %q, want no-store", cc)
-	}
-
 	for _, path := range []string{"/app.js", "/rooms", "/gifs?q=cat", "/playlist?list=PL1234567890abcdef", "/ws", "/ws?room=secret"} {
 		resp, err := noRedirectClient.Get(ts.URL + path)
 		if err != nil {
@@ -129,7 +118,7 @@ func TestAuthRoutes(t *testing.T) {
 	}
 
 	// A WebSocket dial fails with the 401, not an upgrade or a room 404.
-	_, resp, err = websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws?room=secret",
+	_, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws?room=secret",
 		http.Header{"Origin": []string{ts.URL}})
 	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("ws dial err=%v resp=%v, want 401", err, resp)
@@ -138,7 +127,7 @@ func TestAuthRoutes(t *testing.T) {
 
 func TestAuthPublicRoutes(t *testing.T) {
 	ts, _ := authRouter(t)
-	for _, path := range []string{"/app.css", "/favicon.svg", "/favicon-unread.svg", "/auth/signed-out"} {
+	for _, path := range []string{"/app.css", "/favicon.svg", "/favicon-unread.svg"} {
 		resp, err := noRedirectClient.Get(ts.URL + path)
 		if err != nil {
 			t.Fatal(err)
@@ -148,7 +137,15 @@ func TestAuthPublicRoutes(t *testing.T) {
 			t.Errorf("GET %s = %d, want 200 without a session", path, resp.StatusCode)
 		}
 	}
-	resp, err := noRedirectClient.Get(ts.URL + "/auth/login")
+	resp, err := noRedirectClient.Get(ts.URL + "/auth/signed-out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /auth/signed-out = %d, want 404", resp.StatusCode)
+	}
+	resp, err = noRedirectClient.Get(ts.URL + "/auth/login")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,8 +190,8 @@ func TestAuthPageSecurityHeaders(t *testing.T) {
 		status int
 		body   []byte
 	}{
-		"denied":     {http.StatusForbidden, deniedHTML},
-		"signed-out": {http.StatusOK, signedOutHTML},
+		"denied": {http.StatusForbidden, deniedHTML},
+		"login":  {http.StatusOK, loginHTML},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -273,7 +270,7 @@ func TestIdentityNickname(t *testing.T) {
 		c, _ := sessions.Cookie(*id)
 		r.AddCookie(c)
 		g := gin.New()
-		g.GET("/", sessions.Require(auth.API), func(c *gin.Context) { out = c.Request })
+		g.GET("/", sessions.Require(), func(c *gin.Context) { out = c.Request })
 		g.ServeHTTP(httptest.NewRecorder(), r)
 		return out
 	}
@@ -340,9 +337,10 @@ func TestRunRequiresSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	page, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/auth/login?next=%2F" {
-		t.Fatalf("GET / = %d Location %q, want 302 /auth/login?next=%%2F", resp.StatusCode, resp.Header.Get("Location"))
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(page, loginHTML) {
+		t.Fatalf("GET / = %d, want 200 with the login page", resp.StatusCode)
 	}
 	resp, err = noRedirectClient.Get(base + "/ws")
 	if err != nil {
@@ -396,12 +394,13 @@ func TestRunFailsWithoutAuthConfig(t *testing.T) {
 func TestNewRouterPanicsWithoutGuards(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	noop := func(*gin.Context) {}
+	pg := func(chat, _ gin.HandlerFunc) gin.HandlerFunc { return chat }
 	reg := func(*gin.RouterGroup) {}
 	for name, g := range map[string]guards{
 		"zero":        {},
 		"no page":     {api: noop, register: reg},
-		"no api":      {page: noop, register: reg},
-		"no register": {page: noop, api: noop},
+		"no api":      {page: pg, register: reg},
+		"no register": {page: pg, api: noop},
 	} {
 		func() {
 			defer func() {
@@ -436,8 +435,8 @@ func TestIdentityNicknameUnusableName(t *testing.T) {
 // Guards on the embedded assets: the login hand-off and the logout flow (CHAT-16, CHAT-42).
 func TestAppJSAuthFlow(t *testing.T) {
 	js := string(appJS)
-	if !strings.Contains(js, "location.assign('/auth/login')") {
-		t.Error("app.js does not send the user to /auth/login")
+	if !strings.Contains(js, "location.assign('/')") {
+		t.Error("app.js does not send the user back to the login page at /")
 	}
 	for _, path := range []string{"'/rooms'", "'/gifs?q='", "'/playlist?list='"} {
 		at := strings.Index(js, "fetch("+path)
@@ -454,15 +453,18 @@ func TestAppJSAuthFlow(t *testing.T) {
 	if at < 0 || !strings.Contains(js[at:min(at+200, len(js))], "method: 'POST'") {
 		t.Fatal("app.js does not POST /auth/logout")
 	}
-	// The signed-out page is reached only after the server confirmed the logout.
+	// The login page is reached only after the server confirmed the logout.
 	rest := js[at:]
 	ok := strings.Index(rest, "if (!res.ok) throw")
-	replace := strings.Index(rest, "location.replace('/auth/signed-out')")
+	replace := strings.Index(rest, "location.replace('/')")
 	if ok < 0 || replace < 0 || ok > replace {
-		t.Error("app.js must check res.ok before location.replace('/auth/signed-out')")
+		t.Error("app.js must check res.ok before location.replace('/')")
 	}
-	if strings.Count(js, "location.replace('/auth/signed-out')") != 1 {
-		t.Error("location.replace('/auth/signed-out') must appear only in the logout handler")
+	if strings.Count(js, "location.replace('/')") != 1 {
+		t.Error("location.replace('/') must appear only in the logout handler")
+	}
+	if strings.Contains(js, "signed-out") || strings.Contains(js, "'/auth/login'") {
+		t.Error("app.js still references /auth/signed-out or navigates to /auth/login directly")
 	}
 }
 
@@ -483,11 +485,83 @@ func TestIndexHasSessionMarkup(t *testing.T) {
 	}
 }
 
-// Both auth pages offer the account chooser.
+// The login and denied pages offer the account chooser.
 func TestAuthPagesLinkToAccountChooser(t *testing.T) {
-	for name, body := range map[string][]byte{"denied": deniedHTML, "signed-out": signedOutHTML} {
+	for name, body := range map[string][]byte{"denied": deniedHTML, "login": loginHTML} {
 		if !strings.Contains(string(body), `href="/auth/login?switch=1"`) {
 			t.Errorf("%s page does not link to /auth/login?switch=1", name)
 		}
+	}
+}
+
+// SRV-02, CHAT-20: "/" is the chat page with a session and the login page (200, no redirect) without one.
+func TestRootLoginPageOrChat(t *testing.T) {
+	const wantCSP = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	ts, cfg := authRouter(t)
+	get := func(c *http.Cookie) (*http.Response, string) {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
+		if c != nil {
+			req.AddCookie(c)
+		}
+		resp, err := noRedirectClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, string(b)
+	}
+	good := sessionCookie(t, cfg, auth.Identity{Email: "ana@crombie.dev", Name: "Ana"})
+	tampered := *good
+	tampered.Value = tampered.Value[:len(tampered.Value)-2] + "xx"
+	expired := sessionCookie(t, auth.Config{SessionSecret: cfg.SessionSecret, SessionTTL: -time.Minute}, auth.Identity{Email: "ana@crombie.dev"})
+
+	for name, c := range map[string]*http.Cookie{"no cookie": nil, "tampered": &tampered, "expired": expired} {
+		t.Run(name, func(t *testing.T) {
+			resp, body := get(c)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET / = %d, want 200", resp.StatusCode)
+			}
+			for k, want := range map[string]string{
+				"Content-Security-Policy": wantCSP,
+				"Cache-Control":           "no-store",
+				"Vary":                    "Cookie",
+				"X-Content-Type-Options":  "nosniff",
+				"X-Frame-Options":         "DENY",
+				"Referrer-Policy":         "no-referrer",
+			} {
+				if got := resp.Header.Get(k); got != want {
+					t.Errorf("%s = %q, want %q", k, got, want)
+				}
+			}
+			for _, want := range []string{"Iniciar sesión con Google", `href="/auth/login"`, `href="/auth/login?switch=1"`} {
+				if !strings.Contains(body, want) {
+					t.Errorf("login page misses %q", want)
+				}
+			}
+			if strings.Contains(body, `id="start-view"`) || strings.Contains(body, "/app.js") {
+				t.Error("login page carries the chat markup")
+			}
+		})
+	}
+
+	resp, body := get(good)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `id="start-view"`) || strings.Contains(body, "Iniciar sesión con Google") {
+		t.Fatalf("GET / with a session = %d, want the chat page", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Vary"); got != "Cookie" {
+		t.Errorf("chat page Vary = %q, want Cookie", got)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "script-src") {
+		t.Error("chat page lost its CSP")
+	}
+
+	resp2, err := noRedirectClient.Get(ts.URL + "/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /app.js without a session = %d, want 401", resp2.StatusCode)
 	}
 }

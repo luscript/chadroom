@@ -32,7 +32,7 @@ go run ./cmd/chatroom
 ```
 
 Antes de correrlo hay que configurar el login con Google (ver Configuración y Acceso). Abrí
-<http://localhost:8080>, iniciá sesión con tu cuenta de Google y empezá a chatear (abrí varias
+<http://localhost:8080>, tocá «Iniciar sesión con Google» con tu cuenta de Google y empezá a chatear (abrí varias
 pestañas para probar). Tu nickname sale de tu cuenta, no se elige. La página se conecta al
 WebSocket del mismo host desde el que la abriste, y está embebida en el binario, así que
 funciona desde cualquier directorio.
@@ -104,7 +104,7 @@ servidor lo comprueba por su cuenta: el dominio del email debe coincidir exactam
   `OIDC_REDIRECT_URL` es `https`) y dura `SESSION_TTL`.
 - El nickname es el nombre de la cuenta de Google o, si no hay, la parte local del email. Si ya
   está en uso en la sala, se agrega ` (2)`, ` (3)`… El parámetro `?nickname=` se ignora.
-- **Cerrar sesión** (`POST /auth/logout`) cierra la sesión y lleva a una página de sesión cerrada.
+- **Cerrar sesión** (`POST /auth/logout`) cierra la sesión y vuelve a la página de login.
 - El límite de pedidos de `/auth/login` y `/auth/callback` usa la dirección TCP remota e ignora `X-Forwarded-For`: detrás de un reverse proxy todos comparten el mismo cupo hasta que se configuren proxies de confianza (pendiente).
 - Una sesión cerrada o vencida no corta los WebSockets ya abiertos: solo se valida al conectar.
 
@@ -114,11 +114,10 @@ servidor lo comprueba por su cuenta: el dominio del email debe coincidir exactam
 
 | Ruta | Descripción |
 |------|-------------|
-| `GET /auth/login?next=<ruta>` | Inicia el login con Google. `next` es opcional y solo se acepta como ruta relativa. Con `?switch=1` fuerza el selector de cuentas de Google (lo usan los links de acceso denegado y de sesión cerrada). Limitado a 20 pedidos por minuto por IP. |
+| `GET /auth/login?next=<ruta>` | Inicia el login con Google. `next` es opcional y solo se acepta como ruta relativa. Con `?switch=1` fuerza el selector de cuentas de Google (lo usan los links «Usar otra cuenta» de la página de login y «Probar con otra cuenta» de acceso denegado). Limitado a 20 pedidos por minuto por IP. |
 | `GET /auth/callback` | Retorno de Google: valida el login, crea la sesión y redirige. Responde `400` genérico si falla el flujo, el `state`, el intercambio, el token o el nonce, y `403` con la página de acceso denegado si la cuenta es de otro dominio. Mismo límite que `/auth/login`: 20 pedidos por minuto por IP (IPv6 por /64); al pasarse, `429` con `Retry-After`. |
 | `POST /auth/logout` | Cierra la sesión. `204`. Verifica el `Origin`. |
-| `GET /auth/signed-out` | Página de sesión cerrada (pública). |
-| `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. **Requiere sesión**: sin ella, `302` a `/auth/login?next=<ruta>` (solo el path, sin query). |
+| `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. Con sesión válida sirve el chat; sin ella, la página de login (`login.html` embebido, `200`, misma URL, sin redirección) con el botón «Iniciar sesión con Google». Ambas respuestas llevan `Vary: Cookie`. |
 | `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). `/app.js` requiere sesión (`401` sin ella). |
 | `GET /favicon.svg`, `GET /favicon-unread.svg` | Ícono de la pestaña y su variante con mensajes sin leer (embebidos). |
 | `GET /playlist?list=<id>` | Requiere sesión (`401` sin ella). Videos de una playlist de YouTube (solo con `YOUTUBE_API_KEY`). `200` `{"videos":["dQw4w9WgXcQ",…]}` (hasta 50 ids, solo la primera página, sin los privados, no procesados o no embebibles), `400` si `list` falta o es inválido, `404` `{"error":"not_found"}` si la playlist no existe o es privada (y `404` sin JSON si no hay clave), `502` `{"error":"unavailable"}` si YouTube falla o tarda más de 5 s. Resultados en caché 10 min. |
@@ -361,7 +360,7 @@ origen, las imágenes de la lista permitida y, como único frame, `https://www.y
 ```
 cmd/chatroom/        main: router (gin), http.Server, señales, CSP y lista de hosts de imágenes
   index.html, app.js, app.css   frontend (embebido en el binario)
-  denied.html, signed-out.html  páginas de acceso denegado y de sesión cerrada
+  login.html, denied.html  páginas de login y de acceso denegado
   favicon.svg, favicon-unread.svg   ícono de la pestaña y su variante con mensajes sin leer
 internal/auth/
   config.go          Configuración del login (variables de entorno, validación)

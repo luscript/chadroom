@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
@@ -21,14 +20,6 @@ func IdentityFrom(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(identityKey{}).(Identity)
 	return id, ok
 }
-
-// Mode picks how Require answers a missing or invalid session.
-type Mode int
-
-const (
-	Page Mode = iota // failure: 302 /auth/login?next=<request path>
-	API              // failure: 401 {"error":"unauthorized"}
-)
 
 // session is the payload of the session cookie. It carries no OAuth tokens.
 type session struct {
@@ -120,24 +111,28 @@ func (s *Sessions) revoke(sid string, exp time.Time) {
 	}
 }
 
-// Require rejects requests without a valid session and otherwise stores the
-// Identity in the request context. Identity comes only from the cookie.
-func (s *Sessions) Require(mode Mode) gin.HandlerFunc {
+// Identify returns the identity of the request's session, or false when there is no valid one.
+// Identity comes only from the cookie.
+func (s *Sessions) Identify(r *http.Request) (Identity, bool) {
+	sess, ok := s.verify(r)
+	if !ok {
+		return Identity{}, false
+	}
+	return Identity{Email: sess.Email, Name: sess.Name}, true
+}
+
+// Require answers 401 {"error":"unauthorized"} to requests without a valid session and otherwise
+// stores the Identity in the request context.
+func (s *Sessions) Require() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sess, ok := s.verify(c.Request)
+		id, ok := s.Identify(c.Request)
 		if !ok {
 			c.Header("Cache-Control", "no-store")
-			if mode == Page {
-				// Only the path travels in next; /auth/login validates it again.
-				c.Redirect(http.StatusFound, "/auth/login?next="+url.QueryEscape(c.Request.URL.Path))
-			} else {
-				c.Data(http.StatusUnauthorized, "application/json; charset=utf-8", []byte(`{"error":"unauthorized"}`))
-			}
+			c.Data(http.StatusUnauthorized, "application/json; charset=utf-8", []byte(`{"error":"unauthorized"}`))
 			c.Abort()
 			return
 		}
-		ctx := context.WithValue(c.Request.Context(), identityKey{}, Identity{Email: sess.Email, Name: sess.Name})
-		c.Request = c.Request.WithContext(ctx)
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), identityKey{}, id))
 		c.Next()
 	}
 }

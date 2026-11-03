@@ -78,12 +78,12 @@ func newRig(t *testing.T) *rig {
 
 	r := gin.New()
 	h.Register(r.Group("/auth"))
-	r.GET("/", h.Sessions().Require(Page), func(c *gin.Context) {
+	r.GET("/", h.Sessions().Require(), func(c *gin.Context) {
 		id, _ := IdentityFrom(c.Request.Context())
 		c.String(http.StatusOK, id.Name+"|"+id.Email)
 	})
-	r.GET("/hello", h.Sessions().Require(Page), func(c *gin.Context) { c.String(http.StatusOK, "hello") })
-	r.GET("/api", h.Sessions().Require(API), func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+	r.GET("/hello", h.Sessions().Require(), func(c *gin.Context) { c.String(http.StatusOK, "hello") })
+	r.GET("/api", h.Sessions().Require(), func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	engine = r
 	return &rig{h: h, prov: prov, srv: srv, clock: clock}
 }
@@ -191,7 +191,7 @@ func TestCallbackHappyPath(t *testing.T) {
 	g := newRig(t)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar} // follows every redirect, like a browser
-	resp, err := client.Get(g.srv.URL + "/")
+	resp, err := client.Get(g.srv.URL + "/auth/login")
 	if err != nil {
 		t.Fatal(err)
 	}

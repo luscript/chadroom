@@ -127,11 +127,11 @@
   // URLs, so anything outside this shape is dropped.
   const ROOM_ID = /^[a-z0-9-]{1,32}$/;
 
-  // The session cookie is gone or expired: the server's login flow takes over.
+  // The session cookie is gone or expired: "/" answers with the login page.
   let loggingIn = false;
   function toLogin() {
     loggingIn = true;
-    location.assign('/auth/login');
+    location.assign('/');
   }
 
   async function loadRooms() {
@@ -493,7 +493,7 @@
     try {
       const res = await fetch('/auth/logout', { method: 'POST', cache: 'no-store' });
       if (!res.ok) throw new Error('logout: ' + res.status);
-      location.replace('/auth/signed-out');
+      location.replace('/');
     } catch {
       btn.disabled = false;
       addSystem(current(), 'No se pudo cerrar sesión. Probá de nuevo.');

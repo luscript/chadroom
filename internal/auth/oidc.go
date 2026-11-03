@@ -133,7 +133,7 @@ func (h *Handler) login(c *gin.Context) {
 		oidc.Nonce(nonce),
 		oauth2.SetAuthURLParam("hd", h.cfg.AllowedDomain),
 	}
-	if c.Query("switch") == "1" { // "use another account" links from the denied/signed-out pages
+	if c.Query("switch") == "1" { // "use another account" links from the login and denied pages
 		opts = append(opts, oauth2.SetAuthURLParam("prompt", "select_account"))
 	}
 	authURL := h.oauth.AuthCodeURL(state, opts...)

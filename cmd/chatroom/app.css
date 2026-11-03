@@ -333,3 +333,4 @@ body{height:auto;min-height:100vh;background-color:#f9dfeb;background-image:line
 }
 .scrapbook .sticky { margin-bottom: 28px; }
 .note-text { overflow-wrap: anywhere; }
+a.btn{text-decoration:none}
