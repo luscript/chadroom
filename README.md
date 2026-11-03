@@ -31,14 +31,15 @@ entra o sale.
 go run ./cmd/chatroom
 ```
 
-Abrí <http://localhost:8080> (o `127.0.0.1`, o la IP de tu máquina en la red local), elegí un
-nickname y empezá a chatear (abrí varias pestañas para probar). La página se conecta al
+Antes de correrlo hay que configurar el login con Google (ver Configuración y Acceso). Abrí
+<http://localhost:8080>, iniciá sesión con tu cuenta de Google y empezá a chatear (abrí varias
+pestañas para probar). Tu nickname sale de tu cuenta, no se elige. La página se conecta al
 WebSocket del mismo host desde el que la abriste, y está embebida en el binario, así que
 funciona desde cualquier directorio.
 
 Si se corta la conexión (reinicio del servidor, Wi-Fi, notebook suspendida), la página se
-reconecta sola: reintenta con esperas crecientes de hasta 30 s y vuelve a pedir el mismo
-nickname. Los mensajes enviados por otros durante el corte no se recuperan.
+reconecta sola: reintenta con esperas crecientes de hasta 30 s y vuelve a entrar con el mismo
+nickname (el de tu sesión). Si la sesión venció, la página te lleva a iniciar sesión de nuevo. Los mensajes enviados por otros durante el corte no se recuperan.
 
 ### ✦ Notificaciones
 
@@ -62,8 +63,7 @@ entrar al chat.
 
 Cada persona tiene un perfil con una foto y una descripción corta (hasta 160 caracteres).
 Es efímero: vive solo en la memoria de la página y del servidor, no se guarda en ningún lado, y
-se pierde al salir (**Salir**) o al cerrar la pestaña. El formulario de entrada solo pide el
-apodo.
+se pierde al salir (**Salir**) o al cerrar la pestaña.
 
 - **Mi perfil** (botón del header) abre el editor sobre el compositor: **Elegir GIF** abre el
   selector de GIFs para usar uno como foto (no se envía ningún mensaje), **Quitar foto** la saca,
@@ -82,8 +82,31 @@ apodo.
 | `GIPHY_API_KEY`   | vacío   | Clave de la API de Giphy. Si está, el selector de GIFs del chat busca en Giphy a través de `GET /gifs`; si no, `/gifs` responde `404` y la página solo ofrece pegar la URL de un GIF. La clave nunca llega al navegador ni a los logs. |
 | `YOUTUBE_API_KEY` | vacío   | Clave de la YouTube Data API v3. Si está, el campo de la música acepta links de playlist y los expande a través de `GET /playlist`; si no, `/playlist` responde `404` y la página avisa que importar no está disponible (los links de un solo video siguen funcionando). La clave nunca llega al navegador ni a los logs (viaja en el header `X-Goog-Api-Key`, nunca en la URL). Conviene restringirla a "YouTube Data API v3" en Google Cloud Console. |
 
+| `GOOGLE_CLIENT_ID` | **requerida** | ID del cliente OAuth de Google Cloud (placeholder: `<id>.apps.googleusercontent.com`). |
+| `GOOGLE_CLIENT_SECRET` | **requerida** | Secreto del cliente OAuth. Nunca se loguea ni llega al navegador. |
+| `OIDC_REDIRECT_URL` | `http://localhost:8080/auth/callback` | URL de retorno del login. Debe estar registrada como URI de redirección autorizada en el cliente OAuth de Google Cloud y su path debe ser `/auth/callback`. Si es `https`, las cookies llevan `Secure`. |
+| `ALLOWED_EMAIL_DOMAIN` | `crombie.dev` | Dominio de email que puede entrar. |
+| `SESSION_SECRET` | **requerida** | Secreto para firmar la cookie de sesión, de al menos 32 bytes (por ejemplo `openssl rand -base64 48`). Nunca se genera automáticamente. |
+| `SESSION_TTL` | `12h` | Duración de la sesión, entre `5m` y `168h`. |
+
+El servidor **se niega a arrancar** si falta alguna variable requerida o es inválida. Go no lee
+`.env`: cargalo con `set -a; . ./.env; set +a` antes de correr (`.env` está en `.gitignore`).
+
 El servidor escucha en `:8080` y se apaga ordenadamente con `Ctrl+C` / `SIGTERM`, cerrando
 todas las conexiones.
+
+### ✦ Acceso (login con Google)
+
+Solo entran cuentas de Google **verificadas** del dominio permitido (`ALLOWED_EMAIL_DOMAIN`). El
+servidor lo comprueba por su cuenta: el dominio del email debe coincidir exactamente y el claim
+`hd` del token también. Quien no cumple ve una página de acceso denegado.
+
+- La sesión viaja en una cookie firmada `HttpOnly` y `SameSite=Lax` (con `Secure` si
+  `OIDC_REDIRECT_URL` es `https`) y dura `SESSION_TTL`.
+- El nickname es el nombre de la cuenta de Google o, si no hay, la parte local del email. Si ya
+  está en uso en la sala, se agrega ` (2)`, ` (3)`… El parámetro `?nickname=` se ignora.
+- **Salir** cierra la sesión (`POST /auth/logout`) y lleva a una página de sesión cerrada.
+- Una sesión cerrada o vencida no corta los WebSockets ya abiertos: solo se valida al conectar.
 
 <p align="center"><img src="docs/readme/divider.svg" alt=""></p>
 
@@ -91,13 +114,17 @@ todas las conexiones.
 
 | Ruta | Descripción |
 |------|-------------|
-| `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. |
-| `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). |
+| `GET /auth/login?next=<ruta>` | Inicia el login con Google. `next` es opcional y solo se acepta como ruta relativa. |
+| `GET /auth/callback` | Retorno de Google: valida el login, crea la sesión y redirige. |
+| `POST /auth/logout` | Cierra la sesión. `204`. Verifica el `Origin`. |
+| `GET /auth/signed-out` | Página de sesión cerrada (pública). |
+| `GET /` | Página del chat (`index.html` embebido), con `Content-Security-Policy`. **Requiere sesión**: sin ella, `302` a `/auth/login`. |
+| `GET /app.js`, `GET /app.css` | Script y estilos de la página (embebidos). `/app.js` requiere sesión (`401` sin ella). |
 | `GET /favicon.svg`, `GET /favicon-unread.svg` | Ícono de la pestaña y su variante con mensajes sin leer (embebidos). |
-| `GET /playlist?list=<id>` | Videos de una playlist de YouTube (solo con `YOUTUBE_API_KEY`). `200` `{"videos":["dQw4w9WgXcQ",…]}` (hasta 50 ids, solo la primera página, sin los privados, no procesados o no embebibles), `400` si `list` falta o es inválido, `404` `{"error":"not_found"}` si la playlist no existe o es privada (y `404` sin JSON si no hay clave), `502` `{"error":"unavailable"}` si YouTube falla o tarda más de 5 s. Resultados en caché 10 min. |
-| `GET /rooms` | Lista de salas: `{"rooms":["general","juegos","musica"]}` (`application/json`, `nosniff`, `Cache-Control: no-cache`). |
-| `GET /gifs?q=<texto>` | Búsqueda de GIFs en Giphy (solo con `GIPHY_API_KEY`). Sin `q` devuelve los trending. `200` `{"gifs":[{"url":"…","preview":"…"}]}` (hasta 24, solo URLs `https` de la lista permitida, sin query), `400` `{"error":"query_too_long"}` si `q` pasa de 50 caracteres, `404` si no hay clave, `502` `{"error":"unavailable"}` si Giphy falla o tarda más de 5 s. Resultados en caché 10 min. |
-| `GET /ws?nickname=<nombre>&room=<sala>&avatar=<url>&bio=<texto>` | Upgrade a WebSocket a una sala. `avatar` y `bio` son opcionales (foto y descripción del perfil, ver abajo). Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
+| `GET /playlist?list=<id>` | Requiere sesión (`401` sin ella). Videos de una playlist de YouTube (solo con `YOUTUBE_API_KEY`). `200` `{"videos":["dQw4w9WgXcQ",…]}` (hasta 50 ids, solo la primera página, sin los privados, no procesados o no embebibles), `400` si `list` falta o es inválido, `404` `{"error":"not_found"}` si la playlist no existe o es privada (y `404` sin JSON si no hay clave), `502` `{"error":"unavailable"}` si YouTube falla o tarda más de 5 s. Resultados en caché 10 min. |
+| `GET /rooms` | Requiere sesión (`401` sin ella). Lista de salas: `{"rooms":["general","juegos","musica"]}` (`application/json`, `nosniff`, `Cache-Control: no-cache`). |
+| `GET /gifs?q=<texto>` | Requiere sesión (`401` sin ella). Búsqueda de GIFs en Giphy (solo con `GIPHY_API_KEY`). Sin `q` devuelve los trending. `200` `{"gifs":[{"url":"…","preview":"…"}]}` (hasta 24, solo URLs `https` de la lista permitida, sin query), `400` `{"error":"query_too_long"}` si `q` pasa de 50 caracteres, `404` si no hay clave, `502` `{"error":"unavailable"}` si Giphy falla o tarda más de 5 s. Resultados en caché 10 min. |
+| `GET /ws?room=<sala>&avatar=<url>&bio=<texto>` | Requiere sesión (`401` sin ella). Upgrade a WebSocket a una sala; el nickname sale de la sesión. `avatar` y `bio` son opcionales (foto y descripción del perfil, ver abajo). Entrada: texto plano o sobre JSON (ver abajo). Salida: cada frame es un sobre JSON (ver abajo). |
 
 <details>
 <summary><b>♡ Protocolo WebSocket completo</b> (salas, entrada, salida, mensajes privados, nicknames)</summary>
@@ -137,7 +164,7 @@ respuesta, también en un `dm`.
 
 | `type`    | Cuándo | `text` |
 |-----------|--------|--------|
-| `welcome` | Solo al que se conecta, con su nickname final en `from`. | `""` |
+| `welcome` | Solo al que se conecta, con su nickname final (el de la sesión, con sufijo si estaba en uso) en `from`. | `""` |
 | `join`    | Alguien entró a la sala. | `""` |
 | `leave`   | Alguien salió de la sala. | `""` |
 | `chat`    | Mensaje de `from`, reenviado a todos. | el mensaje |
@@ -291,7 +318,8 @@ sin anunciar `join` ni `leave`.
 **Clientes lentos:** si la sala descarta a un cliente por no leer a tiempo, ahora los demás reciben
 su `leave`. Al apagar el servidor no se envía ningún `leave`.
 
-**Nicknames:** son únicos sin distinguir mayúsculas; si el nickname ya está en uso se agrega un
+**Nicknames:** salen de la sesión (nombre de Google o parte local del email), no del cliente. Son
+únicos sin distinguir mayúsculas; si el nickname ya está en uso se agrega un
 sufijo ` (n)` (por ejemplo `bob (2)`). Se quitan los caracteres de control y los de dirección
 bidi, se recorta a 32 caracteres y, si queda vacío, se usa `Anonymous`.
 
@@ -331,7 +359,15 @@ origen, las imágenes de la lista permitida y, como único frame, `https://www.y
 ```
 cmd/chatroom/        main: router (gin), http.Server, señales, CSP y lista de hosts de imágenes
   index.html, app.js, app.css   frontend (embebido en el binario)
+  denied.html, signed-out.html  páginas de acceso denegado y de sesión cerrada
   favicon.svg, favicon-unread.svg   ícono de la pestaña y su variante con mensajes sin leer
+internal/auth/
+  config.go          Configuración del login (variables de entorno, validación)
+  cookie.go          Cookie de sesión firmada
+  session.go         Sesiones y middleware Require
+  oidc.go            Login, callback y logout con Google (OIDC)
+  ratelimit.go       Límite de pedidos de los endpoints de auth
+  authtest/          Proveedor OIDC falso para los tests
 internal/chat/
   server.go          Server: elige la sala (`room`), hace el upgrade y aplica la política de orígenes
   room.go            Room: hub que registra clientes y difunde mensajes (uno por sala)

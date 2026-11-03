@@ -33,6 +33,8 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
       `style-src 'self'`, no `font-src`). `app.css` still names `"Inter"` with a `system-ui` fallback.
 - [ ] Reconnect never gives up on permanent failures (403 origin is reported as 1006);
       consider an attempt cap or a "retry" button after N minutes.
+      (Partially addressed by `google-oidc-login`: the session probe stops retrying when the
+      session is gone.)
 - [ ] Trusted Types: `require-trusted-types-for 'script'` in the CSP (no sinks today).
 - [ ] First join that fails shows "Conexión perdida… / Reconectado" without ever having been
       connected; use a `wasOnline` flag for the wording.
@@ -98,6 +100,8 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] gin release mode (`GIN_MODE=release` in deploy, or `gin.SetMode`).
 - [ ] DNS rebinding: optional `ALLOWED_HOSTS` check on `r.Host`, or bind to `127.0.0.1` for
       local use. Revisit missing-Origin allowance if cookie auth is ever added.
+      (Addressed by `google-oidc-login`: cookie auth now exists; an empty Origin is still
+      allowed on `/ws` but a session cookie is required, and logout checks Origin.)
 - [ ] TLS.
 
 ## `chatroom-test-polish` (small follow-ups from verify round 2)
@@ -186,3 +190,14 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] Profile frames use `publish` (slow peers dropped) and no-op updates still broadcast; skip
       unchanged profiles. Pairs with the connection cap in `rate-limiting`.
 - [ ] `users` frame grows with bios/avatars under join churn; same connection cap.
+
+## `google-oidc-login` follow-ups
+- [ ] Close open WebSockets on logout / session expiry (today the session is only validated at
+      the upgrade).
+- [ ] The revocation set is in memory: lost on restart, so logged-out cookies are valid again
+      until they expire.
+- [ ] Rate limiter and IP detection behind Caddy (trusted proxies).
+- [ ] Production: add the https redirect URI in Google Cloud; review `ALLOWED_ORIGINS` and
+      scheme detection.
+- [ ] Disambiguate same-name users (e.g. show the email in the user popup).
+- [ ] Google profile picture as default avatar (needs `imageHosts` + `IMAGE_HOSTS`).

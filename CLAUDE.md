@@ -41,8 +41,11 @@ cmd/chatroom/        main: router gin, http.Server, señales, CSP y lista de hos
   gifs.go            GET /gifs: proxy a Giphy (trending/búsqueda), caché TTL, validación de URLs
   playlist.go        GET /playlist: proxy a YouTube Data API (expande playlists), caché TTL
   index.html, app.js, app.css   frontend (embebido con go:embed)
+  denied.html, signed-out.html  acceso denegado y sesión cerrada
   favicon.svg, favicon-unread.svg   favicons (normal / con no leídos), embebidos
   main_test.go       tests del router, CSP y coherencia de hosts de imágenes (Go vs app.js)
+internal/auth/       config, cookie firmada, sesiones + middleware Require, OIDC login/callback/logout, rate limit
+  authtest/          proveedor OIDC falso para tests
 internal/chat/
   server.go          Server: elige sala, upgrade WebSocket, política de orígenes
   room.go            Room: hub por sala (única goroutine dueña del registro de clientes)
@@ -56,7 +59,7 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 
 ## Comandos
 
-- Correr: `go run ./cmd/chatroom` (puerto `:8080`; `ALLOWED_ORIGINS`, `GIPHY_API_KEY` y `YOUTUBE_API_KEY` opcionales).
+- Correr: `go run ./cmd/chatroom` (puerto `:8080`; `ALLOWED_ORIGINS`, `GIPHY_API_KEY` y `YOUTUBE_API_KEY` opcionales; requiere `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` y `SESSION_SECRET` (≥32 bytes) en `.env`).
   Go no lee `.env`: cargarlo con `set -a; . ./.env; set +a` antes de correr.
 - Tests: `go test -race ./...`
 - Formato: `gofmt` (con snap, usar `/snap/go/current/bin/go` y `gofmt`; el wrapper traga el output)
@@ -68,4 +71,8 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - Sala con reproductor: `musicRoom` (main.go) y `MUSIC_ROOM` (app.js); un test falla si difieren.
 - Sin código inline en la página (CSP estricta).
 - La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`). La key de YouTube va en el header `X-Goog-Api-Key`, nunca en la URL ni en los logs.
-- Cambios con diseño van por SDD en `openspec/changes/`. En curso: `user-profiles` (`message-replies` mergeado, falta archivar).
+- Nunca loguear cookies, tokens, códigos de auth, state/nonce ni `err.Error()` del intercambio OAuth.
+- `gin.Recovery()` se reemplaza por una recovery propia porque la de gin vuelca el header `Cookie`.
+- `newRouter` con auth `nil` es solo para tests.
+- El nickname sale de la sesión (`chat.NicknameFunc`); `?nickname=` se ignora.
+- Cambios con diseño van por SDD en `openspec/changes/`. En curso: `google-oidc-login`. `message-replies` y `user-profiles` ya están mergeados, falta archivarlos.
