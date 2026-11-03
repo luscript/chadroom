@@ -1,7 +1,7 @@
 # Verify Report: google-oidc-login
 
 **Verdict: PASS** — no open CRITICAL/HIGH findings; build, vet, gofmt and `go test -race ./...` green.
-Pending before archive: manual end-to-end test with real Google accounts (see below).
+Manual end-to-end test done by the user (see below). `govulncheck` still pending.
 
 ## Automated checks (crombie-worker, HEAD 9f93e06)
 
@@ -57,7 +57,7 @@ HSTS; SESSION_SECRET entropy/rotation; callback 400 page without link; `/gifs`/`
 401 without key; discovery after bind; panic value in logs; flow cookie cannot be `__Host-`; name
 look-alikes.
 
-## Manual test (pending — user, real credentials)
+## Manual test (user, real credentials) — done
 
 1. `.env` with `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET` (`openssl rand -base64 48`);
    `http://localhost:8080/auth/callback` registered as redirect URI.
@@ -65,3 +65,9 @@ look-alikes.
 3. Login with a crombie.dev account → chat, nickname = Google name; two tabs → `Name (2)`.
 4. Login with an account outside the domain → 403 access-denied page; "Probar con otra cuenta" shows the chooser.
 5. "Cerrar sesión" → signed-out page; going back to `/` asks to log in again.
+
+Result (2026-11-03): login with a crombie.dev account works; after the login-page change (6.1/6.2)
+`/` shows "Iniciar sesión con Google". Out-of-domain rejection: Google's Internal consent screen
+blocks foreign accounts before the callback (`org_internal`), so the server-side check was
+exercised by running with `ALLOWED_EMAIL_DOMAIN=otrodominio.com` and a crombie.dev account →
+403 access-denied page. Same account in two windows shows `Name (2)` → backlog `account-sessions`.

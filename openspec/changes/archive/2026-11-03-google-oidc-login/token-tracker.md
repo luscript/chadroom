@@ -5,7 +5,7 @@
 > completion notification's `usage` block; the orchestrator total is parsed post-hoc from
 > the local session transcript JSONL (`[unavailable]` on failure).
 
-**Status**: partial (through verify)
+**Status**: complete
 **Generated**: 2026-11-03
 
 ## Per-agent / per-phase
@@ -29,12 +29,13 @@
 | verify  | crombie-worker (fixes, docs)   | sonnet / low     | 30,295        | 5             | 24s           | D1–D7         |
 | verify  | crombie-worker (re-run)        | sonnet / low     | 13,494        | 2             | 49s           | —             |
 | apply   | crombie-worker (batch 4)       | sonnet / high    | 60,413        | 18            | 113s          | 6.1           |
+| apply   | crombie-worker (batch 5)       | sonnet / low     | 18,169        | 7             | 28s           | 6.2           |
 
 ## Orchestrator
 
 | Scope         | Model / Tier | Tokens (in / out) | Notes               |
 |---------------|--------------|-------------------|---------------------|
-| whole feature | opus         | [unavailable]     | captured at archive |
+| whole feature | opus         | 558 / 271,467     | whole session (feature + follow-ups + archive of 3 changes); cache: 565,412 created, 33,534,589 read |
 
 ## Aggregate
 
@@ -42,8 +43,8 @@
 |------------------------|-------------------------------------------------------|
 | explore                | 94,492                                                |
 | design                 | 103,670                                               |
-| apply                  | 355,592                                               |
+| apply                  | 373,761                                               |
 | verify                 | 353,673                                               |
-| **Sub-agent total**    | 907,427                                               |
-| **Orchestrator total** | [unavailable]                                         |
-| **Grand total**        | 907,427 (sub-agents only; orchestrator [unavailable]) |
+| **Sub-agent total**    | 925,596                                               |
+| **Orchestrator total** | 272,025 (in/out; cache excluded)                      |
+| **Grand total**        | 1,197,621 (sub-agents + orchestrator in/out; cache excluded) |

@@ -13,7 +13,8 @@ direct message, a typing signal or a music control (CHAT-21, CHAT-30); outbound 
 objects built only by the server: event envelopes `{"type","from","text","ts"}` with an optional `avatar` (CHAT-10, CHAT-28), the
 `users` (CHAT-17) and `history` (CHAT-18) snapshot frames, the `dm` and `dm_error` frames
 (CHAT-22, CHAT-23) the `typing` frame (CHAT-26) and the `music` state frame (CHAT-30). Frames carry no room field; the
-connection identifies the room. Nicknames are normalized (CHAT-09) and unique
+connection identifies the room. Every connection belongs to a signed-in user (SRV-15); the
+nickname is derived from the session (CHAT-41), normalized (CHAT-09) and unique
 case-insensitively within a room (CHAT-12).
 
 ## Requirements
@@ -254,17 +255,28 @@ MUST be a text frame containing a single JSON object with exactly these fields:
 | `text`   | string    | the message text for `chat`; the empty string for every other type |
 | `ts`     | number    | server time when the event was produced, as integer Unix milliseconds |
 | `avatar` | string    | **optional**: present only on `chat`, `join` and `welcome`, and only when the client the event is about has a profile picture (CHAT-28); its value is that picture's URL |
+| `bio`    | string    | **optional**: present only on `join` and `welcome`, and only when the client the event is about has a bio (CHAT-37); its value is that bio |
+| `id`     | number    | **optional**: present only on `chat`; the message id assigned by the server (CHAT-35) |
+| `reply`  | object    | **optional**: present only on `chat`, and only when the message is a resolved reply (CHAT-35); an object with exactly `id` (number), `from` (string) and `text` (string) |
 
-`avatar` MUST NOT appear on `leave` envelopes, and MUST NOT appear with an empty value.
+`avatar` MUST NOT appear on `leave` envelopes, and MUST NOT appear with an empty value. `id`
+and `reply` MUST NOT appear on `join`, `leave` or `welcome` envelopes. `bio` MUST NOT appear on
+`chat` (including `history` entries), `leave`, `dm`, `dm_error` or `typing` frames, and MUST
+NOT appear with an empty value. Field order is `type`, `from`, `text`, `ts`, `avatar`, `bio`,
+`id`, `reply` (absent fields skipped).
+
+`id` and `reply` MUST be produced only by the server; an inbound `id` or `reply` field is
+ignored (CHAT-21).
 
 The only other data frames are the `users` (CHAT-17) and `history` (CHAT-18) snapshots, the
 `dm` (CHAT-22) and `dm_error` (CHAT-23) frames, the `typing` frame (CHAT-26) and the `music`
-frame (CHAT-30), whose shapes are defined there; each entry of `history.messages` is a `chat`
+frame (CHAT-30) and the `profile` frame (CHAT-38), whose shapes are defined there; each entry of `history.messages` is a `chat`
 envelope with exactly the fields above.
 
 The envelope MUST be produced only by the server. `from` and `avatar` MUST always be the
 nickname and profile picture the server assigned to the originating connection and MUST NOT be
-taken from any message payload. Message text MUST be carried only in `text` and MUST NOT alter
+taken from any message payload. `bio`, like `avatar`, MUST always be the value the server holds
+for the originating connection and MUST NOT be taken from a `chat`, `dm` or `typing` payload. Message text MUST be carried only in `text` and MUST NOT alter
 `type`, `from` or `avatar`, whatever characters it contains.
 
 #### Scenario: Chat envelope
@@ -307,6 +319,13 @@ taken from any message payload. Message text MUST be carried only in `text` and 
 - GIVEN client `A` is connected without an avatar
 - WHEN `A` sends the inbound envelope `{"type":"chat","text":"hi","avatar":"https://i.imgur.com/x.png"}`
 - THEN the relayed `chat` envelope has no `avatar` field
+
+#### Scenario: Join envelopes stay unchanged
+
+- GIVEN clients `A` and `B` in a room
+- WHEN `C` joins
+- THEN the `join` envelope has exactly `type`, `from`, `text`, `ts` (and `avatar` when `C`
+  has one), with no `id` or `reply`
 
 ### Requirement: CHAT-11 Welcome message
 
@@ -494,8 +513,8 @@ The GIF panel MUST enable its send button only for URLs that pass the same check
 
 The page MUST consider itself connected (`online`) only after it receives `welcome`
 (CHAT-11), not when the socket opens. When its WebSocket closes without the user having left,
-the page MUST show the `reconnecting` state and retry automatically, requesting the nickname
-the user originally typed. Retry delays MUST grow exponentially with random jitter, MUST NOT
+the page MUST show the `reconnecting` state and retry automatically with the same session
+cookie; the nickname is derived again by the server (CHAT-41). Retry delays MUST grow exponentially with random jitter, MUST NOT
 exceed 30 seconds, and MUST go back to the initial delay after a `welcome` is received. The
 page MUST keep retrying for as long as the user stays in the chat view; it has no terminal
 `offline` state. It MAY retry sooner when the browser reports the network is back or the tab
@@ -504,8 +523,11 @@ but MUST NOT have more than one socket open at a time. The page MUST show at mos
 one system notice when the connection is lost and one when it is re-established, per outage;
 the "re-established" notice MUST be shown after the replayed history (CHAT-18), so it is not
 erased by it. While not `online` the send button and the GIF panel's send button MUST stay
-disabled. After the user clicks "Salir" the page MUST NOT reconnect, and any pending retry
-MUST be cancelled. On reconnection the messages on screen MUST be replaced by the server's
+disabled. After the user clicks "Cerrar sesión" the page MUST NOT reconnect, and any pending retry
+MUST be cancelled. After **3 consecutive** failed reconnect attempts of a room (closed before
+`welcome`), the page MUST check the session by requesting `GET /rooms`; if it answers 401 the
+page MUST stop every retry and navigate to `/` (the login page). Any other answer keeps retrying
+as before. On reconnection the messages on screen MUST be replaced by the server's
 history (CHAT-18) and the online list by the new `users` snapshot (CHAT-17), so no message is
 shown twice and no departed user stays listed.
 
@@ -546,13 +568,13 @@ from the previous one (e.g. `Lucía (2)` while the server still holds the old co
 #### Scenario: Leaving cancels reconnection
 
 - GIVEN a page in the reconnecting state
-- WHEN the user clicks "Salir"
+- WHEN the user clicks "Cerrar sesión"
 - THEN no further connection attempts are made
 
 #### Scenario: Leaving while connected
 
 - GIVEN a connected page
-- WHEN the user clicks "Salir"
+- WHEN the user clicks "Cerrar sesión"
 - THEN the connection closes and the page does not reconnect
 
 #### Scenario: Renamed after reconnecting
@@ -561,6 +583,12 @@ from the previous one (e.g. `Lucía (2)` while the server still holds the old co
 - WHEN it reconnects and receives `welcome` with `from` = `Lucía (2)`
 - THEN the header shows `Lucía (2)`
 - AND only `chat` envelopes from `Lucía (2)` are marked as its own
+
+#### Scenario: Session expired while reconnecting
+
+- GIVEN the user is in the chat and the session cookie has expired
+- WHEN the room connection drops and 3 reconnect attempts fail
+- THEN the page requests `/rooms`, receives 401 and navigates to `/`
 
 ### Requirement: CHAT-17 Online users list
 
@@ -573,10 +601,12 @@ fields:
 | `type`    | string           | `users` |
 | `users`   | array of strings | assigned nicknames of every registered client, including the newcomer |
 | `avatars` | object           | **optional**: maps the nickname of each registered client that has a profile picture (CHAT-28) to its URL; omitted when no registered client has one |
+| `bios`    | object           | **optional**: maps the nickname of each registered client that has a bio (CHAT-37) to it; omitted when no registered client has one |
 | `ts`      | number           | server time, integer Unix milliseconds |
 
 `users` MUST be sorted case-insensitively and contain each registered client exactly once.
-Every key of `avatars` MUST appear in `users`. After the snapshot, the list is kept current by
+Every key of `avatars` and of `bios` MUST appear in `users`. The snapshot MUST reflect the
+current profiles, including changes made with `profile` frames (CHAT-38). After the snapshot, the list is kept current by
 `join` and `leave` envelopes (CHAT-02).
 
 The chat page MUST show the number of connected users (`N en línea`) and, on request, the
@@ -631,7 +661,7 @@ object with exactly these fields:
 | Field      | JSON type        | Value |
 |------------|------------------|-------|
 | `type`     | string           | `history` |
-| `messages` | array of objects | the kept `chat` envelopes (CHAT-10), oldest first, unchanged (same `from`, `text`, `ts`) |
+| `messages` | array of objects | the kept `chat` envelopes (CHAT-10), oldest first, unchanged (same `from`, `text`, `ts`, `avatar`, `id` and `reply`) |
 | `ts`       | number           | server time, integer Unix milliseconds |
 
 `messages` MAY be empty. If any of the newcomer's `welcome`, `users` or `history` frames
@@ -672,6 +702,13 @@ MUST NOT be cleared by a `history` frame.
 - GIVEN `A` sent `hola` at time `t` and then disconnected
 - WHEN `B` connects
 - THEN `B`'s `history` contains `type` = `chat`, `from` = `A`, `text` = `hola`, `ts` = `t`
+
+#### Scenario: History keeps ids and quotes
+
+- GIVEN `A` sent `hola` (id 1) and `B` replied `chau` to it
+- WHEN `C` joins
+- THEN `C`'s `history` has `{"type":"chat","from":"A","text":"hola",…,"id":1}` followed by
+  `{"type":"chat","from":"B","text":"chau",…,"id":2,"reply":{"id":1,"from":"A","text":"hola"}}`
 
 ### Requirement: CHAT-19 Room isolation
 
@@ -725,14 +762,14 @@ connection.
 
 ### Requirement: CHAT-20 Chat page joins several rooms
 
-After the user enters a nickname, the chat page MUST fetch the room list (SRV-07), connect to
+When the page loads, the chat page MUST fetch the room list (SRV-07), connect to
 the default room (the first room in the list) and make it the active room. The page MUST:
 
 - show every room of the list by name, marking which rooms are joined, which one is active,
   and, for each joined but inactive room, the number of unread `chat` messages received since
   it was last active (shown only when > 0);
 - when the user selects a room that is not joined, open one connection to `/ws` for that room
-  with the same requested nickname, and make it active;
+  and make it active;
 - when the user selects a joined room, make it active and reset its unread count to 0;
 - keep, per joined room: its connection, its assigned nickname (from that connection's
   `welcome`), its message list, its online users list and its connection status. Frames
@@ -744,20 +781,21 @@ the default room (the first room in the list) and make it the active room. The p
 - let the user leave the active room ("Dejar sala") when more than one room is joined:
   close only its connection, discard its state, and activate another joined room. Leaving
   MUST NOT be offered while only one room is joined;
-- on "Salir", close every connection and return to the nickname screen.
+- on "Cerrar sesión", follow CHAT-42.
 
 Room names MUST be rendered as text. Room ids received from `/rooms` that are not
 lowercase ASCII letters, digits or `-` (1–32 chars) MUST be ignored. Automatic reconnection
 (CHAT-16), including its history re-sync and "Reconectado" notice, MUST apply independently
 to each joined room's connection; a room left by the user MUST NOT reconnect. History
 replayed on (re)connect MUST NOT count as unread. If the room list cannot be fetched (after
-one retry), the page MUST stay on the nickname screen and show an error message instead of
-entering the chat.
+one retry), the page MUST show an error message instead of entering the chat; a 401 MUST
+navigate to `/` (the server then serves the login page). There is no nickname screen and no
+nickname input.
 
 #### Scenario: Enter the chat
 
 - GIVEN the server rooms are `general`, `juegos`, `musica`
-- WHEN the user enters nickname `Ana`
+- WHEN the page of a signed-in user `Ana` loads
 - THEN the page shows the three rooms, with `general` joined and active
 - AND the header shows `general`
 
@@ -765,7 +803,7 @@ entering the chat.
 
 - GIVEN `Ana` is in `general` (active)
 - WHEN she selects `juegos`
-- THEN a second connection to `juegos` is opened with nickname `Ana`
+- THEN a second connection to `juegos` is opened (nickname `Ana` from the session)
 - AND `juegos` becomes active, showing its own history and users
 - AND the `general` connection stays open
 
@@ -792,13 +830,13 @@ entering the chat.
 #### Scenario: Cannot leave the last room
 
 - GIVEN `Ana` is only in `general`
-- THEN "Dejar sala" is disabled and only "Salir" leaves the chat
+- THEN "Dejar sala" is disabled and only "Cerrar sesión" leaves the chat
 
 #### Scenario: Room list unavailable
 
 - GIVEN `GET /rooms` fails twice
-- WHEN the user submits a nickname
-- THEN the page stays on the nickname screen and shows "No pudimos cargar las salas. Probá de nuevo."
+- WHEN the page loads
+- THEN the page shows "No pudimos cargar las salas." with a retry button instead of the chat
 - AND no WebSocket is opened
 
 #### Scenario: Reconnect one room
@@ -827,13 +865,21 @@ inbound text frame as follows:
 2a. Otherwise, if the frame decodes as a JSON object whose `type` is the string `music`, it is a
    **music control** (CHAT-30). A music control MUST NEVER be treated as a room message: if it is
    invalid, or the room has no shared player, it MUST be discarded without any reply.
+2b. Otherwise, if the frame decodes as a JSON object whose `type` is the string `profile`, it
+   is a **profile update** (CHAT-38). It is valid only if `avatar` and `bio` are each absent
+   or a JSON string. A profile update MUST NEVER be treated as a room message: if it is
+   invalid it MUST be discarded without any reply.
 3. Otherwise, if the frame decodes as a JSON object whose `type` is the string `chat` and
    whose `text` is a JSON string, it is a **room message** with that `text`.
 4. Otherwise (not JSON, not an object, missing or unknown `type`, or a `chat` object whose
    `text` is not a string) it is a **room message** whose text is the whole frame, unchanged.
 
-Fields other than `type`, `to` and `text` (and `action`, `video`, `videos`, `pos`, `id` and
-`seq` in a music control) MUST be ignored (`text` is also ignored in a typing signal and a music control). Room messages are relayed per CHAT-01. The blank-text rule (CHAT-13) applies to the
+Fields other than `type`, `to` and `text` (and `reply_to` in a room or direct message,
+`action`, `video`, `videos`, `pos`, `id` and `seq` in a music control, and `avatar` and `bio`
+in a profile update) MUST be ignored (`text`
+is also ignored in a typing signal and a music control). A `reply_to` that is not a JSON
+integer ≥ 1 MUST be ignored as if absent; it never makes a message invalid nor changes how
+the frame is classified. Room messages are relayed per CHAT-01. The blank-text rule (CHAT-13) applies to the
 resulting `text` of room messages and direct messages.
 
 #### Scenario: Plain text stays room chat
@@ -890,6 +936,25 @@ resulting `text` of room messages and direct messages.
 - WHEN `A` sends `{"type":"music","action":"play"}` and `{"type":"music","action":"bogus"}`
 - THEN neither `A` nor `B` receives any frame
 
+#### Scenario: reply_to is read from a chat envelope
+
+- GIVEN `A` and `B` in a room and message id 3 is a room message
+- WHEN `A` sends `{"type":"chat","text":"sí","reply_to":3}`
+- THEN `B` receives a `chat` envelope with `text` = `sí` and a `reply` for id 3
+
+#### Scenario: Malformed reply_to is ignored
+
+- GIVEN `A` and `B` in a room
+- WHEN `A` sends `{"type":"chat","text":"sí","reply_to":"3"}`, `…"reply_to":0`,
+  `…"reply_to":1.5` or `…"reply_to":null`
+- THEN `B` receives a `chat` envelope with `text` = `sí` and no `reply`
+
+#### Scenario: Profile frame is not chat
+
+- GIVEN clients `A` and `B` are connected
+- WHEN `A` sends `{"type":"profile","bio":5}`
+- THEN no client receives any frame
+
 ### Requirement: CHAT-22 Direct message delivery
 
 For a valid direct message attempt from a registered client (the sender), the server MUST
@@ -906,10 +971,14 @@ these fields:
 | `to`   | string    | the recipient's assigned nickname |
 | `text` | string    | the received `text`, unchanged |
 | `ts`   | number    | server time when the DM was routed, integer Unix milliseconds; identical in both copies |
+| `id`       | number    | the message id assigned by the server (CHAT-35); identical in both copies |
+| `reply_to` | number    | **optional**: present only when the received direct message carried a valid `reply_to` (CHAT-21); its value, unchanged |
 
 Delivery MUST follow the same non-blocking rules as every other outbound frame (CHAT-03): a
 copy that cannot be queued drops that client as a slow client (CHAT-05) and does not affect
 the other copy. A direct message only reaches clients of the sender's room (CHAT-19).
+
+The server MUST NOT look up, validate or keep the target of a DM `reply_to` (CHAT-24).
 
 #### Scenario: DM reaches recipient and is echoed
 
@@ -942,6 +1011,13 @@ the other copy. A direct message only reaches clients of the sender's room (CHAT
 - GIVEN clients `A`, `B` and `C` are connected
 - WHEN `A` sends `{"type":"dm","from":"C","to":"B","text":"hi"}`
 - THEN `B` receives `from` = `A`
+
+#### Scenario: DM reply is forwarded as an id
+
+- GIVEN `A` and `B` in a room
+- WHEN `A` sends `{"type":"dm","to":"B","text":"ok","reply_to":7}`
+- THEN `A` and `B` each receive one `dm` frame with `from` = `A`, `to` = `B`, `text` = `ok`,
+  the same `ts` and `id`, and `reply_to` = 7
 
 ### Requirement: CHAT-23 Direct message errors
 
@@ -1211,11 +1287,12 @@ An absent, empty or not allowed value MUST be ignored: the client is registered 
 without a profile picture, and the connection MUST NOT be rejected because of it. The accepted
 URL MUST be relayed exactly as received.
 
-The profile picture belongs to the connection: it MUST be fixed from registration until the
-connection ends and MUST NOT be changed by any inbound frame. The server MUST include it as
-`avatar` in that client's `welcome`, `join` and `chat` envelopes (CHAT-10) and in `users`
-snapshots (CHAT-17). A `chat` envelope kept in history (CHAT-18) MUST keep the `avatar` it
-was relayed with.
+The profile picture belongs to the connection. It MUST be set at registration from the
+`avatar` query parameter and MUST change only through a valid profile update (CHAT-38); no
+other inbound frame may change it. The server MUST include the current picture as `avatar` in
+that client's `welcome`, `join`, `chat` and `profile` envelopes and in `users` snapshots
+(CHAT-17). A `chat` envelope kept in history (CHAT-18) MUST keep the `avatar` it was relayed
+with, even if the picture changes later.
 
 #### Scenario: Valid avatar is announced
 
@@ -1241,13 +1318,23 @@ was relayed with.
 - WHEN client `C` connects
 - THEN the `history` entry for `hola` has `from` = `A` and `avatar` = `U`
 
+#### Scenario: History keeps the old avatar after a change
+
+- GIVEN client `A` with avatar `U` sends `hola`
+- AND then `A` sends `{"type":"profile","avatar":"V"}` with `V` an allowed URL
+- WHEN client `C` connects
+- THEN the `history` entry for `hola` has `avatar` = `U`
+- AND `C`'s `users` frame maps `A` to `V`
+
 ### Requirement: CHAT-29 Chat page profile pictures
 
-The join form MUST offer an optional profile-picture URL field. The page MUST check it with
-the same rule as inline images (CHAT-15) before joining; if it is not empty and fails the
-check, the page MUST show an error and MUST NOT join. A valid value MUST be sent as `avatar`
-on every room connection and reconnection. The page MAY remember the last value in browser
-storage.
+The join form MUST NOT offer a profile-picture field. The page MUST keep its own profile
+(picture and bio, CHAT-39) only in page memory and MUST send its picture as `avatar` on every
+room connection and reconnection. The page MUST NOT store the profile in browser storage, and
+on start it MUST delete any value left by earlier versions under the key `chadroom.avatar`.
+
+The page MUST also learn pictures from `profile` frames (CHAT-38). Messages already shown keep
+the picture they were rendered with.
 
 The page MUST show a user's profile picture, when known, in place of the initial-letter avatar
 next to that user's messages (rooms, history and direct messages) and next to the user's name
@@ -1267,12 +1354,6 @@ avatar instead.
 - WHEN `Ana` sends `hola`
 - THEN the message shows an image loaded from `U` instead of the letter `A`
 - AND the online list shows the same image before `Ana`
-
-#### Scenario: Invalid field blocks joining
-
-- GIVEN the join form
-- WHEN the user types a nickname and the picture URL `https://evil.example/a.png` and submits
-- THEN the page shows an error and opens no connection
 
 #### Scenario: Broken picture falls back
 
@@ -1811,3 +1892,353 @@ it (so nothing plays, CHAT-31) it MUST read "Abrí #musica para escuchar". It MU
 
 - GIVEN Ana looks at `general` while a track plays
 - THEN the page offers no way to pause, seek, skip, add or remove tracks outside `musica`
+
+### Requirement: CHAT-35 Message ids and room replies
+
+Each room MUST assign every `chat` envelope it relays and every `dm` frame it routes an `id`:
+an integer starting at 1 and increasing by 1, unique within the room for the life of the
+process (one sequence per room, shared by room and direct messages). Messages that are
+discarded (blank, invalid, rate-limited, `dm_error`) MUST NOT consume an id.
+
+The room MUST keep, in memory and owned by the room, the last **200** room messages it relayed
+as **reply targets** `{id, from, text}`, where `text` is the message text truncated to its
+first 100 runes (trailing whitespace removed). Direct messages MUST NOT be reply targets.
+
+When a room message carries a valid `reply_to` (CHAT-21) equal to the `id` of a kept reply
+target, the relayed `chat` envelope MUST carry `reply` = that target `{id, from, text}`. `from`
+is the nickname at the time the target was relayed. The reply's own reply target stores only
+its own text: quotes never nest. When `reply_to` does not match a kept target (unknown, older
+than the last 200, a direct message id, or the message's own id), the message MUST be relayed
+without `reply` and without any error frame.
+
+#### Scenario: Reply to a room message
+
+- GIVEN `A` and `B` in `general` and `A` sent `¿pizza?`, relayed with `id` = 5
+- WHEN `B` sends `{"type":"chat","text":"dale","reply_to":5}`
+- THEN `A` and `B` receive `{"type":"chat","from":"B","text":"dale","ts":…,"id":6,"reply":{"id":5,"from":"A","text":"¿pizza?"}}`
+
+#### Scenario: Ids are shared by room and direct messages
+
+- GIVEN a new room
+- WHEN `A` sends a room message, then a DM to `B`, then another room message
+- THEN their ids are 1, 2 and 3
+
+#### Scenario: Long quoted text is truncated
+
+- GIVEN `A` sent a 300-rune message with id 1
+- WHEN `B` replies to id 1
+- THEN the `reply.text` is the first 100 runes of `A`'s message
+
+#### Scenario: Unknown target is ignored
+
+- GIVEN 201 room messages were relayed after id 1, or id 9 was a direct message
+- WHEN `B` sends a room message with `reply_to` = 1, 9 or 999
+- THEN it is relayed with an `id` and no `reply`, and no other frame is sent
+
+#### Scenario: Quotes do not nest
+
+- GIVEN `B`'s message id 6 replies to id 5
+- WHEN `A` replies to id 6
+- THEN `reply` = `{"id":6,"from":"B","text":"dale"}` with no nested quote
+
+### Requirement: CHAT-36 Chat page replies
+
+Every room message and direct message rendered from a frame with a numeric `id` MUST offer
+**one** reply control (shown while the pointer is over the message or the message has keyboard
+focus; it MUST be reachable with the keyboard). System lines and messages without an `id` MUST
+NOT offer it.
+
+Activating the reply control MUST show, above the message input, a **reply preview** with the
+text "Respondiendo a NICK", the quoted text and a cancel control, and MUST focus the input.
+While the preview is shown, the next message or GIF sent from that pane MUST carry `reply_to`
+= the target's `id`. The preview MUST be cleared after a successful send, by the cancel
+control, by Escape (when no panel is open; an open emoji/GIF panel closes first), and when the
+shown pane changes. Only one reply target exists at a time.
+
+A message with a quote MUST show the quote above its text, inside the same bubble: the quoted
+author and the quoted text. For a room message the quote comes from `reply`; for a direct
+message the page MUST look up `reply_to` in that conversation's messages on the page, and when
+it is not there it MUST show "Mensaje no disponible" as the quote. Quoted text that is an
+allowed image URL (CHAT-15) MUST be shown as the text "🖼 GIF", never as an image. Long quoted
+text MUST be cut visually to one or two lines. All quoted strings MUST be rendered as text
+(never markup) and MUST NOT be used in element ids, classes or selectors.
+
+Clicking a quote MUST scroll the original message into view and highlight it briefly, when the
+original is on the page in that pane; otherwise it MUST do nothing. The page MUST validate
+server data: `id` and `reply.id`/`reply_to` used only when they are integers ≥ 1, and `reply`
+used only when `from` and `text` are strings.
+
+#### Scenario: Reply in a room
+
+- GIVEN `A` and `B` with `general` open, and `A` sent `¿pizza?`
+- WHEN `B` presses the reply control on `¿pizza?`, types `dale` and sends
+- THEN both pages show `dale` from `B` with the quote "A — ¿pizza?" above it
+
+#### Scenario: Jump to the original
+
+- GIVEN a reply quoting a message far above in the pane
+- WHEN the user clicks the quote
+- THEN the original scrolls into view and is highlighted briefly
+
+#### Scenario: Late joiner sees the quote
+
+- GIVEN `B` replied to `A` in `general`
+- WHEN `C` joins `general`
+- THEN `C`'s page shows the reply with its quote (from `history`)
+
+#### Scenario: Reply in a direct message
+
+- GIVEN `A` and `B` have a DM conversation where `B` sent `nos vemos?`
+- WHEN `A` replies `sí` to it
+- THEN both pages show `sí` with the quote "B — nos vemos?"
+
+#### Scenario: DM original not on the page
+
+- GIVEN `B` reloaded the page after `A` sent a DM
+- WHEN `A` replies to that DM
+- THEN `B`'s page shows the reply with the quote "Mensaje no disponible"
+
+#### Scenario: Quoted GIF
+
+- GIVEN `A` sent a GIF
+- WHEN `B` replies to it
+- THEN the quote shows "🖼 GIF" and no image
+
+#### Scenario: Cancel a reply
+
+- GIVEN the reply preview is shown
+- WHEN the user presses Escape, the cancel control, or switches to another pane
+- THEN the preview disappears and the next message is sent without `reply_to`
+
+### Requirement: CHAT-37 Profile bio
+
+A client MAY send a bio with the `bio` query parameter of `GET /ws`. The server MUST clean it
+like a nickname but with its own limit: replace invalid UTF-8 with U+FFFD, remove control and
+bidi-control characters (including newlines and tabs), trim surrounding whitespace and keep at
+most the first **160** runes. An absent or (after cleaning) empty value means no bio; it MUST
+NOT cause the connection to be rejected.
+
+The bio belongs to the connection and changes only through a valid profile update (CHAT-38).
+The server MUST include it as `bio` in that client's `welcome`, `join` and `profile`
+envelopes and in `users` snapshots (`bios`), and MUST NOT store it anywhere else nor keep it
+after the connection ends.
+
+#### Scenario: Bio is announced on join
+
+- GIVEN client `A` is connected
+- WHEN client `B` connects with `?nickname=B&bio=hola%20mundo`
+- THEN `B`'s `welcome` has `bio` = `hola mundo`
+- AND `A` receives `type` = `join`, `from` = `B`, `bio` = `hola mundo`
+
+#### Scenario: Bio is cleaned and truncated
+
+- GIVEN the server is running
+- WHEN a client connects with a `bio` of `"  a"` + U+202E + `"b\nc"` followed by 200 `x` (interior spaces are kept; only the ends are trimmed)
+- THEN its `welcome` `bio` is `abc` followed by 157 `x` (160 runes)
+
+#### Scenario: Blank bio is omitted
+
+- GIVEN the server is running
+- WHEN a client connects with `bio` = `"   "`
+- THEN its `welcome` and the `join` others receive have no `bio` field
+
+#### Scenario: Reused nickname has no stale bio
+
+- GIVEN `A` connected with bio `hola` and disconnected
+- WHEN a new client connects as `A` with no bio
+- THEN its `welcome`, `join` and the `users` frame others get have no bio for `A`
+
+### Requirement: CHAT-38 Profile update
+
+A valid profile update (CHAT-21 step 2b) from a registered client MUST replace that client's
+whole profile:
+
+- `avatar`: absent or empty clears the picture; otherwise it MUST be an allowed avatar URL
+  (CHAT-28). If it is not, the whole update MUST be discarded without any reply and the
+  profile MUST NOT change.
+- `bio`: absent or empty after cleaning clears the bio; otherwise it is cleaned per CHAT-37.
+
+After applying it, the server MUST send to every client of the room, the sender included, one
+frame:
+
+| Field    | JSON type | Value |
+|----------|-----------|-------|
+| `type`   | string    | `profile` |
+| `from`   | string    | the sender's assigned nickname |
+| `ts`     | number    | server time, integer Unix milliseconds |
+| `avatar` | string    | **optional**: the new picture; omitted when there is none |
+| `bio`    | string    | **optional**: the new bio; omitted when there is none |
+
+Field order is `type`, `from`, `ts`, `avatar`, `bio`. The update MUST NOT be stored in history
+and MUST NOT change any `chat` already relayed. It affects only the room of the connection
+that sent it.
+
+The server MUST accept at most one profile update per connection per second; extra updates
+MUST be discarded without any reply.
+
+#### Scenario: Update is broadcast
+
+- GIVEN clients `A` and `B` are connected, `A` without a profile
+- WHEN `A` sends `{"type":"profile","avatar":"https://i.imgur.com/a.png","bio":"hola"}`
+- THEN `A` and `B` receive exactly
+  `{"type":"profile","from":"A","ts":…,"avatar":"https://i.imgur.com/a.png","bio":"hola"}`
+
+#### Scenario: Clearing the profile
+
+- GIVEN `A` has avatar `U` and bio `hola`
+- WHEN `A` sends `{"type":"profile"}`
+- THEN every client receives `{"type":"profile","from":"A","ts":…}`
+- AND a client connecting afterwards gets no `A` key in `avatars` or `bios`
+
+#### Scenario: Invalid avatar discards the update
+
+- GIVEN `A` has bio `hola`
+- WHEN `A` sends `{"type":"profile","avatar":"https://evil.example/a.png","bio":"chau"}`
+- THEN no client receives any frame
+- AND `A`'s bio is still `hola`
+
+#### Scenario: Updates are rate limited
+
+- GIVEN `A` and `B` are connected
+- WHEN `A` sends two valid profile updates back to back
+- THEN `B` receives exactly one `profile` frame
+
+#### Scenario: Forged sender is ignored
+
+- GIVEN `A` and `B` are connected
+- WHEN `A` sends `{"type":"profile","from":"B","bio":"x"}`
+- THEN the `profile` frame everyone receives has `from` = `A`
+
+### Requirement: CHAT-39 Chat page profile editor
+
+The page MUST offer a "Mi perfil" control reachable on every screen size while in the chat.
+It MUST open a profile editor showing the current picture (or the initial-letter avatar), a
+button to choose a picture, a button to remove it, a bio field limited to 160 characters with
+a visible counter, and a save button.
+
+Choosing a picture MUST open the GIF picker (SRV-08) in a picture mode where selecting a GIF
+sets it as the pending picture instead of sending a message; in that mode the page MUST NOT
+offer pasting a URL. Saving MUST send `{"type":"profile","avatar":…,"bio":…}` on every room
+the page has joined and keep the values as its profile for later connections and
+reconnections (sent as `avatar` and `bio` query parameters). The page MUST update what it
+shows from the `profile` frames the server echoes.
+
+The profile MUST live only in page memory: leaving the chat MUST clear it, and closing or
+reloading the tab loses it. The "MI PERFIL" card MUST show the own bio when set.
+
+#### Scenario: Pick a GIF as picture
+
+- GIVEN the page is in the chat and the editor is open
+- WHEN the user clicks "Elegir GIF", picks a GIF and clicks "Guardar"
+- THEN every joined room socket receives a `profile` frame with that GIF's URL as `avatar`
+- AND no `chat` message is sent
+
+#### Scenario: Profile survives a reconnect
+
+- GIVEN the user saved bio `hola`
+- WHEN the connection drops and the page reconnects
+- THEN the new `GET /ws` request has `bio=hola`
+
+#### Scenario: Leaving clears the profile
+
+- GIVEN the user saved a picture and bio
+- WHEN the user leaves the chat and joins again
+- THEN the new connection has no `avatar` or `bio` parameter and the editor is empty
+
+### Requirement: CHAT-40 Chat page user popup
+
+Clicking (or activating with the keyboard) a user's picture or name next to a room message, a
+direct message, or a row of the online list MUST open a popup for that user showing their
+picture (or initial-letter avatar), nickname, bio (or the text "Sin descripción") and, when
+the user is not the page's own nickname, a "Mensaje privado" button that opens the direct
+conversation with them (CHAT-25) and closes the popup. For the own nickname the popup MUST show
+an "Editar perfil" button that opens the editor instead.
+
+The popup MUST show the user's current profile from the room's online list and MUST update if
+a `profile` frame for that user arrives while it is open. It MUST NOT open for a nickname that
+is not in the current room's online list. It MUST close on Escape, on a click outside it, and
+when the user leaves the room. All user data MUST be rendered as text; the picture is loaded
+under the CHAT-29 rules.
+
+#### Scenario: Popup from a message
+
+- GIVEN `Ana` (bio `hola`) is online and sent a message
+- WHEN the user clicks `Ana`'s name on that message
+- THEN a popup shows `Ana`, her picture and `hola`, and a "Mensaje privado" button
+
+#### Scenario: Start a DM from the popup
+
+- GIVEN the popup for `Ana` is open
+- WHEN the user clicks "Mensaje privado"
+- THEN the direct conversation with `Ana` is active and the popup is closed
+
+#### Scenario: Bio markup is not interpreted
+
+- GIVEN `Ana`'s bio is `<img src=x onerror=alert(1)>`
+- WHEN her popup opens
+- THEN the bio is shown literally and no image request is made
+
+#### Scenario: User who left
+
+- GIVEN `Ana` sent a message and then left
+- WHEN the user clicks her name on that message
+- THEN no popup opens
+
+### Requirement: CHAT-41 Nickname derived from the session
+
+The nickname requested for a WebSocket connection MUST be derived by the server from the
+authenticated session (SRV-15), never from client input:
+
+1. the session's display name (`name` claim), if it is non-empty after normalization;
+2. otherwise the local part of the session email (before the last `@`).
+
+The derived value is the "requested nickname" for normalization (CHAT-09) and uniqueness
+(CHAT-12): two connections of the same account in one room, or two people with the same name,
+coexist under suffixed nicknames. The `nickname` query parameter MUST be ignored. Avatar and bio
+(CHAT-28, CHAT-37) keep their existing rules.
+
+#### Scenario: Name from the session
+
+- GIVEN a session for `ana.perez@crombie.dev` with name `Ana Pérez`
+- WHEN it connects to `/ws?room=general&nickname=Boss`
+- THEN its `welcome` `from` is `Ana Pérez`
+
+#### Scenario: Fallback to the email local part
+
+- GIVEN a session for `ana.perez@crombie.dev` with an empty name
+- WHEN it connects
+- THEN its nickname is `ana.perez`
+
+#### Scenario: Same account in two tabs
+
+- GIVEN `Ana Pérez` is connected to `general`
+- WHEN the same session connects to `general` again
+- THEN the new connection is assigned `Ana Pérez (2)` and both stay connected
+
+### Requirement: CHAT-42 Chat page session handling
+
+The page MUST NOT ask for a nickname: on load it fetches the room list and enters the chat
+(CHAT-20). The header's "Salir" button is replaced by "Cerrar sesión", which MUST:
+
+1. send `POST /auth/logout` (same origin);
+2. leave the page on success (which closes every connection and pending retry);
+3. on a successful response, navigate to `/` (which then shows the login page); otherwise re-enable the button and
+   show a system notice ("No se pudo cerrar sesión. Probá de nuevo.") — the page MUST NOT claim the
+   user is signed out when the server did not confirm it.
+
+A 401 response from `/rooms`, `/gifs` or `/playlist` MUST navigate to `/` instead of
+showing a generic error. The page MUST NOT read, store or send any session data itself (the
+cookie is `HttpOnly`).
+
+#### Scenario: Sign out
+
+- GIVEN the user is in the chat
+- WHEN they click "Cerrar sesión"
+- THEN every room connection closes, `/auth/logout` is posted and the browser shows the
+  login page
+
+#### Scenario: Expired session on GIF search
+
+- GIVEN the session has expired
+- WHEN the user searches GIFs and `/gifs` responds 401
+- THEN the page navigates to `/` and the login page is shown
