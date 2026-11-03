@@ -8,17 +8,18 @@ Base: `openspec/specs/server/spec.md` (SRV-01..09). New requirements start at SR
 
 (Requirement text unchanged, except the following, which is added after the first paragraph.)
 
-`GET /` and `GET /app.js` MUST require a valid session (SRV-15). `GET /app.css`,
-`GET /favicon.svg`, `GET /favicon-unread.svg` and the auth pages (SRV-16) MUST stay public, since
-the auth pages use them. Scenarios that open the page or load `/app.js` assume a valid session
-cookie.
+`GET /` MUST serve the chat page only with a valid session (SRV-15); without one it MUST serve
+the login page instead (SRV-16), at the same URL and without a redirect. `GET /app.js` MUST require
+a valid session. `GET /app.css`, `GET /favicon.svg`, `GET /favicon-unread.svg` MUST stay public,
+since the auth pages use them. Because `GET /` varies with the cookie, it MUST send
+`Vary: Cookie`. Scenarios that open the chat page or load `/app.js` assume a valid session cookie.
 
 #### Scenario: Page without a session
 
 - GIVEN a browser without a session cookie
 - WHEN it requests `GET /`
-- THEN the response is 302 to `/auth/login?next=%2F`
-- AND the chat page is not sent
+- THEN the response is 200 with the login page (SRV-16)
+- AND the chat page and `/app.js` are not sent
 
 #### Scenario: Public stylesheet
 
@@ -217,7 +218,7 @@ use distinct MAC contexts, so neither is accepted as the other.
 
 - GIVEN a session cookie whose expiry is in the past
 - WHEN it is sent to `GET /`
-- THEN the response is 302 to `/auth/login?next=%2F`
+- THEN the response is the login page, not the chat page
 
 #### Scenario: Flow cookie is not a session
 
@@ -252,7 +253,7 @@ lost on restart (sessions remain stateless otherwise).
 Every route except `/auth/*`, `/app.css`, `/favicon.svg` and `/favicon-unread.svg` MUST require a
 valid session (SRV-13). Without one:
 
-- `GET /` MUST respond 302 to `/auth/login?next=<escaped request path>` (path only, query dropped);
+- `GET /` MUST respond 200 with the login page (SRV-16);
 - `GET /app.js`, `GET /rooms`, `GET /gifs`, `GET /playlist` and `GET /ws` MUST respond 401 with
   `{"error":"unauthorized"}` and `Cache-Control: no-store`; `/ws` MUST NOT be upgraded and MUST
   NOT reveal whether the room exists.
@@ -282,15 +283,26 @@ the request context.
 
 ### Requirement: SRV-16 Auth pages
 
-The server MUST serve two embedded static pages, without inline script or style and with the
-same security headers as `GET /` (SRV-05):
+The server MUST serve two embedded static pages, without inline script or style, with the same
+security headers as the chat page (SRV-05) and `Cache-Control: no-store`:
 
+- a **login** page, served by `GET /` without a valid session (SRV-02). It reuses the look of the
+  former nickname screen (brand, headline, card), with — instead of the nickname input — a
+  primary "Iniciar sesión con Google" link to `/auth/login` and a secondary "Usar otra cuenta"
+  link to `/auth/login?switch=1`;
 - an **access denied** page, sent with status 403 when authorization fails (SRV-12), saying only
-  that the account is not allowed and offering a link to `/auth/login?switch=1`;
-- a **signed out** page at `GET /auth/signed-out` (200), offering a link to `/auth/login?switch=1`.
+  that the account is not allowed and offering a link to `/auth/login?switch=1`.
+
+There is no separate signed-out page: `GET /auth/signed-out` MUST NOT exist (404).
 
 Pages for 400 callback errors MAY reuse the access-denied wording. These pages MUST NOT contain
 the email, name or any claim.
+
+#### Scenario: Login page
+
+- GIVEN a browser without a session cookie
+- WHEN it opens `/`
+- THEN it sees "Iniciar sesión con Google" and is not redirected to Google until it clicks it
 
 #### Scenario: Denied page
 

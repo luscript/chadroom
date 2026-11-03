@@ -41,3 +41,11 @@ Deviations: `recoverPanics` re-panics on `http.ErrAbortHandler`, logs no stack; 
 line on auth setup failure.
 
 All tasks complete. `go build`, `go vet`, `gofmt -l`, `go test -race -count=1 ./...` green (worker-reported).
+
+## Batch D — login page (user feedback) — done
+
+| Task | Result |
+|------|--------|
+| 6.1 | `GET /` serves `login.html` without a session (200, auth CSP, no-store, `Vary: Cookie`), chat with a session; `Sessions.Identify`; `Require()` API-only (Page mode removed); `signed-out.html` and `/auth/signed-out` removed; app.js logout/401 → `/`; README/CLAUDE.md updated |
+
+Deviation: `login.html` keeps the desktop brand header and menu strip of the old entry screen.

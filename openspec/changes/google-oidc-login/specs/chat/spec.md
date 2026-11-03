@@ -14,13 +14,13 @@ Base: `openspec/specs/chat/spec.md` plus the not-yet-archived `message-replies` 
 - "After the user clicks "Salir"" becomes "After the user clicks "Cerrar sesión"".
 - Added: after **3 consecutive** failed reconnect attempts of a room (closed before `welcome`),
   the page MUST check the session by requesting `GET /rooms`; if it answers 401 the page MUST stop
-  every retry and navigate to `/auth/login`. Any other answer keeps retrying as before.
+  every retry and navigate to `/` (the login page). Any other answer keeps retrying as before.
 
 #### Scenario: Session expired while reconnecting
 
 - GIVEN the user is in the chat and the session cookie has expired
 - WHEN the room connection drops and 3 reconnect attempts fail
-- THEN the page requests `/rooms`, receives 401 and navigates to `/auth/login`
+- THEN the page requests `/rooms`, receives 401 and navigates to `/`
 
 ### Requirement: CHAT-20 Chat page joins several rooms
 
@@ -33,7 +33,7 @@ Base: `openspec/specs/chat/spec.md` plus the not-yet-archived `message-replies` 
   "on "Cerrar sesión", follow CHAT-42".
 - "the page MUST stay on the nickname screen and show an error message instead of entering the
   chat" becomes "the page MUST show an error message instead of entering the chat; a 401 MUST
-  navigate to `/auth/login`".
+  navigate to `/`" (the server then serves the login page).
 
 There is no nickname screen and no nickname input.
 
@@ -77,11 +77,11 @@ The page MUST NOT ask for a nickname: on load it fetches the room list and enter
 
 1. send `POST /auth/logout` (same origin);
 2. leave the page on success (which closes every connection and pending retry);
-3. on a successful response, navigate to `/auth/signed-out`; otherwise re-enable the button and
+3. on a successful response, navigate to `/` (which then shows the login page); otherwise re-enable the button and
    show a system notice ("No se pudo cerrar sesión. Probá de nuevo.") — the page MUST NOT claim the
    user is signed out when the server did not confirm it.
 
-A 401 response from `/rooms`, `/gifs` or `/playlist` MUST navigate to `/auth/login` instead of
+A 401 response from `/rooms`, `/gifs` or `/playlist` MUST navigate to `/` instead of
 showing a generic error. The page MUST NOT read, store or send any session data itself (the
 cookie is `HttpOnly`).
 
@@ -90,10 +90,10 @@ cookie is `HttpOnly`).
 - GIVEN the user is in the chat
 - WHEN they click "Cerrar sesión"
 - THEN every room connection closes, `/auth/logout` is posted and the browser shows the
-  signed-out page
+  login page
 
 #### Scenario: Expired session on GIF search
 
 - GIVEN the session has expired
 - WHEN the user searches GIFs and `/gifs` responds 401
-- THEN the page navigates to `/auth/login`
+- THEN the page navigates to `/` and the login page is shown

@@ -76,3 +76,12 @@ Execution batches (file-independent groups run in parallel):
 - [x] 5.3 `CLAUDE.md`: structure (`internal/auth`, auth pages), commands (required env), conventions
   (never log cookies/tokens/codes, `newRouter` nil auth is test-only, custom recovery), change in
   progress `google-oidc-login`.
+
+## 6. Login page instead of auto-redirect (user feedback after manual test)
+
+- [x] 6.1 `GET /` without a valid session serves an embedded `login.html` (200, auth-page CSP,
+  `no-store`, `Vary: Cookie`) with the former join-view look and "Iniciar sesión con Google" →
+  `/auth/login` plus "Usar otra cuenta" → `/auth/login?switch=1`; with a session it serves the chat
+  page (`Vary: Cookie` too). Remove `signed-out.html` and `GET /auth/signed-out`. app.js: logout
+  success and every 401 navigate to `/`. Remove the now-unused `Require(Page)` mode if nothing uses
+  it. Update tests and README/CLAUDE.md (SRV-02, SRV-15, SRV-16, CHAT-16, CHAT-20, CHAT-42).

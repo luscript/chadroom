@@ -28,6 +28,7 @@
 | verify  | crombie-worker (fixes, server) | sonnet / high    | 45,476        | 14            | 104s          | G1–G8         |
 | verify  | crombie-worker (fixes, docs)   | sonnet / low     | 30,295        | 5             | 24s           | D1–D7         |
 | verify  | crombie-worker (re-run)        | sonnet / low     | 13,494        | 2             | 49s           | —             |
+| apply   | crombie-worker (batch 4)       | sonnet / high    | 60,413        | 18            | 113s          | 6.1           |
 
 ## Orchestrator
 
@@ -41,8 +42,8 @@
 |------------------------|-------------------------------------------------------|
 | explore                | 94,492                                                |
 | design                 | 103,670                                               |
-| apply                  | 295,179                                               |
+| apply                  | 355,592                                               |
 | verify                 | 353,673                                               |
-| **Sub-agent total**    | 847,014                                               |
+| **Sub-agent total**    | 907,427                                               |
 | **Orchestrator total** | [unavailable]                                         |
-| **Grand total**        | 847,014 (sub-agents only; orchestrator [unavailable]) |
+| **Grand total**        | 907,427 (sub-agents only; orchestrator [unavailable]) |
