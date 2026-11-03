@@ -12,12 +12,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// NicknameFunc returns the raw display name for a WebSocket request; the chat
+// package normalizes it (cleanText, "Anonymous", CHAT-12 suffixing).
+type NicknameFunc func(r *http.Request) string
+
 // Server routes WebSocket connections to a fixed set of rooms. It is never
 // modified after NewServer, so concurrent handlers read it without locks.
 type Server struct {
 	rooms          map[string]*Room
 	defaultRoom    *Room // first room passed to NewServer; used when ?room is missing or empty
 	allowedOrigins map[string]struct{}
+	nickname       NicknameFunc
 	upgrader       websocket.Upgrader
 }
 
@@ -27,14 +32,20 @@ type Server struct {
 // others; nil disables avatars (CHAT-28). The chat package treats avatars as opaque strings.
 // NewServer sets it on each room, so a room must belong to one Server and must not be
 // running yet.
-// It panics if rooms is empty or an id is empty or repeated (programmer error).
-func NewServer(allowedOrigins []string, validAvatar func(string) bool, rooms ...*Room) *Server {
+// nickname supplies the requested display name of each connection; HandleWebSocket never
+// reads ?nickname= itself.
+// It panics if nickname is nil, rooms is empty or an id is empty or repeated (programmer error).
+func NewServer(allowedOrigins []string, validAvatar func(string) bool, nickname NicknameFunc, rooms ...*Room) *Server {
+	if nickname == nil {
+		panic("chat: NewServer needs a nickname resolver")
+	}
 	if len(rooms) == 0 {
 		panic("chat: NewServer needs at least one room")
 	}
 	s := &Server{
 		rooms:          make(map[string]*Room, len(rooms)),
 		defaultRoom:    rooms[0],
+		nickname:       nickname,
 		allowedOrigins: make(map[string]struct{}, len(allowedOrigins)),
 	}
 	for _, r := range rooms {
@@ -90,7 +101,7 @@ func (s *Server) HandleWebSocket(c *gin.Context) {
 		avatar = "" // invalid or disabled: join without a picture, never reject (CHAT-28)
 	}
 	bio := cleanText(c.Query("bio"), maxBioRunes) // CHAT-37: blank or absent means no bio, never reject
-	room.serveConn(conn, normalizeNickname(c.Query("nickname")), avatar, bio)
+	room.serveConn(conn, normalizeNickname(s.nickname(c.Request)), avatar, bio)
 }
 
 // checkOrigin accepts same-host origins, requests without Origin (non-browser

@@ -28,6 +28,28 @@ func joinRoom(t *testing.T, srv *httptest.Server, room, nick string) (*websocket
 	return conn, users, history
 }
 
+// queryNickname is the test resolver: it reads ?nickname=, as the server did before CHAT-41.
+func queryNickname(r *http.Request) string { return r.URL.Query().Get("nickname") }
+
+// CHAT-41: the injected resolver decides the nickname; ?nickname= is ignored.
+func TestNicknameResolver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := NewServer(nil, nil, func(*http.Request) string { return "Ana Pérez" }, NewRoom("general"))
+	engine := gin.New()
+	engine.GET("/ws", s.HandleWebSocket)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	srv := httptest.NewServer(engine)
+	defer srv.Close()
+
+	conn := dialRaw(t, srv, "Mallory")
+	var w message
+	if err := json.Unmarshal(readRaw(t, conn), &w); err != nil || w.From != "Ana Pérez" {
+		t.Fatalf("welcome from = %q (err %v), want %q", w.From, err, "Ana Pérez")
+	}
+}
+
 func TestNewServerPanics(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -44,9 +66,17 @@ func TestNewServerPanics(t *testing.T) {
 					t.Fatal("expected panic")
 				}
 			}()
-			NewServer(nil, nil, tt.rooms...)
+			NewServer(nil, nil, queryNickname, tt.rooms...)
 		})
 	}
+	t.Run("nil resolver", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected panic")
+			}
+		}()
+		NewServer(nil, nil, nil, NewRoom("general"))
+	})
 }
 
 // SRV-06: unknown room ids are rejected before the upgrade.
@@ -158,7 +188,7 @@ func dialOriginRoom(srv *httptest.Server, nick, room, origin string) (*websocket
 // SRV-03: Run returns only after every room has stopped.
 func TestServerRunWaitsForAllRooms(t *testing.T) {
 	r1, r2 := NewRoom("one"), NewRoom("two")
-	s := NewServer(nil, nil, r1, r2)
+	s := NewServer(nil, nil, queryNickname, r1, r2)
 	ctx, cancel := context.WithCancel(context.Background())
 	returned := make(chan struct{})
 	go func() {
@@ -209,7 +239,7 @@ func TestCheckOrigin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := NewServer(tt.allowed, nil, NewRoom("general"))
+			s := NewServer(tt.allowed, nil, queryNickname, NewRoom("general"))
 			r := httptest.NewRequest("GET", "http://example.com/ws", nil)
 			if tt.origin != "" {
 				r.Header.Set("Origin", tt.origin)

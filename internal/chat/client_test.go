@@ -36,7 +36,7 @@ func startRooms(t *testing.T, allowed []string, rooms ...*Room) (srv *httptest.S
 func startAvatarRooms(t *testing.T, valid func(string) bool, allowed []string, rooms ...*Room) (srv *httptest.Server, cancel context.CancelFunc) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	s := NewServer(allowed, valid, rooms...)
+	s := NewServer(allowed, valid, queryNickname, rooms...)
 	engine := gin.New()
 	engine.GET("/ws", s.HandleWebSocket)
 
@@ -429,7 +429,7 @@ func TestNicknameNormalization(t *testing.T) {
 // the pumps started: writePump must see the closed channel and close the connection.
 func TestDroppedSlowClientConnectionIsClosed(t *testing.T) {
 	room := NewRoom("general")
-	s := NewServer(nil, nil, room)
+	s := NewServer(nil, nil, queryNickname, room)
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.GET("/ws", s.HandleWebSocket)
