@@ -213,3 +213,16 @@ Sources: `changes/archive/2026-10-22-fix-channel-handling/exploration.md` (initi
 - [ ] The flow cookie can't use `__Host-` (Path=/auth): keep untrusted subdomains off the parent
       domain.
 - [ ] Split the callback in `internal/auth/oidc.go` into steps if it grows.
+
+## `account-sessions` (next change, after `google-oidc-login` is merged)
+One identity per Google account instead of per connection: a second window or device of the same
+account is the same user, not `Name (2)`. Changes CHAT-04 (identity by connection) and CHAT-12
+(suffixes only for different people with the same name). Sync, don't force a single window.
+- [ ] Room keys users by session email with a set of connections per account (hub pattern, no
+      locks; only `Room.Run` touches the registry).
+- [ ] `join` only on the account's first connection, `leave` only on its last one; one entry per
+      person in `users`.
+- [ ] DMs delivered to every connection of the recipient and echoed to the sender's other
+      connections (today a DM reaches only the first window).
+- [ ] Profile (avatar/bio) shared across the account's connections; decide typing behaviour.
+- [ ] Tests: two connections of one account in a room, DM fan-out, leave on last close.
