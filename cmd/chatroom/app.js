@@ -2191,10 +2191,13 @@
     $('music-global-mute').setAttribute('aria-pressed', String(music.muted));
     $('music-global-mute').textContent = music.muted ? '🔇' : '🎵';
   }
-  function setMusicMuted(muted) {
+  function applyMusicMuted(muted) {
     music.muted = muted;
     renderMusicMute();
     ytCommand(muted ? 'mute' : 'unMute');
+  }
+  function setMusicMuted(muted) {
+    applyMusicMuted(muted);
     try {
       if (muted) localStorage.setItem(MUSIC_MUTED_KEY, '1'); else localStorage.removeItem(MUSIC_MUTED_KEY);
     } catch { /* storage blocked: the choice just isn't remembered */ }
@@ -2202,6 +2205,17 @@
   $('music-mute').addEventListener('click', () => setMusicMuted(!music.muted));
   $('music-global-mute').addEventListener('click', () => setMusicMuted(!music.muted));
   renderMusicMute();
+  // Mute choices are per browser: mirror a toggle made in another tab (the event never fires in the writing tab).
+  window.addEventListener('storage', (e) => {
+    if (e.key !== null && e.key !== MUTED_KEY && e.key !== MUSIC_MUTED_KEY) return;
+    const on = e.key === null ? false : e.newValue === '1';
+    if (e.key === null || e.key === MUTED_KEY) {
+      if (soundMuted !== on) { soundMuted = on; renderMute(); }
+    }
+    if (e.key === null || e.key === MUSIC_MUTED_KEY) {
+      if (music.muted !== on) applyMusicMuted(on);
+    }
+  });
   $('music-volume').addEventListener('input', () => {
     ytCommand('setVolume', [Number($('music-volume').value)]);
   });

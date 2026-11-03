@@ -1865,7 +1865,8 @@ fail silently and keep working.
 
 The chat header MUST offer a single global toggle (🔔 on / 🔕 muted, with `aria-pressed`)
 that mutes the sound for every room and private conversation. The choice MUST be remembered
-in the browser (`localStorage`, best effort) and restored on the next visit. Muting MUST NOT
+in the browser (`localStorage`, best effort), restored on the next visit and applied right away
+in the browser's other open tabs of the page. Muting MUST NOT
 affect the tab indicator (CHAT-33) nor the unread badges.
 
 #### Scenario: Message in another room
@@ -1918,6 +1919,12 @@ affect the tab indicator (CHAT-33) nor the unread badges.
 - THEN no sound plays
 - AND after reloading the page and joining again, the toggle still shows 🔕
 
+#### Scenario: Mute follows in the other tab
+
+- GIVEN Ana has the chat open in two tabs of the same browser
+- WHEN she presses 🔔 in one of them
+- THEN the other tab shows 🔕 and plays no sound, without reloading
+
 ### Requirement: CHAT-33 Chat page tab indicator
 
 While the page is unattended, every notifying message (CHAT-32), muted or not and including those
@@ -1952,8 +1959,8 @@ conversation, a toggle (🎵 on / 🔇 muted, with `aria-pressed`) that mutes th
 this browser only. It MUST NOT send any control and MUST NOT affect other users. While muted the
 page MUST keep following the room's state (CHAT-31), so unmuting resumes at the room's current
 position. The toggle and the in-player local mute (CHAT-31) MUST reflect one single state. The
-choice MUST be remembered in the browser (`localStorage`, best effort) and restored on the next
-visit. It is independent of the notification sound toggle (CHAT-32). The toggle MUST NOT be
+choice MUST be remembered in the browser (`localStorage`, best effort), restored on the next
+visit and applied right away in the browser's other open tabs of the page. It is independent of the notification sound toggle (CHAT-32). The toggle MUST NOT be
 shown while the user is not joined to `musica`.
 
 While the user is joined to `musica`, a track is current and the shown pane does not belong to
@@ -1983,6 +1990,12 @@ it (so nothing plays, CHAT-31) it MUST read "Abrí #musica para escuchar". It MU
 - GIVEN Ana muted the music and reloads the page
 - WHEN she joins `musica` and a track plays
 - THEN the music is muted and the toggle shows 🔇
+
+#### Scenario: Music mute follows in the other tab
+
+- GIVEN Ana is joined to `musica` in two tabs of the same browser and a track plays
+- WHEN she presses 🔇 in one of them
+- THEN the music is muted in both tabs and both toggles show 🔇
 
 #### Scenario: Now playing outside musica
 
