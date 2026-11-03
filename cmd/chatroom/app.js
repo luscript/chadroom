@@ -389,6 +389,7 @@
   window.addEventListener('keydown', unlockAudio, { once: true });
 
   function showStartError() {
+    if (loggingIn) return;
     $('start-status').hidden = true;
     $('start-error').textContent = 'No pudimos cargar las salas. Probá de nuevo.';
     $('start-error').hidden = false;
@@ -416,6 +417,7 @@
 
   // No onopen handler: a room is online only once its welcome frame arrives.
   function connect(room) {
+    if (loggingIn) return;
     room.retryTimer = null;
     const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
     const socket = new WebSocket(scheme + location.host + '/ws?room=' + encodeURIComponent(room.id) +
@@ -434,6 +436,7 @@
 
   // Exponential backoff with equal jitter: 0.5-1 s, 1-2 s, 2-4 s ... 15-30 s.
   function scheduleReconnect(room) {
+    if (loggingIn) return;
     room.ws = null;
     if (popupUser?.room === room) closeUserPopup(false);
     clearAllTyping(room);
@@ -493,7 +496,7 @@
       location.replace('/auth/signed-out');
     } catch {
       btn.disabled = false;
-      addSystem(active, 'No se pudo cerrar sesión. Probá de nuevo.');
+      addSystem(current(), 'No se pudo cerrar sesión. Probá de nuevo.');
     }
   });
 

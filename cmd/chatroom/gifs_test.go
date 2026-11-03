@@ -45,7 +45,7 @@ func fakeUpstream(t *testing.T, h http.HandlerFunc) *upstream {
 
 func newGifTestServer(t *testing.T, g *gifSearch) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewServer(newRouter(newChatServer(nil, queryNickname), g, nil, nil))
+	ts := httptest.NewServer(newRouter(newChatServer(nil, queryNickname), g, nil, openGuards()))
 	t.Cleanup(ts.Close)
 	return ts
 }

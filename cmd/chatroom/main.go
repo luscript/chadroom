@@ -144,7 +144,8 @@ func identityNickname(r *http.Request) string {
 	if !ok {
 		return ""
 	}
-	if name := strings.TrimSpace(id.Name); name != "" {
+	// CHAT-41: the name counts only if something is left of it once the chat's nickname rules apply.
+	if name := strings.TrimSpace(id.Name); chat.CleanNickname(name) != "" {
 		return name
 	}
 	if i := strings.LastIndexByte(id.Email, '@'); i > 0 {
@@ -197,12 +198,27 @@ func serveRooms(c *gin.Context) {
 	}{roomIDs})
 }
 
-// newRouter registers the pages, static assets, room list and WebSocket endpoint. a protects them
-// with a session; nil leaves them open and is for tests only (run never passes nil).
+// guards is what protects the router: the session checks for pages and APIs and the /auth routes.
+// newRouter panics on a missing field, so no router can run unauthenticated by accident.
+type guards struct {
+	page, api gin.HandlerFunc
+	register  func(*gin.RouterGroup)
+}
+
+// authGuards builds the guards from the auth handler; run always uses it.
+func authGuards(a *auth.Handler) guards {
+	return guards{
+		page:     a.Sessions().Require(auth.Page),
+		api:      a.Sessions().Require(auth.API),
+		register: a.Register,
+	}
+}
+
+// newRouter registers the pages, static assets, room list and WebSocket endpoint behind g.
 // /gifs and /playlist are registered only when gifs / playlists are non-nil, so without their key
 // they are a plain 404.
-func newRouter(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport, a *auth.Handler) *gin.Engine {
-	return newRouterLogging(chatSrv, gifs, playlists, a, gin.DefaultWriter)
+func newRouter(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport, g guards) *gin.Engine {
+	return newRouterLogging(chatSrv, gifs, playlists, g, gin.DefaultWriter)
 }
 
 // logFormatter is gin's default log line but without the query string: /ws carries the
@@ -214,17 +230,16 @@ func logFormatter(p gin.LogFormatterParams) string {
 }
 
 // newRouterLogging is newRouter writing its request log to logw.
-func newRouterLogging(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport, a *auth.Handler, logw io.Writer) *gin.Engine {
+func newRouterLogging(chatSrv *chat.Server, gifs *gifSearch, playlists *playlistImport, g guards, logw io.Writer) *gin.Engine {
+	if g.page == nil || g.api == nil || g.register == nil {
+		panic("newRouter: incomplete guards")
+	}
 	r := gin.New()
 	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{Output: logw, Formatter: logFormatter}), recoverPanics)
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("set trusted proxies: %v", err)
 	}
-	noop := func(*gin.Context) {}
-	page, api := gin.HandlerFunc(noop), gin.HandlerFunc(noop)
-	if a != nil {
-		page, api = a.Sessions().Require(auth.Page), a.Sessions().Require(auth.API)
-	}
+	page, api := g.page, g.api
 	// Protected: the session check runs before the handler, so /ws answers 401 before any room 404
 	// or origin 403 (SRV-06). /app.js is a script fetch, which cannot follow a login redirect.
 	r.GET("/", page, servePage)
@@ -243,9 +258,7 @@ func newRouterLogging(chatSrv *chat.Server, gifs *gifSearch, playlists *playlist
 	r.GET("/favicon-unread.svg", serveAsset("image/svg+xml", faviconUnreadSVG))
 	ag := r.Group("/auth")
 	ag.GET("/signed-out", serveAuthPage(http.StatusOK, signedOutHTML))
-	if a != nil {
-		a.Register(ag)
-	}
+	g.register(ag)
 	return r
 }
 
@@ -333,7 +346,7 @@ func run(ctx context.Context, ln net.Listener, cfg config) int {
 	}()
 
 	srv := &http.Server{
-		Handler:           newRouter(chatSrv, gifs, playlists, authHandler),
+		Handler:           newRouter(chatSrv, gifs, playlists, authGuards(authHandler)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    8 << 10,

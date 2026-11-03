@@ -73,6 +73,6 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - La key de Giphy nunca se loguea ni se devuelve: `fetch` en `gifs.go` descarta el error de transporte (`*url.Error` trae la URL con `api_key`). La key de YouTube va en el header `X-Goog-Api-Key`, nunca en la URL ni en los logs.
 - Nunca loguear cookies, tokens, códigos de auth, state/nonce ni `err.Error()` del intercambio OAuth.
 - `gin.Recovery()` se reemplaza por una recovery propia porque la de gin vuelca el header `Cookie`.
-- `newRouter` con auth `nil` es solo para tests.
+- `newRouter` exige `guards` completos (panic si falta uno): producción los arma siempre con `authGuards(handler)`; los tests usan `openGuards()` (`auth_test.go`).
 - El nickname sale de la sesión (`chat.NicknameFunc`); `?nickname=` se ignora.
 - Cambios con diseño van por SDD en `openspec/changes/`. En curso: `google-oidc-login`. `message-replies` y `user-profiles` ya están mergeados, falta archivarlos.
