@@ -289,8 +289,8 @@ incluido quien lo envió, con exactamente estos campos (`pos` ya es la posición
 `seq` crece cada vez que un video pasa a ser el actual; `queue` es la lista de pendientes
 (`[]` si no hay), cada uno con su `id` asignado por el servidor, su `video` y quién lo agregó (`by`).
 
-Quien entra con un video cargado recibe ese frame justo después de `history` (`welcome` → `users`
-→ `history` → `music` → `join`); sin video cargado no recibe ninguno. No entra al `history`. Si
+Quien entra con un video cargado recibe ese frame justo antes de `history` (`welcome` → `users`
+→ `music` → `history` → `join`); sin video cargado no recibe ninguno. No entra al `history`. Si
 se va el último cliente de la sala, el reproductor queda en pausa en la posición actual. El
 estado vive solo en memoria: se pierde al reiniciar el servidor.
 
@@ -312,9 +312,14 @@ Además hay dos frames privados que solo recibe quien se conecta y que no llevan
 - `history`: los últimos 50 mensajes `chat` (con su `id` y `reply`), del más viejo al más nuevo (`[]` si no hay). Vive solo
   en memoria: se pierde al reiniciar el servidor.
 
-**Secuencia al conectarse:** `welcome` → `users` → `history` → `join` (este último lo reciben todos,
-incluido el que entra). Si falla la entrega de alguno de los tres privados, el cliente se descarta
-sin anunciar `join` ni `leave`.
+**Secuencia al conectarse:** `welcome` → `users` → [`music`] → `history` → `join` (este último lo
+reciben todos, incluido el que entra; `music` solo si hay un video cargado). Si falla la entrega de
+alguno de los privados, el cliente se descarta sin anunciar `join` ni `leave`.
+
+**Cuentas:** la identidad es la cuenta (el email de la sesión). Las demás conexiones de la misma
+cuenta en una sala comparten su nickname y su perfil, y no generan `join` ni `leave`: el `join` se
+anuncia con la primera conexión y el `leave` con la última. Los mensajes privados llegan a todas las
+conexiones de ambas cuentas. Una conexión sin cuenta recibe 401.
 
 **Clientes lentos:** si la sala descarta a un cliente por no leer a tiempo, ahora los demás reciben
 su `leave`. Al apagar el servidor no se envía ningún `leave`.

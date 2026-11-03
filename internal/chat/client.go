@@ -38,9 +38,11 @@ type Client struct {
 	conn       *websocket.Conn
 	send       chan []byte
 	registered chan struct{} // closed by Run once nickname is final
-	nickname   string        // requested until registered is closed, final after
-	avatar     string        // allowed URL or ""; set before register, then written only by Room.Run (CHAT-28, CHAT-38)
-	bio        string        // cleanText(..., maxBioRunes) or ""; same ownership as avatar (CHAT-37)
+	account    string        // private account key; set before register, immutable; never sent nor logged (CHAT-04)
+	nickname   string        // requested until registered is closed, then member.nickname (pumps read it for logError only)
+	reqAvatar  string        // requested allowed URL or ""; seeds a NEW member only, never read after admit (CHAT-28)
+	reqBio     string        // requested cleanText(..., maxBioRunes) or ""; same use as reqAvatar (CHAT-37)
+	member     *member       // set by Run in attach, Run-only; not cleared on removal so the leave path can still name it
 }
 
 // logError logs abnormal connection errors with the room and nickname, skipping the

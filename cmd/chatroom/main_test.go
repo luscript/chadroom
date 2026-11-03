@@ -11,7 +11,9 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,13 +23,23 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// queryNickname takes the nickname from ?nickname=, as the tests without a session do.
-func queryNickname(r *http.Request) string { return r.URL.Query().Get("nickname") }
+// connSeq numbers the accounts queryIdentity invents.
+var connSeq atomic.Int64
+
+// queryIdentity is the test resolver without a session: the nickname comes from ?nickname=, the
+// account from ?account= or, when absent, a fresh one (every connection is a different person).
+func queryIdentity(r *http.Request) (account, nickname string) {
+	account = r.URL.Query().Get("account")
+	if account == "" {
+		account = "conn-" + strconv.FormatInt(connSeq.Add(1), 10)
+	}
+	return account, r.URL.Query().Get("nickname")
+}
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	chatSrv := newChatServer(nil, queryNickname)
+	chatSrv := newChatServer(nil, queryIdentity)
 	ctx, cancel := context.WithCancel(context.Background())
 	go chatSrv.Run(ctx)
 	ts := httptest.NewServer(newRouter(chatSrv, nil, nil, openGuards()))
@@ -904,7 +916,7 @@ func TestPlaylistIDMirroredInJS(t *testing.T) {
 func TestRequestLogOmitsQuery(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var buf bytes.Buffer
-	r := newRouterLogging(newChatServer(nil, queryNickname), nil, nil, openGuards(), &buf)
+	r := newRouterLogging(newChatServer(nil, queryIdentity), nil, nil, openGuards(), &buf)
 	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ws?nickname=x&bio=secreto", nil))
 	out := buf.String()
 	if !strings.Contains(out, `"/ws"`) {

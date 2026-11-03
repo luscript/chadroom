@@ -12,9 +12,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// NicknameFunc returns the raw display name for a WebSocket request; the chat
-// package normalizes it (cleanText, "Anonymous", CHAT-12 suffixing).
-type NicknameFunc func(r *http.Request) string
+// IdentityFunc returns the private account key and the raw display name for a WebSocket
+// request. The chat package treats account as opaque (never sent, never logged) and
+// normalizes the nickname (cleanText, "Anonymous", CHAT-12 suffixing). An empty account
+// means the connection is not admitted (CHAT-41).
+type IdentityFunc func(r *http.Request) (account, nickname string)
 
 // Server routes WebSocket connections to a fixed set of rooms. It is never
 // modified after NewServer, so concurrent handlers read it without locks.
@@ -22,7 +24,7 @@ type Server struct {
 	rooms          map[string]*Room
 	defaultRoom    *Room // first room passed to NewServer; used when ?room is missing or empty
 	allowedOrigins map[string]struct{}
-	nickname       NicknameFunc
+	identity       IdentityFunc
 	upgrader       websocket.Upgrader
 }
 
@@ -32,12 +34,12 @@ type Server struct {
 // others; nil disables avatars (CHAT-28). The chat package treats avatars as opaque strings.
 // NewServer sets it on each room, so a room must belong to one Server and must not be
 // running yet.
-// nickname supplies the requested display name of each connection; HandleWebSocket never
-// reads ?nickname= itself.
-// It panics if nickname is nil, rooms is empty or an id is empty or repeated (programmer error).
-func NewServer(allowedOrigins []string, validAvatar func(string) bool, nickname NicknameFunc, rooms ...*Room) *Server {
-	if nickname == nil {
-		panic("chat: NewServer needs a nickname resolver")
+// identity supplies the account key and requested display name of each connection;
+// HandleWebSocket never reads ?nickname= itself.
+// It panics if identity is nil, rooms is empty or an id is empty or repeated (programmer error).
+func NewServer(allowedOrigins []string, validAvatar func(string) bool, identity IdentityFunc, rooms ...*Room) *Server {
+	if identity == nil {
+		panic("chat: NewServer needs an identity resolver")
 	}
 	if len(rooms) == 0 {
 		panic("chat: NewServer needs at least one room")
@@ -45,7 +47,7 @@ func NewServer(allowedOrigins []string, validAvatar func(string) bool, nickname 
 	s := &Server{
 		rooms:          make(map[string]*Room, len(rooms)),
 		defaultRoom:    rooms[0],
-		nickname:       nickname,
+		identity:       identity,
 		allowedOrigins: make(map[string]struct{}, len(allowedOrigins)),
 	}
 	for _, r := range rooms {
@@ -79,8 +81,8 @@ func (s *Server) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-// HandleWebSocket resolves the room first (unknown id: 404, nothing upgraded),
-// then upgrades the connection, which applies the origin check (403).
+// HandleWebSocket resolves the room first (unknown id: 404, nothing upgraded), then the
+// identity (no account: 401), then upgrades the connection, which applies the origin check (403).
 func (s *Server) HandleWebSocket(c *gin.Context) {
 	room := s.defaultRoom
 	if id := c.Query("room"); id != "" {
@@ -90,6 +92,11 @@ func (s *Server) HandleWebSocket(c *gin.Context) {
 			return
 		}
 		room = r
+	}
+	account, nickname := s.identity(c.Request)
+	if account == "" {
+		c.AbortWithStatus(http.StatusUnauthorized) // no body and no log: nothing identifies the caller
+		return
 	}
 	conn, err := s.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -101,7 +108,7 @@ func (s *Server) HandleWebSocket(c *gin.Context) {
 		avatar = "" // invalid or disabled: join without a picture, never reject (CHAT-28)
 	}
 	bio := cleanText(c.Query("bio"), maxBioRunes) // CHAT-37: blank or absent means no bio, never reject
-	room.serveConn(conn, normalizeNickname(s.nickname(c.Request)), avatar, bio)
+	room.serveConn(conn, account, normalizeNickname(nickname), avatar, bio)
 }
 
 // checkOrigin accepts same-host origins, requests without Origin (non-browser

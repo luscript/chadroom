@@ -174,7 +174,7 @@
       status: 'connecting', myName: '', users: new Set(), lastAuthor: null, unread: 0,
       avatars: new Map(), // nick -> image url, only for members with a picture
       bios: new Map(), // nick -> bio text, only for members with one
-      resendProfile: false, // profile saved while the socket was connecting: send it after welcome
+      resendProfile: false, // profile saved while the socket was not open: send it after welcome
       typing: new Map(), // nick -> timeout id of who is typing here now
       msgs: new Map(), // message id -> {li, from, text}: what can be quoted or jumped to
     };
@@ -629,6 +629,8 @@
     }
     if (msg.type === 'history') {
       if (Array.isArray(msg.messages)) renderHistory(room, msg.messages);
+      // History is the last private frame: no snapshot before it means the server has no track (it may have restarted).
+      if (room.id === MUSIC_ROOM && music.awaitSnapshot) closeSnapshotSlot();
       return;
     }
     // music carries no from (it has by) and exists only in the player room.
@@ -647,6 +649,7 @@
       case 'welcome':
         room.myName = msg.from;
         setMemberProfile(room, msg.from, msg.avatar, msg.bio);
+        if (room.resendProfile) { room.resendProfile = false; sendProfile(room); } else adoptOwnProfile(room);
         if (room === active) {
           $('me').textContent = room.myName;
           $('profile-nick').textContent = room.myName;
@@ -655,8 +658,7 @@
           renderProfile();
         }
         room.attempt = 0;
-        if (room.resendProfile) { room.resendProfile = false; sendProfile(room); }
-        if (room.id === MUSIC_ROOM) music.awaitSnapshot = true; // a snapshot, if any, comes before our own join
+        if (room.id === MUSIC_ROOM) music.awaitSnapshot = true; // a snapshot, if any, comes before history
         setStatus(room, 'online');
         break;
       case 'chat':
@@ -700,18 +702,6 @@
         setMemberProfile(room, msg.from, msg.avatar, msg.bio);
         if (room === active) renderUsers();
         addSystem(room, msg.from + ' se unió 🎉');
-        // Our own join closes the snapshot slot: no snapshot means the server has no track (it may have restarted).
-        if (room.id === MUSIC_ROOM && msg.from === room.myName && music.awaitSnapshot) {
-          music.awaitSnapshot = false;
-          music.srv = null;
-          music.loadedSeq = 0;
-          music.endedSeq = 0;
-          music.finishedSeq = 0;
-          music.duration = 0;
-          renderQueue();
-          renderMusic();
-          reconcile();
-        }
         break;
       case 'leave':
         room.users.delete(msg.from);
@@ -735,6 +725,19 @@
         break;
       // Unknown types are ignored so newer servers don't break this page.
     }
+  }
+
+  // Drops the music snapshot state so the next music frame is treated as a fresh one.
+  function closeSnapshotSlot() {
+    music.awaitSnapshot = false;
+    music.srv = null;
+    music.loadedSeq = 0;
+    music.endedSeq = 0;
+    music.finishedSeq = 0;
+    music.duration = 0;
+    renderQueue();
+    renderMusic();
+    reconcile();
   }
 
   // A frame's avatar/bio replace what the page knows about nick; absent or invalid means none.
@@ -1209,7 +1212,7 @@
     saveNote(noteInput.value.replace(/\s+/g, ' ').trim());
     for (const room of joinedRooms()) {
       if (room.ws?.readyState === WebSocket.OPEN) sendProfile(room);
-      else if (room.ws?.readyState === WebSocket.CONNECTING) room.resendProfile = true;
+      else room.resendProfile = true;
     }
     profileSaveLocked = true;
     clearTimeout(profileSaveTimer);
@@ -1481,7 +1484,7 @@
     blocked: false, // the browser refused to start playback: ask for a click again
     frame: null, ready: false, listenTimer: null,
     srv: null, // {video, playing, pos, by, seq, queue, at}: the server's state, the only thing the UI shows
-    awaitSnapshot: false, // between welcome and our own join: a snapshot may still arrive
+    awaitSnapshot: false, // between welcome and history: a snapshot may still arrive
     loadedSeq: 0, // seq of the track handed to the player (0 = none); ids repeat, seq does not
     endedSeq: 0, // seq whose end this page already reported
     endedAt: 0, // when that report was sent

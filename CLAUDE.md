@@ -74,5 +74,7 @@ openspec/            SDD: specs/ (vigentes), changes/ (en curso), changes/archiv
 - Nunca loguear cookies, tokens, códigos de auth, state/nonce ni `err.Error()` del intercambio OAuth.
 - `gin.Recovery()` se reemplaza por una recovery propia porque la de gin vuelca el header `Cookie`.
 - `newRouter` exige `guards` completos (panic si falta uno): producción los arma siempre con `authGuards(handler)`; los tests usan `openGuards()` (`auth_test.go`).
-- El nickname sale de la sesión (`chat.NicknameFunc`); `?nickname=` se ignora.
-- Cambios con diseño van por SDD en `openspec/changes/`. Sin cambios en curso; el próximo es `account-sessions` (ver `openspec/backlog.md`).
+- La identidad sale de la sesión (`chat.IdentityFunc`: cuenta + nickname); `?nickname=` se ignora.
+  La cuenta (email de la sesión) es privada: nunca se manda al navegador ni se loguea. Las
+  conexiones de una misma cuenta en una sala comparten `member` (nickname y perfil).
+- Cambios con diseño van por SDD en `openspec/changes/`. Sin cambios en curso; pendientes en `openspec/backlog.md`.
